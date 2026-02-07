@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="network_security_config">
+        &lt;?xml version="1.0" encoding="utf-8"?&gt;
+        &lt;network-security-config&gt;
+            &lt;base-config cleartextTrafficPermitted="true"&gt;
+                &lt;trust-anchors&gt;
+                    &lt;certificates src="system"/&gt;
+                    &lt;certificates src="user"/&gt;
+                &lt;/trust-anchors&gt;
+            &lt;/base-config&gt;
+            &lt;domain-config cleartextTrafficPermitted="true"&gt;
+                &lt;domain includeSubdomains="true"&gt;10.108.162.8&lt;/domain&gt;
+                &lt;domain includeSubdomains="true"&gt;localhost&lt;/domain&gt;
+                &lt;domain includeSubdomains="true"&gt;10.0.2.2&lt;/domain&gt;
+                &lt;domain includeSubdomains="true"&gt;127.0.0.1&lt;/domain&gt;
+            &lt;/domain-config&gt;
+        &lt;/network-security-config&gt;
+    &lt;/string&gt;
+</resources>

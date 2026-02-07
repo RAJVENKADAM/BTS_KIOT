@@ -1,0 +1,14 @@
+node_modules/
+npm-debug.*
+*.jks
+*.pem
+*.log
+.DS_Store
+web-build/
+*.jks
+*.p8
+*.cer
+*.p12
+*.mobileprovision
+template-files/*
+.expo/
