@@ -2,11 +2,11 @@ import Constants from "expo-constants";
 
 const getApiBaseUrl = () => {
   // Use your actual PC IP address
-  return "http://10.108.162.8:5000";
-  
+  return "http://10.197.120.77:5000";
+
   // FOR TESTING: Force localhost
   // return "http://localhost:5000";
-  
+
   // Works reliably in Expo Go
   const hostUri =
     Constants.expoConfig?.hostUri ||
@@ -33,7 +33,7 @@ const getApiBaseUrl = () => {
   }
 
   // FINAL fallback (your PC IP)
-  return "http://10.108.162.8:5000";
+  return "http://10.12.232.134:5000";
 };
 
 export const API_BASE_URL = getApiBaseUrl();
@@ -43,11 +43,11 @@ export const healthCheck = async () => {
   try {
     const res = await fetch(`${API_BASE_URL}/health`);
     console.log("Health check response status:", res.status);
-    
+
     // SAFELY handle response
     const rawText = await res.text();
     console.log("RAW HEALTH RESPONSE:", rawText);
-    
+
     const data = rawText ? JSON.parse(rawText) : {};
     console.log("Health check response data:", data);
     return data;
@@ -58,3 +58,4 @@ export const healthCheck = async () => {
     throw err;
   }
 };
+

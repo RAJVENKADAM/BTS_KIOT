@@ -25,7 +25,7 @@ async function updateLocation(req, res) {
 
     // Validate coordinates
     if (typeof latitude !== 'number' || typeof longitude !== 'number' ||
-        latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
+      latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
       return res.status(400).json({ error: 'Invalid coordinates' });
     }
 
@@ -68,36 +68,32 @@ async function updateLocation(req, res) {
   }
 }
 
+const trackingService = require('../services/trackingService');
+
 // Get live location for a specific bus
 async function getLiveLocation(req, res) {
   try {
     const { busNo } = req.params;
-    const userId = req.user.id;
 
-    // Check if user has permission to view this bus location
-    const [userResult] = await pool.execute(
-      'SELECT id, role, bus_no FROM users WHERE id = ? AND is_active = TRUE',
-      [userId]
-    );
-
-    if (userResult.length === 0) {
-      return res.status(404).json({ error: 'User not found' });
+    // First check memory state for immediate live data
+    const memState = trackingService.busTrackingState[busNo];
+    if (memState && memState.activeSource !== 'none') {
+      const data = memState.activeSource === 'mobile' ? memState.mobile : memState.gps;
+      return res.status(200).json({
+        busNo: busNo,
+        latitude: data.latitude,
+        longitude: data.longitude,
+        isOnline: true,
+        status: memState.activeSource,
+        lastUpdated: new Date(data.timestamp)
+      });
     }
 
-    const user = userResult[0];
-    const hasPermission = 
-      user.role === 'SUPERADMIN' || 
-      user.bus_no === busNo;
-
-    if (!hasPermission) {
-      return res.status(403).json({ error: 'Insufficient permissions to view this bus location' });
-    }
-
-    // Get live location
+    // Fallback to database
     const [locationResult] = await pool.execute(`
       SELECT bl.*, u.name as driver_name 
       FROM bus_live_locations bl
-      LEFT JOIN users u ON bl.user_id = u.id
+      LEFT JOIN users u ON bl.bus_no = u.bus_no AND u.role = 'primary_admin'
       WHERE bl.bus_no = ?
     `, [busNo]);
 

@@ -1,12 +1,12 @@
 import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { useAuth } from '../context/AuthContext';
-import Icon from 'react-native-vector-icons/Ionicons';
+import { Ionicons as Icon } from '@expo/vector-icons';
 import { COLORS } from '../theme';
 
 // Import screens
 import HomeScreen from '../screens/HomeScreen';
-import MessagesScreen from '../screens/MessagesScreen';
+// import MessagesScreen from '../screens/MessagesScreen';
 import TrackMeScreen from '../screens/TrackMe/TrackMeScreen';
 import OrganizeScreen from '../screens/OrganizeScreen';
 import ProfileScreen from '../screens/ProfileScreen';
@@ -20,38 +20,20 @@ export default function BottomNavigator() {
     return null;
   }
 
-  const role = user?.role || 'USER';
+  const role = (user?.role || 'student').toLowerCase();
+  console.log('BOTTOM NAVIGATOR - Current User:', user?.email, 'Role:', role);
 
   const renderTabs = () => {
-    switch (role) {
-      case 'SUPERADMIN':
-        return (
-          <>
-            <Tab.Screen name="Home" component={HomeScreen} />
-            <Tab.Screen name="Messages" component={MessagesScreen} />
-            <Tab.Screen name="Organize" component={OrganizeScreen} />
-            <Tab.Screen name="Profile" component={ProfileScreen} />
-          </>
-        );
-      case 'PRIMARY_ADMIN':
-        return (
-          <>
-            <Tab.Screen name="Home" component={HomeScreen} />
-            <Tab.Screen name="Messages" component={MessagesScreen} />
-            <Tab.Screen name="TrackMe" component={TrackMeScreen} />
-            <Tab.Screen name="Profile" component={ProfileScreen} />
-          </>
-        );
-      case 'USER':
-      default:
-        return (
-          <>
-            <Tab.Screen name="Home" component={HomeScreen} />
-            <Tab.Screen name="Messages" component={MessagesScreen} />
-            <Tab.Screen name="Profile" component={ProfileScreen} />
-          </>
-        );
+    const screens = [     <Tab.Screen key="Home" name="Home" component={HomeScreen} />   ];
+
+    if (role === 'superadmin') {
+      screens.push(<Tab.Screen key="Organize" name="Organize" component={OrganizeScreen} />);
+    } else if (role === 'primary_admin') {
+      screens.push(<Tab.Screen key="TrackMe" name="TrackMe" component={TrackMeScreen} />);
     }
+
+    screens.push(<Tab.Screen key="Profile" name="Profile" component={ProfileScreen} />);
+    return screens;
   };
 
   return (
@@ -61,11 +43,7 @@ export default function BottomNavigator() {
         tabBarIcon: ({ focused, color, size }) => {
           let iconName = 'home';
 
-          if (route.name === 'Home') {
-            iconName = focused ? 'home' : 'home-outline';
-          } else if (route.name === 'Messages') {
-            iconName = focused ? 'chatbubbles' : 'chatbubbles-outline';
-          } else if (route.name === 'TrackMe') {
+          if (route.name === 'Home') { iconName = focused ? 'home' : 'home-outline';        } else if (route.name === 'TrackMe') {
             iconName = focused ? 'locate' : 'locate-outline';
           } else if (route.name === 'Organize') {
             iconName = focused ? 'settings' : 'settings-outline';

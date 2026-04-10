@@ -25,10 +25,12 @@ async function uploadExcelUsers(req, res) {
     console.log('Processing file from buffer, size:', req.file.buffer.length);
 
     // Process the Excel file with tracking
+    const customName = req.body.customName || null;
     const result = await ExcelManagementService.processExcelWithTracking(
       req.file.buffer,
       req.file.originalname,
-      req.user.id
+      req.user.id,
+      customName
     );
     
     console.log('Excel file processed with tracking, results:', result);
@@ -37,6 +39,7 @@ async function uploadExcelUsers(req, res) {
     res.status(200).json({
       message: 'Excel users processed successfully',
       excelUploadId: result.excelUploadId,
+      customName: customName,
       results: {
         created: result.results.created.length,
         updated: result.results.updated.length,

@@ -9,6 +9,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { CommonActions } from '@react-navigation/native';
 import { useAuth } from '../context/AuthContext';
 import { COLORS, SPACING } from '../theme';
 import Input from '../components/UI/Input';
@@ -38,12 +39,17 @@ export default function LoginScreen({ navigation }) {
 
       if (result.success) {
         const userData = result.data.user;
-        if (userData.role !== 'SUPERADMIN' && !userData.is_active) {
+        if (userData.role.toLowerCase() !== 'superadmin' && !userData.is_active) {
           setError('Account inactive. Contact support.');
           setLoading(false);
           return;
         }
-        navigation.navigate('MainApp');
+        navigation.dispatch(
+          CommonActions.reset({
+            index: 0,
+            routes: [{ name: 'MainApp' }],
+          })
+        );
       } else {
         setError(result.error || 'Invalid email or password');
       }
@@ -100,14 +106,14 @@ export default function LoginScreen({ navigation }) {
               onChangeText={setPassword}
               secureTextEntry={!isPasswordVisible}
               editable={!loading}
-              rightIcon={
+              rightIcon={password.length > 0 ? (
                 <Ionicons
                   name={isPasswordVisible ? "eye-off-outline" : "eye-outline"}
                   size={20}
                   color={COLORS.textBody}
                   onPress={() => setIsPasswordVisible(!isPasswordVisible)}
                 />
-              }
+              ) : null}
             />
 
             <Button
@@ -153,7 +159,7 @@ const styles = StyleSheet.create({
   errorBox: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#FEF2F2',
+    backgroundColor: '#FEF2FF',
     padding: 12,
     borderRadius: 12,
     marginBottom: 20,
@@ -168,3 +174,4 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
 });
+

@@ -10,7 +10,7 @@ const tempUsers = [
     name: 'Raj Venkadam',
     email: process.env.SUPERADMIN_EMAIL || 'rajvenkadam@gmail.com',
     password_hash: process.env.SUPERADMIN_PASSWORD_HASH || '$2a$12$gQQ15quczb2iBycx9iHp1O.LPAeSBk8yy6UjHuwEjl6ihMc55clde',
-    role: 'SUPERADMIN',
+    role: 'superadmin',
     bus_no: null,
     is_active: true, // Always active for superadmin
     temp_password: false, // Permanent password for superadmin
@@ -29,10 +29,10 @@ const verifyPassword = async (password, hash) => {
 
 const generateToken = (user) => {
   return jwt.sign(
-    { 
-      id: user.id, 
-      email: user.email, 
-      role: user.role 
+    {
+      id: user.id,
+      email: user.email,
+      role: user.role
     },
     process.env.JWT_SECRET || 'supersecretkey',
     { expiresIn: '24h' }

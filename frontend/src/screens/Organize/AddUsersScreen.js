@@ -16,6 +16,7 @@ import { useAuth } from '../../context/AuthContext';
 import { API_BASE_URL } from '../../api/api';
 import { excelManagementApi } from '../../api/excelManagementApi';
 import ExcelUpload from '../../components/ExcelUpload';
+import MultiExcelUpload from '../../components/MultiExcelUpload';
 import ExcelUploadCard from '../../components/ExcelUploadCard';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system';
@@ -55,8 +56,8 @@ export default function AddUsersScreen() {
   const generateExcelTemplate = async () => {
     try {
       const sampleData = [
-        { name: 'John Doe', email: 'john.doe@example.com', busno: 'BUS001', role: 'USER', mobile_no: '9876543210', date_of_year: '1990' },
-        { name: 'Jane Smith', email: 'jane.smith@example.com', busno: 'BUS002', role: 'PRIMARY_ADMIN', mobile_no: '9876543211', date_of_year: '1985' }
+        { name: 'John Doe', email: 'john.doe@example.com', busno: 'BUS001', role: 'student', mobile_no: '9876543210', date_of_year: '1990' },
+        { name: 'Jane Smith', email: 'jane.smith@example.com', busno: 'BUS002', role: 'primary_admin', mobile_no: '9876543211', date_of_year: '1985' }
       ];
 
       const ws = XLSX.utils.json_to_sheet(sampleData);
@@ -75,7 +76,7 @@ export default function AddUsersScreen() {
     }
   };
 
-  const handleFileUpload = async (file) => {
+  const handleFileUpload = async (file, customName = null) => {
     if (!token || !file?.uri) return;
     setUploading(true);
     try {
@@ -85,6 +86,10 @@ export default function AddUsersScreen() {
         name: file.name || 'users.xlsx',
         type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       });
+
+      if (customName) {
+        formData.append('customName', customName);
+      }
 
       const response = await fetch(`${API_BASE_URL}/api/organize/upload-excel-users`, {
         method: 'POST',
@@ -164,6 +169,7 @@ export default function AddUsersScreen() {
         >
           <Header style={styles.sectionLabel}>Download the Excel Template</Header>
           <Card style={styles.templateCard}>
+            <View style={styles.excelSheetBackground} />
             <View style={styles.cardHeader}>
               <View style={styles.iconCircle}>
                 <MaterialCommunityIcons name="file-excel-outline" size={24} color={COLORS.primary} />
@@ -178,26 +184,24 @@ export default function AddUsersScreen() {
               onPress={generateExcelTemplate}
               activeOpacity={0.8}
             >
-              <Ionicons name="download-outline" size={20} color={COLORS.white} />
+              <Ionicons name="download-outline" size={20} color={COLORS.primary} />
               <Body style={styles.templateBtnText}>Download Template</Body>
             </TouchableOpacity>
           </Card>
 
-          {excelUploads.length === 0 && (
-            <View style={styles.section}>
-              <Header style={styles.sectionLabel}>Upload Users</Header>
-              <View style={[styles.uploadBox, uploading && styles.disabledBox]}>
-                {uploading ? (
-                  <View style={styles.processing}>
-                    <ActivityIndicator color={COLORS.primary} />
-                    <Body style={styles.processingText}>Processing Users...</Body>
-                  </View>
-                ) : (
-                  <ExcelUpload onUpload={handleFileUpload} disabled={uploading} />
-                )}
-              </View>
+          <View style={styles.section}>
+            <Header style={styles.sectionLabel}>Upload Users</Header>
+            <View style={[styles.uploadBox, uploading && styles.disabledBox]}>
+              {uploading ? (
+                <View style={styles.processing}>
+                  <ActivityIndicator color={COLORS.primary} />
+                  <Body style={styles.processingText}>Processing Users...</Body>
+                </View>
+              ) : (
+                <MultiExcelUpload onUpload={handleFileUpload} disabled={uploading} />
+              )}
             </View>
-          )}
+          </View>
 
           {excelUploads.length > 0 && (
             <View style={styles.section}>
@@ -227,13 +231,25 @@ const styles = StyleSheet.create({
   templateCard: {
     padding: 20,
     marginBottom: 24,
+    position: 'relative',
+    overflow: 'visible',
+  },
+  excelSheetBackground: {
+    position: 'absolute',
+    top: -10,
+    left: -10,
+    right: -10,
+    bottom: -10,
+    backgroundColor: COLORS.primary + '08', // Very low opacity primary tint for sheet paper
+    borderRadius: RADIUS.card + 8,
+    zIndex: -1,
   },
   cardHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 20 },
   iconCircle: {
     width: 48,
     height: 48,
     borderRadius: 14,
-    backgroundColor: '#EEF2FF',
+    backgroundColor: COLORS.primary + '1A', // Low opacity primary for sheet effect
     justifyContent: 'center',
     alignItems: 'center'
   },
@@ -244,11 +260,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingVertical: 14,
     borderRadius: RADIUS.button,
-    backgroundColor: COLORS.primary,
+    backgroundColor: 'transparent',
     borderWidth: 1,
     borderColor: COLORS.primary,
   },
-  templateBtnText: { color: COLORS.white, fontWeight: '700', marginLeft: 8 },
+  templateBtnText: { color: COLORS.primary, fontWeight: '700', marginLeft: 8 },
   section: { marginBottom: 28 },
   sectionLabel: { fontSize: 18, marginBottom: 12 },
   uploadBox: {
@@ -279,3 +295,4 @@ const styles = StyleSheet.create({
   emptyState: { alignItems: 'center', paddingVertical: 40 },
   emptyTitle: { fontSize: 20, marginTop: 16, marginBottom: 4 },
 });
+

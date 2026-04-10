@@ -51,8 +51,13 @@ export default function ExcelUploadCard({
           </View>
           <View style={styles.fileInfo}>
             <Body style={styles.fileName} numberOfLines={1}>
-              {decodeURIComponent(upload.file_name)}
+              {upload.custom_name || decodeURIComponent(upload.file_name)}
             </Body>
+            {upload.custom_name && (
+              <MutedText style={styles.originalFileName} numberOfLines={1}>
+                File: {decodeURIComponent(upload.file_name)}
+              </MutedText>
+            )}
             <MutedText style={styles.date}>
               {formatDate(upload.uploaded_at)}
             </MutedText>
@@ -132,6 +137,12 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
     letterSpacing: 0.5,
     fontWeight: '600',
+  },
+  originalFileName: {
+    fontSize: 12,
+    color: COLORS.muted,
+    fontStyle: 'italic',
+    marginBottom: 2,
   },
   infoRow: {
     flexDirection: 'row',

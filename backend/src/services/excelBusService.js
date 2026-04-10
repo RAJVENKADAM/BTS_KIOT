@@ -11,9 +11,9 @@ class ExcelBusService {
 
       // Get column headers (first row)
       const headers = jsonData[0];
-      
+
       // Validate that we have at least one plan column (Plan A, Plan B, etc.)
-      const planHeaders = headers.filter(header => 
+      const planHeaders = headers.filter(header =>
         typeof header === 'string' && header.trim().startsWith('Plan ')
       );
 
@@ -56,38 +56,68 @@ class ExcelBusService {
 
   async saveBusWithRoutes(busData, uploadedByUserId) {
     try {
-      const { busNo, routes } = busData;
+      const { busNo, previewNumber, routes, gpsId } = busData;
 
-      // First, check if bus exists in buses table
+      // Validate TN bus number format (e.g., TN30AH5907, TN37BY1234)
+      const tnRegex = /^TN[A-Z0-9]+$/i;
+      if (!tnRegex.test(busNo)) {
+        throw new Error('Bus number must start with TN followed by alphanumeric characters (e.g., TN30AH5907, TN37BY1234)');
+      }
+
+      // Validation: Check uniqueness of bus number (only if creating new bus)
       let [busResult] = await pool.execute(
-        'SELECT id FROM buses WHERE bus_number = ? LIMIT 1',
+        'SELECT id FROM buses WHERE bus_no = ? LIMIT 1',
         [busNo]
       );
 
-      let busId;
       let busExists = busResult.length > 0;
+      let busId;
 
       if (!busExists) {
-        // Create new bus
+        // INSERT new bus
         const [insertResult] = await pool.execute(
-          'INSERT INTO buses (bus_number) VALUES (?)',
-          [busNo]
+          `INSERT INTO buses (bus_no, preview_number, gps_device_id, status, current_plan) 
+           VALUES (?, ?, ?, 'active', 'PLAN A')`,
+          [busNo, previewNumber || null, gpsId || null]
         );
         busId = insertResult.insertId;
+        busExists = false; // for return value
       } else {
+        // Existing bus - extract ID and UPDATE fields
         busId = busResult[0].id;
-        // Delete existing routes for this bus to prepare for update
         await pool.execute(
-          'DELETE FROM bus_routes WHERE bus_id = ?',
-          [busId]
+          `UPDATE buses SET 
+           preview_number = ?, gps_device_id = ?, status = 'active'
+           WHERE id = ?`,
+          [previewNumber || null, gpsId || null, busId]
         );
       }
+
+      // Get current plan after ensuring bus exists
+      const [currentPlanResult] = await pool.execute(
+        'SELECT current_plan FROM buses WHERE id = ?',
+        [busId]
+      );
+        const hasPlan = currentPlanResult[0]?.current_plan && currentPlanResult[0].current_plan !== null;
+
+        if (!hasPlan) {
+          await pool.execute(
+            'UPDATE buses SET current_plan = ? WHERE id = ?',
+            ['PLAN A', busId]
+          );
+        }
+
+      // Delete existing routes for this bus to prepare for update
+      await pool.execute(
+        'DELETE FROM bus_routes WHERE bus_id = ?',
+        [busId]
+      );
 
       // Insert new routes
       for (const [planName, stops] of Object.entries(routes)) {
         for (let orderIndex = 0; orderIndex < stops.length; orderIndex++) {
           const stopName = stops[orderIndex];
-          
+
           await pool.execute(
             'INSERT INTO bus_routes (bus_id, plan_name, stop_name, stop_order) VALUES (?, ?, ?, ?)',
             [busId, planName, stopName, orderIndex + 1]
@@ -96,25 +126,42 @@ class ExcelBusService {
       }
 
       return {
+        busId, // added for debugging
         busNo,
+        previewNumber: previewNumber || null,
         routesCount: Object.keys(routes).length,
         stopsCount: Object.values(routes).reduce((sum, stops) => sum + stops.length, 0),
         busExists
       };
     } catch (error) {
-      // Check if it's a duplicate entry error
+      // Check if it's a duplicate entry error for bus_no or preview_number
       if (error.message.includes('ER_DUP_ENTRY') || error.message.includes('UNIQUE constraint failed')) {
+        if (error.message.includes('preview_number')) {
+          throw new Error(`Preview number already exists. Please use a different preview number.`);
+        }
         throw new Error(`Bus number ${busData.busNo} already exists. Please use a different bus number.`);
       }
       throw new Error(`Error saving bus routes: ${error.message}`);
     }
   }
 
+  async validatePreviewNumber(previewNumber) {
+    try {
+      const [existing] = await pool.execute(
+        'SELECT bus_no FROM buses WHERE preview_number = ? LIMIT 1',
+        [previewNumber]
+      );
+      return existing.length === 0;
+    } catch (error) {
+      throw new Error(`Error validating preview number: ${error.message}`);
+    }
+  }
+
   async deleteBus(busNo) {
     try {
-      // First, find the bus_id from buses table using bus_number
+      // First, find the bus_id from buses table using bus_no
       const [busResult] = await pool.execute(
-        'SELECT id FROM buses WHERE bus_number = ? LIMIT 1',
+        'SELECT id FROM buses WHERE bus_no = ? LIMIT 1',
         [busNo]
       );
 
@@ -141,9 +188,9 @@ class ExcelBusService {
 
   async activateBus(busNo) {
     try {
-      // First, find the bus_id from buses table using bus_number
+      // First, find the bus_id from buses table using bus_no
       const [busResult] = await pool.execute(
-        'SELECT id FROM buses WHERE bus_number = ? LIMIT 1',
+        'SELECT id FROM buses WHERE bus_no = ? LIMIT 1',
         [busNo]
       );
 
@@ -170,47 +217,47 @@ class ExcelBusService {
 
   async changeBusPlan(busNo, newPlan, userId) {
     try {
-      // First, find the bus_id from buses table using bus_number
+      // First, find the bus_id from buses table using bus_no
       const [busResult] = await pool.execute(
-        'SELECT id FROM buses WHERE bus_number = ? LIMIT 1',
+        'SELECT id FROM buses WHERE bus_no = ? LIMIT 1',
         [busNo]
       );
-      
+
       if (busResult.length === 0) {
         throw new Error(`Bus ${busNo} not found`);
       }
-      
+
       const busId = busResult[0].id;
-      
+
       // First, check if the plan exists for this bus
       const [routes] = await pool.execute(
         'SELECT DISTINCT plan_name FROM bus_routes WHERE bus_id = ?',
         [busId]
       );
-      
+
       const availablePlans = routes.map(route => route.plan_name);
       if (!availablePlans.includes(newPlan)) {
         throw new Error(`Plan '${newPlan}' does not exist for bus ${busNo}. Available plans: ${availablePlans.join(', ')}`);
       }
-      
+
       // Update the current plan in the buses table
       const [result] = await pool.execute(
         'UPDATE buses SET current_plan = ? WHERE id = ?',
         [newPlan, busId]
       );
-      
+
       // Create an auto message about the plan change
       const [messageResult] = await pool.execute(
-        'INSERT INTO messages (sender_id, recipient_role, bus_number, message, message_type, created_at) VALUES (?, ?, ?, ?, ?, NOW())',
+        'INSERT INTO messages (sender_id, recipient_role, bus_no, message, message_type, created_at) VALUES (?, ?, ?, ?, ?, NOW())',
         [userId, 'ALL', busNo, `Bus ${busNo} has changed to plan: ${newPlan}`, 'AUTO_PLAN_CHANGE']
       );
-      
+
       // Get the created message
       const [createdMessage] = await pool.execute(
         'SELECT * FROM messages WHERE id = ?',
         [messageResult.insertId]
       );
-      
+
       return {
         busNo,
         newPlan,
@@ -223,16 +270,16 @@ class ExcelBusService {
 
   async getCurrentPlan(busNo) {
     try {
-      // First, find the bus_id from buses table using bus_number
+      // First, find the bus_id from buses table using bus_no
       const [busResult] = await pool.execute(
-        'SELECT id, current_plan FROM buses WHERE bus_number = ? LIMIT 1',
+        'SELECT id, current_plan FROM buses WHERE bus_no = ? LIMIT 1',
         [busNo]
       );
-      
+
       if (busResult.length === 0) {
         return { busNo, currentPlan: null };
       }
-      
+
       return {
         busNo,
         currentPlan: busResult[0].current_plan
@@ -244,18 +291,18 @@ class ExcelBusService {
 
   async getBusRoutes(busNo) {
     try {
-      // First, find the bus_id from buses table using bus_number
+      // First, find the bus_id from buses table using bus_no
       const [busResult] = await pool.execute(
-        'SELECT id FROM buses WHERE bus_number = ? LIMIT 1',
+        'SELECT id FROM buses WHERE bus_no = ? LIMIT 1',
         [busNo]
       );
-      
+
       if (busResult.length === 0) {
         return {};
       }
-      
+
       const busId = busResult[0].id;
-      
+
       const [routes] = await pool.execute(
         'SELECT plan_name, stop_name, stop_order FROM bus_routes WHERE bus_id = ? ORDER BY plan_name, stop_order',
         [busId]
@@ -279,7 +326,7 @@ class ExcelBusService {
     try {
       // Validate that operating bus exists
       const [operatingBusResult] = await pool.execute(
-        'SELECT id FROM buses WHERE bus_number = ? LIMIT 1',
+        'SELECT id FROM buses WHERE bus_no = ? LIMIT 1',
         [operatingBus]
       );
 
@@ -292,7 +339,7 @@ class ExcelBusService {
       // Validate that all combined buses exist
       for (const busNo of combinedBuses) {
         const [busResult] = await pool.execute(
-          'SELECT id FROM buses WHERE bus_number = ? LIMIT 1',
+          'SELECT id FROM buses WHERE bus_no = ? LIMIT 1',
           [busNo]
         );
 
@@ -304,7 +351,7 @@ class ExcelBusService {
       // Update all combined buses to point to the operating bus
       for (const busNo of combinedBuses) {
         await pool.execute(
-          'UPDATE buses SET operating_bus_id = ? WHERE bus_number = ?',
+          'UPDATE buses SET operating_bus_id = ? WHERE bus_no = ?',
           [operatingBusId, busNo]
         );
       }
@@ -319,7 +366,7 @@ class ExcelBusService {
       // Update the status of combined buses to reflect they are part of a combination
       for (const busNo of combinedBuses) {
         await pool.execute(
-          'UPDATE buses SET status = ? WHERE bus_number = ?',
+          'UPDATE buses SET status = ? WHERE bus_no = ?',
           ['combined', busNo]
         );
       }
@@ -338,7 +385,7 @@ class ExcelBusService {
     try {
       // Validate that operating bus exists
       const [operatingBusResult] = await pool.execute(
-        'SELECT id, combined_buses FROM buses WHERE bus_number = ? LIMIT 1',
+        'SELECT id, combined_buses FROM buses WHERE bus_no = ? LIMIT 1',
         [operatingBus]
       );
 
@@ -375,10 +422,10 @@ class ExcelBusService {
       // Fallback: if operating record did not store combined_buses, derive from child rows
       if (!combinedBuses || combinedBuses.length === 0) {
         const [childRows] = await pool.execute(
-          'SELECT bus_number FROM buses WHERE operating_bus_id = ?',
+          'SELECT bus_no FROM buses WHERE operating_bus_id = ?',
           [operatingBusId]
         );
-        const childBusNumbers = childRows.map(r => r.bus_number || r.busNo || r.busNo);
+        const childBusNumbers = childRows.map(r => r.bus_no || r.busNo || r.busNo);
         if (childBusNumbers && childBusNumbers.length > 0) {
           combinedBuses = childBusNumbers;
         }
@@ -391,7 +438,7 @@ class ExcelBusService {
       // Reset the operating_bus_id for all combined buses to NULL
       for (const busNo of combinedBuses) {
         await pool.execute(
-          'UPDATE buses SET operating_bus_id = NULL, status = ? WHERE bus_number = ?',
+          'UPDATE buses SET operating_bus_id = NULL, status = ? WHERE bus_no = ?',
           ['active', busNo]
         );
       }

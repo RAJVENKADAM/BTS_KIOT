@@ -1,884 +1,400 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
   TouchableOpacity,
   StyleSheet,
   Alert,
-  ScrollView,
-  KeyboardAvoidingView,
-  Platform,
+  FlatList,
   Modal,
-  ActivityIndicator,
-  StatusBar,
   TextInput,
-  Dimensions,
+  ActivityIndicator,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { Ionicons, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
-import { LinearGradient } from 'expo-linear-gradient';
+import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 
 import { useAuth } from '../../context/AuthContext';
 import { API_BASE_URL } from '../../api/api';
-import BusCard from '../../components/BusCard';
-import ExcelUpload from '../../components/ExcelUpload';
-import { COLORS, SPACING, RADIUS, SHADOWS, SIZES } from '../../theme';
-import { Header, Subtitle, MutedText, Body } from '../../components/UI/Typography';
-import Input from '../../components/UI/Input';
-import Button from '../../components/UI/Button';
+import { COLORS, SHADOWS } from '../../theme';
 
 export default function AddBusesScreen() {
-  const { token, loading: authLoading } = useAuth();
+  const { token } = useAuth();
 
-  const [uploading, setUploading] = useState(false);
   const [buses, setBuses] = useState([]);
+  const [loading, setLoading] = useState(false);
+
   const [showAddModal, setShowAddModal] = useState(false);
-  const [newBusNumber, setNewBusNumber] = useState('');
-  const [loadingBuses, setLoadingBuses] = useState(false);
+  const [showOptionsModal, setShowOptionsModal] = useState(false);
+  const [showPlanModal, setShowPlanModal] = useState(false);
+
   const [selectedBus, setSelectedBus] = useState(null);
-  const [showBusModal, setShowBusModal] = useState(false);
-  const [showPlanSelector, setShowPlanSelector] = useState(false);
-  const [isEditing, setIsEditing] = useState(false);
-  const [editedBusNumber, setEditedBusNumber] = useState('');
-  const [updating, setUpdating] = useState(false);
+  const [plans, setPlans] = useState(['PLAN A', 'PLAN B', 'PLAN C']); // Default plans
+  const [selectedPlan, setSelectedPlan] = useState('PLAN A');
+
+  const [busNo, setBusNo] = useState('');
+  const [previewNumber, setPreviewNumber] = useState('');
+  const [deviceId, setDeviceId] = useState('');
+  const [file, setFile] = useState(null);
 
 
 
-
-
-  const loadBuses = useCallback(async () => {
-    if (!token) return;
-    setLoadingBuses(true);
+  // ================= LOAD =================
+  const loadBuses = async () => {
+    setLoading(true);
     try {
       const res = await fetch(`${API_BASE_URL}/api/bus/get-all-buses`, {
         headers: { Authorization: `Bearer ${token}` },
       });
+
       const data = await res.json();
-      if (res.ok) {
-        setBuses(data.buses || []);
-      }
-    } catch (err) {
-      Alert.alert('Network Error', 'Unable to connect to server');
-    } finally {
-      setLoadingBuses(false);
+
+      if (res.ok) setBuses(data.buses || []);
+    } catch (e) {
+      Alert.alert('Error loading buses');
     }
-  }, [token]);
+    setLoading(false);
+  };
+
+  const loadPlansForBus = async (busNo) => {
+    console.log('Loading plans for bus:', busNo);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/bus/plans/${busNo}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      console.log('Plans API response status:', res.status);
+      const data = await res.json();
+      console.log('Plans data:', data);
+
+      if (res.ok) {
+        const plansList = data.plans || [];
+        console.log('Setting plans:', plansList);
+        setPlans(plansList);
+        // Don't pre-select any plan, let user choose from all available plans
+        setSelectedPlan('');
+        
+        // If no plans available, show a message
+        if (plansList.length === 0) {
+          Alert.alert('No Plans Available', 'This bus has no route plans uploaded. Please upload an Excel file with routes first.');
+          setShowPlanModal(false);
+          return;
+        }
+      } else {
+        console.log('API error, using fallback plans');
+        setPlans(['Plan A', 'Plan B', 'Plan C']); // Fallback
+        setSelectedPlan('');
+      }
+    } catch (e) {
+      console.error('Error loading plans:', e);
+      setPlans(['Plan A', 'Plan B', 'Plan C']); // Fallback
+      setSelectedPlan('');
+    }
+  };
 
   useEffect(() => {
     loadBuses();
-  }, [loadBuses]);
+  }, []);
 
-  const handleDeactivateBus = async (busNo) => {
-    Alert.alert("Deactivate Bus", `Are you sure you want to deactivate ${busNo}? The bus can be reactivated later.`, [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Deactivate",
-        style: "destructive",
-        onPress: async () => {
-          try {
-            const res = await fetch(`${API_BASE_URL}/api/bus/delete-bus/${busNo}`, {
-              method: 'DELETE',
-              headers: { Authorization: `Bearer ${token}` },
-            });
-            const data = await res.json();
-            if (res.ok) {
-              loadBuses();
-              Alert.alert('Success', data.message || 'Bus deactivated successfully');
-            } else {
-              Alert.alert('Error', data.error || 'Deactivation failed');
-            }
-          } catch (err) {
-            Alert.alert('Network Error', 'Unable to connect to server');
-          }
-        }
-      }
-    ]);
-  };
-
-  const handleChangePlan = async (busNo, newPlan) => {
-    try {
-      const res = await fetch(`${API_BASE_URL}/api/bus/change-plan/${busNo}`, {
-        method: 'PUT',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ newPlan }),
-      });
-      if (res.ok) loadBuses();
-    } catch (err) {
-      Alert.alert('Error', 'Plan update failed');
-    }
-  };
-
-  const handleAddBusSubmit = async (file) => {
-    if (!newBusNumber.trim()) {
-      Alert.alert('Validation', 'Please enter a bus number first');
-      return;
-    }
-
-    setUploading(true);
-    try {
-      const formData = new FormData();
-      formData.append('busNo', newBusNumber.trim());
-      formData.append('file', {
-        uri: file.uri,
-        name: file.name || 'routes.xlsx',
-        type: file.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      });
-
-      const res = await fetch(`${API_BASE_URL}/api/bus/upload-bus-routes`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData,
-      });
-
-      const data = await res.json();
-      if (res.ok) {
-        Alert.alert('Success', 'Bus and routes updated successfully');
-        setShowAddModal(false);
-        setNewBusNumber('');
-        loadBuses();
-      } else {
-        Alert.alert('Upload Failed', data.error);
-      }
-    } catch (err) {
-      Alert.alert('Network Error', 'Check your connection and try again');
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  const toggleAddModal = (busNo = '') => {
-    setNewBusNumber(busNo);
-    setShowAddModal(!showAddModal);
-  };
-
-  const openBusModal = (bus) => {
-    setSelectedBus(bus);
-    setEditedBusNumber(bus.busNo);
-    setShowBusModal(true);
-    setShowPlanSelector(false);
-    setIsEditing(false);
-  };
-
-  const closeBusModal = () => {
-    setShowBusModal(false);
-    setSelectedBus(null);
-    setShowPlanSelector(false);
-    setIsEditing(false);
-  };
-
-  const handleEditBusNumber = async () => {
-    if (!editedBusNumber.trim()) {
-      Alert.alert('Validation', 'Bus number is required');
-      return;
-    }
-
-    if (editedBusNumber.trim() === selectedBus.busNo) {
-      setIsEditing(false);
-      return;
-    }
-
-    setUpdating(true);
-    try {
-      const res = await fetch(
-        `${API_BASE_URL}/api/bus/update-bus-number/${selectedBus.busNo}`,
-        {
-          method: 'PUT',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ newBusNo: editedBusNumber.trim() }),
-        }
-      );
-
-      const data = await res.json();
-      if (res.ok) {
-        Alert.alert('Success', data.message, [
-          {
-            text: 'OK',
-            onPress: () => {
-              setIsEditing(false);
-              loadBuses();
-              closeBusModal();
-            },
-          },
-        ]);
-      } else {
-        Alert.alert('Error', data.error);
-      }
-    } catch (err) {
-      Alert.alert('Network Error', 'Cannot reach server.');
-    } finally {
-      setUpdating(false);
-    }
-  };
-
-  const handleReupload = async () => {
-    if (uploading) return;
-
+  // ================= FILE PICK =================
+  const pickFile = async () => {
     try {
       const res = await DocumentPicker.getDocumentAsync({
         type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       });
 
-      if (res.assets && res.assets[0]) {
-        const file = res.assets[0];
-        setUploading(true);
+      if (res.assets && res.assets.length > 0) {
+        setFile(res.assets[0]);
+      }
+    } catch (err) {
+      Alert.alert('File error');
+    }
+  };
 
-        const formData = new FormData();
-        formData.append('busNo', selectedBus.busNo);
+  // ================= ADD BUS =================
+  const handleAddBus = async () => {
+    if (!busNo.trim() || !deviceId.trim()) {
+      return Alert.alert('Bus No and Device ID required');
+    }
+
+    try {
+      const formData = new FormData();
+      formData.append('busNo', busNo.trim().toUpperCase());
+      formData.append('previewNumber', previewNumber.trim());
+      formData.append('deviceId', deviceId.trim());
+
+      console.log('FormData sending:', {
+        busNo: busNo.trim().toUpperCase(),
+        previewNumber: previewNumber.trim(),
+        deviceId: deviceId.trim()
+      });
+
+      if (file) {
         formData.append('file', {
           uri: file.uri,
           name: file.name || 'routes.xlsx',
-          type:
-            file.type ||
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         });
-
-        const uploadRes = await fetch(
-          `${API_BASE_URL}/api/bus/upload-bus-routes`,
-          {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-            body: formData,
-          }
-        );
-
-        const data = await uploadRes.json();
-        if (uploadRes.ok) {
-          Alert.alert('Success', data.message, [
-            { text: 'OK', onPress: () => {
-              loadBuses();
-              closeBusModal();
-            }},
-          ]);
-        } else {
-          Alert.alert('Upload Failed', data.error);
-        }
       }
-    } catch (err) {
-      Alert.alert('Network Error', 'Cannot reach server.');
-    } finally {
-      setUploading(false);
-    }
-  };
 
-  const handleActivate = async () => {
-    try {
-      const res = await fetch(
-        `${API_BASE_URL}/api/bus/activate-bus/${selectedBus.busNo}`,
-        {
-          method: 'PUT',
-          headers: { Authorization: `Bearer ${token}` },
-        }
-      );
+
+      const res = await fetch(`${API_BASE_URL}/api/bus/upload-bus-routes`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+        body: formData,
+      });
+
 
       const data = await res.json();
+
       if (res.ok) {
-        Alert.alert('Success', data.message || 'Bus activated successfully', [
-          { text: 'OK', onPress: () => {
-            loadBuses();
-            closeBusModal();
-          }},
-        ]);
+        setShowAddModal(false);
+        setBusNo('');
+        setPreviewNumber('');
+        setDeviceId('');
+        setFile(null);
+        loadBuses();
       } else {
-        Alert.alert('Error', data.error || 'Activation failed');
+        Alert.alert('Error', data?.error || 'Failed');
       }
-    } catch (err) {
-      Alert.alert('Network Error', 'Cannot reach server.');
+    } catch (e) {
+      Alert.alert('Network Error');
     }
   };
 
 
 
+  const renderBus = ({ item }) => (
+    <TouchableOpacity
+      style={styles.card}
+      onPress={() => {
+        setSelectedBus(item);
+        setShowOptionsModal(true);
+      }}
+    >
+      <Text style={styles.title}>Bus: {item.busNo}</Text>
+      <Text>Preview: {item.previewNumber}</Text>
 
-  if (authLoading) return <View style={styles.center}><ActivityIndicator color={COLORS.primary} /></View>;
+      <View style={styles.statusRow}>
+        <View
+          style={[
+            styles.dot,
+            { backgroundColor: item.status === 'active' ? 'green' : 'red' },
+          ]}
+        />
+        <Text>{item.status}</Text>
+      </View>
+    </TouchableOpacity>
+  );
+
+  if (loading) return <ActivityIndicator style={{ marginTop: 50 }} />;
 
   return (
-    <SafeAreaView edges={['bottom']} style={styles.safeArea}>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
-        <LinearGradient
-          colors={['transparent', 'rgba(147, 51, 234, 0.1)', 'transparent']}
-          style={{ flex: 1 }}
-        >
-          <ScrollView
-            contentContainerStyle={styles.scroll}
-            showsVerticalScrollIndicator={false}
-          >
-          {loadingBuses ? (
-            <View style={styles.loadingContainer}>
-              <ActivityIndicator size="large" color={COLORS.primary} />
-              <MutedText style={{ marginTop: 12 }}>Syncing fleet...</MutedText>
-            </View>
-          ) : buses.length > 0 ? (
-            <View>
-              {/* Header */}
-              <View style={styles.headerRow}>
-                <Header>All Buses</Header>
-              </View>
+    <View style={{ flex: 1 }}>
+      <FlatList
+        data={buses}
+        renderItem={renderBus}
+        keyExtractor={(i, idx) => idx.toString()}
+      />
 
-              {/* Bus Cards */}
-              <ScrollView showsVerticalScrollIndicator={false} style={styles.busScrollContainer}>
-                <View style={styles.busRowContainer}>
-                  {buses.map((bus, index) => (
-                    <View key={bus.busNo || index} style={styles.busCardWrapper}>
-                      <BusCard
-                        bus={bus}
-                        onPress={openBusModal}
-                      />
-                    </View>
-                  ))}
-                </View>
-              </ScrollView>
-            </View>
-          ) : (
-            <View style={styles.emptyContainer}>
-              <MaterialCommunityIcons name="bus-marker" size={80} color={COLORS.muted} />
-              <Header style={styles.emptyTitle}>No Buses Registered</Header>
-              <MutedText style={styles.emptySub}>Tap the + button to add your first bus</MutedText>
-            </View>
-          )}
-        </ScrollView>
-        </LinearGradient>
+      {/* FAB */}
+      <TouchableOpacity style={styles.fab} onPress={() => setShowAddModal(true)}>
+        <Ionicons name="add" size={30} color="#fff" />
+      </TouchableOpacity>
 
-        <TouchableOpacity style={styles.fab} onPress={() => toggleAddModal()} activeOpacity={0.9}>
-          <Ionicons name="add" size={32} color={COLORS.white} />
-        </TouchableOpacity>
+      {/* ADD MODAL */}
+      <Modal transparent visible={showAddModal}>
+        <View style={styles.overlay}>
+          <View style={styles.modalBox}>
+            <Text style={styles.header}>Add Bus</Text>
 
-        <Modal transparent visible={showAddModal} animationType="fade">
-          <View style={styles.modalOverlay}>
-            <TouchableOpacity
-              activeOpacity={1}
-              style={styles.modalCloseOverlay}
-              onPress={() => !uploading && toggleAddModal()}
+            <TextInput
+              placeholder="Bus Number / Reg No (TN30AH5907)"
+              value={busNo}
+              onChangeText={setBusNo}
+              style={styles.input}
             />
-            <View style={styles.modalContent}>
-              <View style={styles.modalHeader}>
-                <View>
-                  <Header style={styles.modalTitle}>Bus Details</Header>
-                  <Subtitle style={{ marginBottom: 0 }}>Configure bus routes and plans</Subtitle>
-                </View>
-                <TouchableOpacity onPress={() => !uploading && toggleAddModal()} style={styles.closeBtn}>
-                  <Ionicons name="close" size={24} color={COLORS.textBody} />
-                </TouchableOpacity>
+
+            <TextInput
+              placeholder="Preview No (4,5,6...)"
+              value={previewNumber}
+              onChangeText={setPreviewNumber}
+              style={styles.input}
+              keyboardType="numeric"
+            />
+
+            <TextInput
+              placeholder="Device ID (0867440065950925)"
+              value={deviceId}
+              onChangeText={setDeviceId}
+              style={styles.input}
+            />
+
+
+
+            <TouchableOpacity onPress={pickFile} style={styles.upload}>
+              <Text>{file ? file.name : 'Upload Excel'}</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={styles.button} onPress={handleAddBus}>
+              <Text style={{ color: '#fff' }}>Add Bus</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity onPress={() => setShowAddModal(false)}>
+              <Text style={{ textAlign: 'center', marginTop: 10 }}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* OPTIONS MODAL */}
+      <Modal transparent visible={showOptionsModal}>
+        <View style={styles.overlay}>
+          <View style={styles.modalBox}>
+            <Text style={styles.header}>Bus Options</Text>
+            <Text style={styles.subHeader}>Bus: {selectedBus?.busNo}</Text>
+
+            <TouchableOpacity 
+              style={styles.optionButton} 
+              onPress={() => {
+                setShowOptionsModal(false);
+                setShowPlanModal(true);
+                // Clear previous plans and load new ones
+                setPlans([]);
+                setSelectedPlan('');
+                loadPlansForBus(selectedBus.busNo);
+              }}
+            >
+              <Text style={styles.optionText}>Change Routes</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={styles.optionButton} 
+              onPress={async () => {
+                Alert.alert(
+                  'Delete Bus',
+                  `Are you sure you want to delete bus ${selectedBus.busNo}?`,
+                  [
+                    { text: 'Cancel', style: 'cancel' },
+                    {
+                      text: 'Delete',
+                      style: 'destructive',
+                      onPress: async () => {
+                        try {
+                          const res = await fetch(`${API_BASE_URL}/api/bus/delete-bus/${selectedBus.busNo}`, {
+                            method: 'DELETE',
+                            headers: {
+                              Authorization: `Bearer ${token}`,
+                            },
+                          });
+                          if (res.ok) {
+                            setShowOptionsModal(false);
+                            loadBuses();
+                          } else {
+                            Alert.alert('Error', 'Failed to delete bus');
+                          }
+                        } catch (e) {
+                          Alert.alert('Network Error');
+                        }
+                      }
+                    }
+                  ]
+                );
+              }}
+            >
+              <Text style={styles.optionText}>Delete</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity onPress={() => setShowOptionsModal(false)}>
+              <Text style={{ textAlign: 'center', marginTop: 20 }}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* PLAN MODAL */}
+      <Modal transparent visible={showPlanModal}>
+        <View style={styles.overlay}>
+          <View style={styles.modalBox}>
+            <Text style={styles.header}>Select Plan</Text>
+            <Text style={styles.subHeader}>Current: {selectedBus?.currentPlan || 'Plan A'}</Text>
+
+            {plans.length === 0 ? (
+              <View style={{ padding: 20, alignItems: 'center' }}>
+                <Text style={{ color: '#666', marginBottom: 10 }}>Loading plans...</Text>
+                <ActivityIndicator size="small" color={COLORS.primary} />
               </View>
-
-              <View style={styles.formSection}>
-                <Input
-                  label="Bus Number"
-                  placeholder="e.g. TN-37-BY-1234"
-                  icon="bus-outline"
-                  value={newBusNumber}
-                  onChangeText={setNewBusNumber}
-                  editable={!uploading}
-                />
-
-                <MutedText style={styles.fieldLabel}>Route Data (Excel)</MutedText>
-                <View style={styles.uploadBox}>
-                  {uploading ? (
-                    <View style={styles.modalLoading}>
-                      <ActivityIndicator color={COLORS.primary} />
-                      <Body style={styles.uploadingText}>Uploading Routes...</Body>
-                    </View>
-                  ) : (
-                    <ExcelUpload onUpload={handleAddBusSubmit} disabled={uploading} />
-                  )}
-                </View>
-
-                <TouchableOpacity
-                  style={styles.discardBtn}
-                  onPress={() => !uploading && toggleAddModal()}
+            ) : (
+              plans.map(plan => (
+                <TouchableOpacity 
+                  key={plan}
+                  style={[styles.optionButton, selectedPlan === plan && styles.selectedOption]}
+                  onPress={() => setSelectedPlan(plan)}
                 >
-                  <Body style={styles.discardText}>Discard Changes</Body>
+                  <Text style={[styles.optionText, selectedPlan === plan && styles.selectedOptionText]}>{plan}</Text>
                 </TouchableOpacity>
-              </View>
-            </View>
+              ))
+            )}
+
+            <TouchableOpacity 
+              style={[styles.button, !selectedPlan && styles.disabledButton]} 
+              onPress={async () => {
+                if (!selectedPlan) {
+                  Alert.alert('Please select a plan first');
+                  return;
+                }
+                try {
+                  const res = await fetch(`${API_BASE_URL}/api/bus/update-plan/${selectedBus.busNo}`, {
+                    method: 'PUT',
+                    headers: {
+                      Authorization: `Bearer ${token}`,
+                      'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ plan: selectedPlan }),
+                  });
+                  const data = await res.json();
+                  if (res.ok) {
+                    setShowPlanModal(false);
+                    loadBuses(); // Refresh to show updated plan
+                  } else {
+                    Alert.alert('Error', data.error);
+                  }
+                } catch (e) {
+                  Alert.alert('Network Error');
+                }
+              }}
+              disabled={!selectedPlan}
+            >
+              <Text style={{ color: '#fff' }}>Update Plan</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity onPress={() => setShowPlanModal(false)}>
+              <Text style={{ textAlign: 'center', marginTop: 10 }}>Close</Text>
+            </TouchableOpacity>
           </View>
-        </Modal>
-
-        <Modal transparent visible={showBusModal} animationType="slide">
-          <View style={styles.modalOverlay}>
-            <TouchableOpacity
-              activeOpacity={1}
-              style={styles.modalCloseOverlay}
-              onPress={closeBusModal}
-            />
-            <View style={styles.busModalContent}>
-              <ScrollView showsVerticalScrollIndicator={false}>
-                <View style={styles.busModalHeader}>
-                  <View>
-                    <Header style={styles.busModalTitle}>{selectedBus?.busNo}</Header>
-                    <Subtitle style={{ marginBottom: 0 }}>Bus Management Options</Subtitle>
-                  </View>
-                  <TouchableOpacity onPress={closeBusModal} style={styles.closeBtn}>
-                    <Ionicons name="close" size={24} color={COLORS.textBody} />
-                  </TouchableOpacity>
-                </View>
-
-                <View style={styles.busModalBody}>
-                  {/* Edit Bus Number */}
-                  <View style={styles.optionSection}>
-                    {isEditing ? (
-                      <View style={styles.editRow}>
-                        <TextInput
-                          value={editedBusNumber}
-                          onChangeText={setEditedBusNumber}
-                          style={styles.editInput}
-                          autoFocus
-                        />
-                        <View style={styles.editButtons}>
-                          <TouchableOpacity
-                            style={[styles.editBtn, styles.cancelBtn]}
-                            onPress={() => {
-                              setIsEditing(false);
-                              setEditedBusNumber(selectedBus.busNo);
-                            }}
-                            disabled={updating}
-                          >
-                            <MaterialIcons name="close" size={20} color={COLORS.textBody} />
-                          </TouchableOpacity>
-                          <TouchableOpacity
-                            style={[styles.editBtn, styles.confirmBtn]}
-                            onPress={handleEditBusNumber}
-                            disabled={updating}
-                          >
-                            {updating ? (
-                              <ActivityIndicator size="small" color={COLORS.white} />
-                            ) : (
-                              <MaterialIcons name="check" size={20} color={COLORS.white} />
-                            )}
-                          </TouchableOpacity>
-                        </View>
-                      </View>
-                    ) : (
-                      <TouchableOpacity
-                        style={styles.optionMain}
-                        onPress={() => setIsEditing(true)}
-                      >
-                        <View style={styles.iconCircle}>
-                          <MaterialIcons name="edit" size={18} color={COLORS.primary} />
-                        </View>
-                        <Body style={styles.optionText}>Edit Bus Number</Body>
-                        <MaterialIcons name="chevron-right" size={20} color={COLORS.muted} />
-                      </TouchableOpacity>
-                    )}
-                  </View>
-
-                  {/* Change Plan */}
-                  <View style={styles.optionSection}>
-                    <TouchableOpacity
-                      style={styles.optionMain}
-                      onPress={() => setShowPlanSelector(!showPlanSelector)}
-                    >
-                      <View style={styles.iconCircle}>
-                        <MaterialIcons name="swap-horiz" size={18} color={COLORS.primary} />
-                      </View>
-                      <Body style={styles.optionText}>Change Route Plan</Body>
-                      <MaterialIcons
-                        name={showPlanSelector ? "keyboard-arrow-up" : "keyboard-arrow-down"}
-                        size={20}
-                        color={COLORS.muted}
-                      />
-                    </TouchableOpacity>
-
-                    {showPlanSelector && (
-                      <View style={styles.planSelector}>
-                        {Object.keys(selectedBus?.routes || {}).map((plan) => (
-                          <TouchableOpacity
-                            key={plan}
-                            style={[styles.planOption, selectedBus.currentPlan === plan && styles.activePlanOption]}
-                            onPress={() => {
-                              handleChangePlan(selectedBus.busNo, plan);
-                              setShowPlanSelector(false);
-                              closeBusModal();
-                            }}
-                          >
-                            <Body style={[styles.planText, selectedBus.currentPlan === plan && styles.activePlanText]}>
-                              Plan {plan}
-                            </Body>
-                            {selectedBus.currentPlan === plan && (
-                              <Ionicons name="checkmark-circle" size={16} color={COLORS.success} />
-                            )}
-                          </TouchableOpacity>
-                        ))}
-                      </View>
-                    )}
-                  </View>
-
-                  
-                  {/* Update Route Data */}
-                  <View style={styles.optionSection}>
-                    <TouchableOpacity
-                      style={styles.optionMain}
-                      onPress={handleReupload}
-                      disabled={uploading}
-                    >
-                      <View style={[styles.iconCircle, { backgroundColor: '#EEF2FF' }]}>                        
-                        <MaterialIcons name="file-upload" size={18} color={COLORS.primary} />
-                      </View>
-                      <Body style={styles.optionText}>Update Route Data</Body>
-                      {uploading && <ActivityIndicator size="small" color={COLORS.primary} />}
-                    </TouchableOpacity>
-                  </View>
-
-                  {/* Activate/Deactivate */}
-                  <View style={styles.optionSection}>
-                    <TouchableOpacity
-                      style={styles.optionMain}
-                      onPress={selectedBus?.status === 'inactive' ? handleActivate : () => {
-                        handleDeactivateBus(selectedBus.busNo);
-                        closeBusModal();
-                      }}
-                    >
-                      <View style={[styles.iconCircle, { backgroundColor: selectedBus?.status === 'inactive' ? '#E1FCEF' : '#FEE2E2' }]}>                        
-                        <MaterialIcons
-                          name={selectedBus?.status === 'inactive' ? "check-circle" : "block"}
-                          size={18}
-                          color={selectedBus?.status === 'inactive' ? COLORS.success : COLORS.error}
-                        />
-                      </View>
-                      <Body style={[styles.optionText, selectedBus?.status !== 'inactive' && { color: COLORS.error }]}>                        
-                        {selectedBus?.status === 'inactive' ? 'Activate Bus' : 'Deactivate Bus'}
-                      </Body>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              </ScrollView>
-            </View>
-          </View>
-        </Modal>
-
-
-      </KeyboardAvoidingView>
-    </SafeAreaView>
+        </View>
+      </Modal>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: COLORS.background },
-  scroll: { padding: SPACING.screenPadding, paddingBottom: 100 },
-  busRowContainer: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    justifyContent: 'flex-start',
-  },
-  busCardWrapper: {
-    width: '30%',
-    margin: 4,
-  },
-  center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  loadingContainer: { alignItems: 'center', marginTop: 60 },
-  emptyContainer: { alignItems: 'center', marginTop: 100, paddingHorizontal: 40 },
-  emptyTitle: { fontSize: 20, marginTop: 16, textAlign: 'center' },
-  emptySub: { textAlign: 'center', marginTop: 4 },
-  fab: {
-    position: 'absolute',
-    right: 24,
-    bottom: 24,
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: COLORS.primary,
-    justifyContent: 'center',
-    alignItems: 'center',
-    ...SHADOWS.soft,
-    elevation: 8,
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(15, 23, 42, 0.7)',
-    justifyContent: 'flex-end',
-  },
-  modalCloseOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-  },
-  modalContent: {
-    backgroundColor: COLORS.white,
-    borderTopLeftRadius: RADIUS.card,
-    borderTopRightRadius: RADIUS.card,
-    padding: 24,
-    paddingBottom: Platform.OS === 'ios' ? 40 : 24,
-    ...SHADOWS.soft,
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 16,
-  },
-  modalTitle: { fontSize: 22 },
-  closeBtn: {
-    padding: 4,
-    backgroundColor: COLORS.inputBg,
-    borderRadius: 12,
-  },
-  formSection: { gap: 2 },
-  fieldLabel: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: COLORS.textHeader,
-    marginBottom: 4,
-    marginLeft: 4,
-  },
-  uploadBox: {
-    backgroundColor: COLORS.inputBg,
-    borderRadius: RADIUS.input,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    borderStyle: 'dashed',
-    overflow: 'hidden',
-    marginBottom: 12,
-  },
-  modalLoading: { padding: 40, alignItems: 'center' },
-  uploadingText: { marginTop: 12, color: COLORS.primary, fontWeight: '700' },
-  discardBtn: {
-    alignItems: 'center',
-    paddingVertical: 12,
-  },
-  discardText: { color: COLORS.error, fontWeight: '600' },
-  busModalContent: {
-    backgroundColor: COLORS.white,
-    borderTopLeftRadius: RADIUS.card,
-    borderTopRightRadius: RADIUS.card,
-    maxHeight: '80%',
-    ...SHADOWS.soft,
-  },
-  busModalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    padding: 24,
-    paddingBottom: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
-  },
-  busModalTitle: { fontSize: 22 },
-  busModalBody: {
-    padding: 24,
-    paddingTop: 16,
-  },
-  optionSection: {
-    marginBottom: 24,
-  },
-  sectionTitle: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: COLORS.textHeader,
-    marginBottom: 12,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  editRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  editInput: {
-    flex: 1,
-    height: 48,
-    borderWidth: 1.5,
-    borderColor: COLORS.primary,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    fontSize: 16,
-    color: COLORS.textHeader,
-    backgroundColor: COLORS.white,
-  },
-  editButtons: {
-    flexDirection: 'row',
-    marginLeft: 8,
-    gap: 6,
-  },
-  editBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 10,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  cancelBtn: {
-    backgroundColor: COLORS.inputBg,
-  },
-  confirmBtn: {
-    backgroundColor: COLORS.primary,
-  },
-  optionMain: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-  },
-  iconCircle: {
-    width: 40,
-    height: 40,
-    borderRadius: 10,
-    backgroundColor: '#EEF2FF',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 16,
-  },
-  optionText: {
-    flex: 1,
-    fontSize: 16,
-    fontWeight: '600',
-    color: COLORS.textBody,
-  },
-  planSelector: {
-    backgroundColor: COLORS.inputBg,
-    borderRadius: 12,
-    marginTop: 8,
-    padding: 4,
-  },
-  planOption: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: 14,
-    borderRadius: 8,
-  },
-  activePlanOption: {
-    backgroundColor: COLORS.white,
-    ...SHADOWS.soft,
-  },
-  planText: {
-    fontSize: 15,
-    color: COLORS.textBody,
-  },
-  activePlanText: {
-    color: COLORS.success,
-    fontWeight: '700',
-  },
-  actionBar: {
-    backgroundColor: COLORS.white,
-    padding: 16,
-    marginBottom: 16,
-    borderRadius: RADIUS.card,
-    ...SHADOWS.soft,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  actionText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: COLORS.textHeader,
-  },
-  actionButtons: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  actionBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    gap: 6,
-  },
-  combineBtn: {
-    backgroundColor: COLORS.primary,
-  },
-  deactivateBtn: {
-    backgroundColor: COLORS.error,
-  },
-  alterBtn: {
-    backgroundColor: COLORS.warning,
-  },
-  actionBtnText: {
-    color: COLORS.white,
-    fontSize: 14,
-    fontWeight: '600',
-  },
-  headerRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  toggleBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    backgroundColor: COLORS.inputBg,
-    gap: 6,
-  },
-  toggleBtnActive: {
-    backgroundColor: COLORS.primary,
-  },
-  toggleText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: COLORS.primary,
-  },
-  toggleTextActive: {
-    color: COLORS.white,
-  },
-  actionModalContent: {
-    backgroundColor: COLORS.white,
-    borderTopLeftRadius: RADIUS.card,
-    borderTopRightRadius: RADIUS.card,
-    padding: 24,
-    paddingBottom: Platform.OS === 'ios' ? 40 : 24,
-    ...SHADOWS.soft,
-    maxHeight: '70%',
-  },
-  actionModalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  actionModalTitle: {
-    fontSize: 20,
-  },
-  actionModalBody: {
-    gap: 16,
-  },
-  actionDescription: {
-    fontSize: 16,
-    color: COLORS.textBody,
-    marginBottom: 16,
-  },
-  selectedBusesList: {
-    gap: 8,
-    marginBottom: 16,
-  },
-  selectedBusItem: {
-    backgroundColor: 'COLORS.inputBg',
-    padding: 12,
-    borderRadius: 8,
-  },
-  selectedBusText: {
-    fontSize: 16,
-    color: COLORS.textHeader,
-  },
-  operatingBusText: {
-    fontWeight: '700',
-    color: COLORS.primary,
-  },
-  confirmActionBtn: {
-    backgroundColor: COLORS.primary,
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: 'center',
-  },
-  dangerBtn: {
-    backgroundColor: COLORS.error,
-  },
-  confirmActionText: {
-    color: COLORS.white,
-    fontSize: 16,
-    fontWeight: '600',
-  },
-
+  card: { margin: 10, padding: 15, backgroundColor: '#fff', borderRadius: 10 },
+  title: { fontSize: 16, fontWeight: 'bold' },
+  statusRow: { flexDirection: 'row', marginTop: 5, alignItems: 'center' },
+  dot: { width: 10, height: 10, borderRadius: 5, marginRight: 5 },
+  fab: { position: 'absolute', bottom: 20, right: 20, backgroundColor: COLORS.primary, padding: 15, borderRadius: 30 },
+  overlay: { flex: 1, backgroundColor: '#00000088', justifyContent: 'center', alignItems: 'center' },
+  modalBox: { width: '90%', backgroundColor: '#fff', padding: 20, borderRadius: 10 },
+  input: { borderWidth: 1, borderColor: '#ccc', marginBottom: 10, padding: 10, borderRadius: 8 },
+  button: { backgroundColor: COLORS.primary, padding: 12, borderRadius: 10, alignItems: 'center' },
+  disabledButton: { backgroundColor: '#ccc' },
+  header: { fontSize: 18, fontWeight: 'bold', marginBottom: 10 },
+  subHeader: { fontSize: 14, color: '#666', marginBottom: 20 },
+  upload: { borderWidth: 1, borderStyle: 'dashed', padding: 15, marginBottom: 10, alignItems: 'center' },
+  optionButton: { padding: 15, borderWidth: 1, borderColor: '#ddd', borderRadius: 8, marginBottom: 10, alignItems: 'center' },
+  selectedOption: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
+  optionText: { fontSize: 16, color: '#333' },
+  selectedOptionText: { color: '#fff' },
 });

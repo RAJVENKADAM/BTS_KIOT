@@ -36,27 +36,7 @@ class NotificationService {
     const busesText = busNumbers.join(', ');
     const messageText = body || `Bus update: ${actionType} for ${busesText} at ${timestamp}`;
 
-    // Insert a message record per bus (message_type BUS_UPDATE)
-    try {
-      for (const busNo of busNumbers) {
-        await pool.execute(
-          'INSERT INTO messages (sender_id, recipient_role, bus_number, message, message_type, created_at) VALUES (?, ?, ?, ?, ?, NOW())',
-          [actorId || 0, 'BUS_USERS', busNo, messageText, 'BUS_UPDATE']
-        );
-      }
-    } catch (err) {
-      // If schema differs, try alternative column names used elsewhere
-      try {
-        for (const busNo of busNumbers) {
-          await pool.execute(
-            'INSERT INTO messages (created_by, bus_no, message, message_type, created_at) VALUES (?, ?, ?, ?, NOW())',
-            [actorId || 0, busNo, messageText, 'BUS_UPDATE']
-          );
-        }
-      } catch (err2) {
-        console.error('Failed to insert messages for bus update:', err2.message);
-      }
-    }
+  // Message table removed - skip DB message insertion for notifications\n    console.log(`Notification: ${actionType} for buses ${busNumbers.join(', ')}`);
 
     // Send push notifications to users assigned to these buses
     try {

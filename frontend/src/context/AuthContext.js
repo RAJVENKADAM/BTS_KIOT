@@ -24,17 +24,54 @@ export const AuthProvider = ({ children }) => {
     loadAuthData();
   }, []);
 
+  const validateToken = async (token) => {
+    if (!token) return false;
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/auth/verify`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        return data.valid === true;
+      }
+      return false;
+    } catch (error) {
+      console.error('Token validation error:', error);
+      return false;
+    }
+  };
+
   const loadAuthData = async () => {
     try {
       const storedToken = await AsyncStorage.getItem('token');
       const storedUser = await AsyncStorage.getItem('user');
       
       if (storedToken && storedUser) {
-        setToken(storedToken);
-        setUser(JSON.parse(storedUser));
+        // Validate token before setting
+        const isValid = await validateToken(storedToken);
+        if (isValid) {
+          setToken(storedToken);
+          setUser(JSON.parse(storedUser));
+        } else {
+          // Invalid token - clear storage
+          await AsyncStorage.multiRemove(['token', 'user']);
+          console.log('Invalid/expired token cleared');
+        }
       }
     } catch (error) {
-      // Error silently handled
+      console.error('Load auth data error:', error);
+      // Clear on error
+      try {
+        await AsyncStorage.multiRemove(['token', 'user']);
+      } catch (clearError) {
+        console.error('Clear storage error:', clearError);
+      }
     } finally {
       setLoading(false);
     }

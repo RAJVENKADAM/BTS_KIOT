@@ -32,25 +32,25 @@ const login = async (req, res) => {
     // 2. If SUPERADMIN account -> Allow login even when is_active = false (for system administration)
     // 3. If user has temporary password -> Allow login to change password (unless deleted by user)
     // 4. Regular users with is_active = false and no temp password -> Block login
-    
+
     if (user.deleted_by_user) {
       return res.status(401).json({
         error: 'Account has been deleted. Credentials are invalid.'
       });
     }
-    
-    if (!user.is_active && user.role !== 'SUPERADMIN' && !user.temp_password) {
+
+    if (!user.is_active && user.role !== 'superadmin' && !user.temp_password) {
       return res.status(401).json({
         error: 'Account deactivated. Contact admin.'
       });
     }
-    
+
     // This check allows users with temporary passwords to log in regardless of active status
     // The frontend will handle redirecting them to the ChangePassword screen
 
     // Verify password
     const isValidPassword = await bcrypt.compare(password, user.password_hash);
-    
+
     if (!isValidPassword) {
       return res.status(401).json({
         error: 'Invalid credentials'
@@ -94,7 +94,7 @@ const login = async (req, res) => {
 const getProfile = async (req, res) => {
   try {
     const userId = req.user.id;
-    
+
     const [users] = await pool.execute(
       'SELECT id, name, email, role, bus_no, is_active, temp_password, deleted_by_user, created_at FROM users WHERE id = ?',
       [userId]
@@ -107,7 +107,7 @@ const getProfile = async (req, res) => {
     }
 
     const user = users[0];
-    
+
     res.status(200).json({
       user: {
         id: user.id,
@@ -140,24 +140,24 @@ const logout = async (req, res) => {
 const deleteUserAccount = async (req, res) => {
   try {
     const userId = req.user.id;
-    
+
     // Mark user account as deleted by user
     // This will prevent login completely
     const [result] = await pool.execute(
       'UPDATE users SET is_active = FALSE, deleted_by_user = TRUE WHERE id = ?',
       [userId]
     );
-    
+
     if (result.affectedRows === 0) {
       return res.status(404).json({
         error: 'User not found'
       });
     }
-    
+
     res.status(200).json({
       message: 'Account deleted successfully. You will be logged out.'
     });
-    
+
   } catch (error) {
     console.error('Delete user account error:', error);
     res.status(500).json({
@@ -168,9 +168,18 @@ const deleteUserAccount = async (req, res) => {
 
 
 
+const verifyToken = async (req, res) => {
+  // If we reach here, token is valid (middleware passed)
+  res.status(200).json({
+    valid: true,
+    user: req.user
+  });
+};
+
 module.exports = {
   login,
   getProfile,
   logout,
-  deleteUserAccount
+  deleteUserAccount,
+  verifyToken
 };

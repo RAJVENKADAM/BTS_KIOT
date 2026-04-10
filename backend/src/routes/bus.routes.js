@@ -1,51 +1,156 @@
 const express = require('express');
 const multer = require('multer');
-const { uploadBusRoutes, deleteBus, activateBus, changeBusPlan, getCurrentPlan, getLiveLocation, getRouteStops, getAllBuses, updateBusNumber, getBusStatistics, combineBuses, uncombineBuses, registerDeviceToken } = require('../controllers/bus.controller');
+
+const BusController = require('../controllers/bus.controller');
+const {
+  uploadBusRoutes,
+  deleteBus,
+  activateBus,
+  changeBusPlan,
+  getCurrentPlan,
+  getLiveLocation,
+  getRouteStops,
+  getAllBuses,
+  updateBusNumber,
+  getBusStatistics,
+  combineBuses,
+  uncombineBuses,
+  registerDeviceToken,
+  validatePreviewNumber,
+  updatePreviewNumber,
+  trackByPreview,
+  createBus, // New
+  getBusLocation,
+  getPlans
+} = BusController;
+
 const { authenticateToken, authorizeRoles } = require('../middleware/auth');
 
 const router = express.Router();
 
-// Configure multer for file uploads
+// MULTER
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, 'uploads/');
-  },
+  destination: (req, file, cb) => cb(null, 'uploads/'),
   filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, 'bus-routes-' + uniqueSuffix + '.xlsx');
+    const name = Date.now() + '-' + file.originalname;
+    cb(null, name);
   }
 });
 
-const upload = multer({ 
-  storage: storage,
-  fileFilter: (req, file, cb) => {
-    if (file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' || 
-        file.originalname.endsWith('.xlsx')) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only Excel files are allowed'));
-    }
-  }
-});
+const upload = multer({ storage });
 
-// Superadmin only routes
-router.post('/upload-bus-routes', authenticateToken, authorizeRoles('SUPERADMIN'), upload.single('file'), uploadBusRoutes);
-router.delete('/delete-bus/:busNo', authenticateToken, authorizeRoles('SUPERADMIN'), deleteBus);
-router.put('/activate-bus/:busNo', authenticateToken, authorizeRoles('SUPERADMIN'), activateBus);
-router.put('/change-plan/:busNo', authenticateToken, authorizeRoles('SUPERADMIN'), changeBusPlan);
-router.put('/update-bus-number/:busNo', authenticateToken, authorizeRoles('SUPERADMIN'), updateBusNumber);
-router.post('/combine-buses', authenticateToken, authorizeRoles('SUPERADMIN'), combineBuses);
-router.post('/uncombine-buses/:operatingBus', authenticateToken, authorizeRoles('SUPERADMIN'), uncombineBuses);
-// Register device token for push notifications (any authenticated user)
-router.post('/register-device-token', authenticateToken, registerDeviceToken);
-router.get('/current-plan/:busNo', authenticateToken, getCurrentPlan);
-router.get('/get-all-buses', authenticateToken, authorizeRoles('SUPERADMIN'), getAllBuses);
+// ROUTES
 
-// Statistics accessible to all authenticated users
-router.get('/statistics', authenticateToken, getBusStatistics);
+// ADMIN
+router.post('/upload-bus-routes',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  upload.single('file'),
+  BusController.uploadBusRoutes
+);
 
-// Public routes (accessible to all authenticated users with proper permissions)
-router.get('/location/:busNo', authenticateToken, getLiveLocation);
-router.get('/route/:busNo/:planName', authenticateToken, getRouteStops);
+router.post('/create-bus',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  BusController.createBus
+);
+
+
+
+router.put('/update-bus-number/:busNo',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  BusController.updateBusNumber
+);
+
+router.put('/update-preview/:busNo',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  BusController.updatePreviewNumber
+);
+
+router.put('/update-plan/:busNo',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  BusController.updatePlan
+);
+
+router.get('/plans/:busNo',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  BusController.getPlans
+);
+
+router.get('/validate-preview/:previewNumber',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  BusController.validatePreviewNumber
+);
+
+router.delete('/delete-bus/:busNo',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  BusController.deleteBus
+);
+
+router.put('/activate-bus/:busNo',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  BusController.activateBus
+);
+
+router.post('/combine-buses',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  BusController.combineBuses
+);
+
+router.post('/uncombine-buses/:operatingBus',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  BusController.uncombineBuses
+);
+
+// USER
+router.get('/get-all-buses',
+  authenticateToken,
+  BusController.getAllBuses
+);
+
+router.get('/:busNo',
+  authenticateToken,
+  BusController.getBusLocation
+);
+
+router.get('/statistics',
+  authenticateToken,
+  BusController.getBusStatistics
+);
+
+router.get('/location/:busNo',
+  authenticateToken,
+  BusController.getLiveLocation
+);
+
+router.get('/track-by-preview/:previewNumber',
+  authenticateToken,
+  BusController.trackByPreview
+);
+
+router.get('/route/:busNo/:planName',
+  authenticateToken,
+  BusController.getRouteStops
+);
+
+router.get('/current-plan/:busNo',
+  authenticateToken,
+  BusController.getCurrentPlan
+);
+
+router.post('/register-device-token',
+  authenticateToken,
+  BusController.registerDeviceToken
+);
 
 module.exports = router;
+

@@ -11,17 +11,17 @@ class ExcelUserService {
       if (!fs.existsSync(filePath)) {
         throw new Error('Uploaded file not found on server');
       }
-      
+
       const stats = fs.statSync(filePath);
       if (stats.size === 0) {
         throw new Error('Uploaded file is empty');
       }
-      
+
       const workbook = xlsx.readFile(filePath);
       const sheetName = workbook.SheetNames[0];
       const worksheet = workbook.Sheets[sheetName];
       const jsonData = xlsx.utils.sheet_to_json(worksheet);
-      
+
       if (!jsonData || jsonData.length === 0) {
         throw new Error('Excel file contains no data');
       }
@@ -39,7 +39,7 @@ class ExcelUserService {
       const sheetName = workbook.SheetNames[0];
       const worksheet = workbook.Sheets[sheetName];
       const jsonData = xlsx.utils.sheet_to_json(worksheet);
-      
+
       return this.validateAndNormalizeData(jsonData);
     } catch (error) {
       throw new Error(`Error processing Excel buffer: ${error.message}`);
@@ -99,9 +99,11 @@ class ExcelUserService {
   }
 
   normalizeRole(role) {
-    const roles = ['USER', 'PRIMARY_ADMIN', 'SUPERADMIN'];
-    const normalizedRole = role.toUpperCase();
-    return roles.includes(normalizedRole) ? normalizedRole : 'USER';
+    const roles = ['student', 'primary_admin', 'superadmin'];
+    const normalizedRole = (role || '').toLowerCase().trim();
+    // Support legacy names during transition if needed, or just map them
+    if (normalizedRole === 'user') return 'student';
+    return roles.includes(normalizedRole) ? normalizedRole : 'student';
   }
 
   isValidEmail(email) {

@@ -10,6 +10,7 @@ class ExcelManagementService {
         SELECT 
           eu.id,
           eu.fileName as file_name,
+          eu.custom_name as custom_name,
           eu.createdAt as uploaded_at,
           u.name as uploaded_by_name,
           COUNT(usr.id) as user_count
@@ -17,7 +18,7 @@ class ExcelManagementService {
         JOIN users u ON eu.uploadedBy = u.id
         LEFT JOIN users usr ON usr.excel_upload_id = eu.id
         WHERE eu.uploadedBy = ? AND eu.isActive = 1
-        GROUP BY eu.id, eu.fileName, eu.createdAt, u.name
+        GROUP BY eu.id, eu.fileName, eu.custom_name, eu.createdAt, u.name
         ORDER BY eu.createdAt DESC
       `, [userId]);
   
@@ -34,6 +35,7 @@ class ExcelManagementService {
         SELECT 
           eu.id,
           eu.fileName as file_name,
+          eu.custom_name as custom_name,
           eu.createdAt as uploaded_at,
           u.name as uploaded_by_name,
           u.id as uploaded_by_id
@@ -48,13 +50,13 @@ class ExcelManagementService {
     }
   }
 
-  // Process Excel upload with tracking - Allow multiple Excel uploads
-  async processExcelWithTracking(buffer, fileName, uploadedByUserId) {
+  // Process Excel upload with tracking - Allow multiple Excel uploads with custom names
+  async processExcelWithTracking(buffer, fileName, uploadedByUserId, customName = null) {
     try {
       // Always create new Excel upload record
       const [result] = await pool.execute(
-        'INSERT INTO excel_uploads (batchYear, fileName, filePath, uploadedBy, organisationId, isActive, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW())',
-        ['2024', fileName, 'uploaded', uploadedByUserId, null, 1]
+        'INSERT INTO excel_uploads (batchYear, fileName, filePath, uploadedBy, organisationId, isActive, createdAt, updatedAt, custom_name) VALUES (?, ?, ?, ?, ?, ?, NOW(), NOW(), ?)',
+        ['2024', fileName, 'uploaded', uploadedByUserId, null, 1, customName]
       );
       const excelUploadId = result.insertId;
 

@@ -170,6 +170,16 @@ diagnose-network.js
 DATABASE_CLEANUP_SUMMARY.md
 EXCEL_MANAGEMENT_IMPLEMENTATION_SUMMARY.md
 
-# Package lock files (uncomment if you want to ignore them)
-# package-lock.json
-# yarn.lock
+# Package lock files
+yarn.lock
+check*.js
+
+# Dev/Test/Cleanup/Temp files (backend)
+backend/test*.js
+backend/check*.js
+backend/cleanup*.js
+backend/delete*.js
+backend/diagnose*.js
+backend/run*.js
+db_users.json
+*.xlsx

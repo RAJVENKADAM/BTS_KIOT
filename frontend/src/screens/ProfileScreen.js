@@ -10,6 +10,8 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { useNavigation } from '@react-navigation/native';
+import { CommonActions } from '@react-navigation/native';
 import { useAuth } from '../context/AuthContext';
 import { COLORS, SPACING, RADIUS, SHADOWS } from '../theme';
 import { Header, Subtitle, Body, MutedText } from '../components/UI/Typography';
@@ -17,6 +19,7 @@ import Card from '../components/UI/Card';
 
 export default function ProfileScreen() {
   const { user, logout, loading } = useAuth();
+  const navigation = useNavigation();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
 
   if (loading) {
@@ -29,16 +32,6 @@ export default function ProfileScreen() {
     );
   }
 
-  if (!user) {
-    return (
-      <SafeAreaView style={styles.safeArea}>
-        <View style={styles.centerContainer}>
-          <Header>Please log in</Header>
-          <MutedText>Access your profile after signing in</MutedText>
-        </View>
-      </SafeAreaView>
-    );
-  }
 
   const handleLogout = async () => {
     Alert.alert(
@@ -53,6 +46,12 @@ export default function ProfileScreen() {
             setIsLoggingOut(true);
             try {
               await logout();
+              navigation.dispatch(
+                CommonActions.reset({
+                  index: 0,
+                  routes: [{ name: 'Login' }],
+                })
+              );
             } catch (error) {
               Alert.alert('Error', 'Failed to logout. Please try again.');
             } finally {

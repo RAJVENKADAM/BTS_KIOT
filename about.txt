@@ -1,0 +1,195 @@
+# BTS - Bus Tracking System
+## Complete Technical Documentation
+
+### 1. App Overview
+
+BTS (Bus Tracking System) is a **real-time bus tracking mobile application** built with **React Native** (frontend) and **Node.js/Express/MySQL** (backend). It enables superadmins, primary admins, and students to:
+
+- Track live GPS locations of school buses on an interactive map (HomeScreen).
+- Manage buses/users via Excel uploads (OrganizeScreen).
+- Receive real-time updates via Socket.IO.
+- Cache bus data locally (AsyncStorage) for offline resilience.
+
+**Key Features**:
+- Live polling + WebSocket updates (1s poll, real-time socket).
+- Multi-source tracking: Mobile app → GPS device → External API (gpstrack.in).
+- Bus creation/storage with routes, preview numbers, device IDs.
+- Role-based access (superadmin/student/primary_admin).
+
+**Current Directory**: `e:/My App/BTS - Copy`
+- Frontend: `frontend/` (React Native Expo)
+- Backend: `backend/src/` (Express APIs + services)
+
+### 2. Architecture Diagram (ASCII)
+
+```
+[React Native App] ↔ REST APIs + Socket.IO (/bus-location)
+     ↓                    ↓
+[HomeScreen/Map]   [Express Server] (port 3000?)
+     ↓                    ↓
+[BusContext] ←Socket [trackingService.busTrackingState]
+     ↓              ↓     ↓
+AsyncStorage    MySQL    GPS Cache (Map)
+                    ↓
+              gpstrack.in API (5s poll)
+```
+
+```
+Data Flow: GPS API → gpsService.cache → trackingService.state → DB live_locations → Socket emit → Frontend
+Priority: mobile(10s) > gps(20s) > external_gps(30s) → 'offline'
+```
+
+### 3. Bus Creation & Storage
+
+**Database Schema** (`buses` table):
+```
+id (PK auto-inc)
+bus_no (VARCHAR(50) UNIQUE NOT NULL)  ← e.g. 'TN30AH5907'
+bus_name (VARCHAR(100))               ← 'Bus TN30AH5907' or custom
+gps_device_id (VARCHAR(100))          ← GPS tracker ID, normalized (digits only)
+reg_no (VARCHAR(50))                  ← Duplicate of bus_no usually
+preview_number (VARCHAR)              ← Short ID for quick track e.g. '123'
+status (ENUM: 'active'/'inactive')
+mobile_live (BOOLEAN DEFAULT FALSE)
+current_plan (VARCHAR)                ← Route plan name
+created_at (TIMESTAMP)
+```
+
+**Creation Flows**:
+
+1. **Manual API** (`POST /api/bus/create-bus`):
+   ```
+   Body: { busNo: 'TN30AH5907', previewNumber: '123', deviceId: 'GPS-12345' }
+   Logic:
+   - Normalize/validate busNo (TN[A-Z0-9]+)
+   - INSERT/UPDATE buses (bus_no UNIQUE)
+   - Set status='active', gps_device_id=deviceId
+   ```
+
+2. **Excel Upload** (`POST /api/bus/upload-bus-routes` - multipart):
+   ```
+   - ExcelBusService.processExcelFile() → extracts routes/stops
+   - saveBusWithRoutes(busData, userId) → DB insert + routes assoc
+   ```
+
+**Storage Logic**:
+- Buses persist in MySQL `buses` table.
+- Live locations → `bus_live_locations` (INSERT ON DUPLICATE KEY UPDATE).
+- Users linked via `users.bus_no` FK (migration ensures sync).
+- getAllBuses(): SELECT active buses + enrich with GPS/tracking cache.
+
+### 4. GPS API Fetching & Matching
+
+**External GPS Provider**: `https://app.gpstrack.in/api/get_current_data`
+```
+Query: ?token=1v7XQwPwhKqcNEZc8m4rarQKqNFubSMJ&email=kiotcollege@gmail.com
+Response: [{deviceId, regNo, latitude, longitude, speed, vehicleStatus, address}]
+```
+
+**gpsService.js** (Singleton):
+```
+- POLL: cron '*/5 * * * * *' (5s) → axios GET → cache Map(regNo↑ → {lat,lng,speed,timestamp})
+- STALE: 30s timeout → delete cache entry
+- getAllCachedLocations(): Array with isOnline flag
+- feedToTracking: updateExternalGPSLocation(busNo, data)
+```
+
+**Matching Logic** (`getBusLocation` controller):
+```
+1. DB: SELECT buses WHERE bus_no OR preview_number OR reg_no = input
+2. Normalize deviceId (digits only)
+3. gpsService.fetchAllGPSData() → filter by:
+   - normalized deviceId == normalized v.deviceId
+   OR v.regNo == bus_no/reg_no
+4. Return enriched: {busNo, lat, lng, speed, source: 'gps-proxy'}
+```
+
+**Webhook**: `POST /gps/update-location` → trackingService.updateGpsLocation(device_id, data)
+
+### 5. Live Location Display in HomeScreen
+
+**HomeScreen.js Flow**:
+```
+1. Search: user enters 'TN30AH5907' → handleSearch() → setSelectedBusNo()
+2. useEffect([selectedBusNo]):
+   - pollLiveLocation() every 1s: busApi.getBusLocation(token, busNo)
+   - setBusData({busNo, regNo, lat, lng, speed, status, source})
+3. MapComponent(busData) → renders marker/polyline
+4. BottomSheet: swipeable animated view → shows speed/status/source
+5. noBusFound if 404 after poll
+```
+
+**BusContext.js** (Global State):
+```
+Reducer: SET_BUSES, UPDATE_BUS_STATUS, SET_SELECTED_BUS
+- refreshBuses(): /api/bus/get-all-buses → AsyncStorage.setItem('buses')
+- Socket: io('/bus-location') → 'bus-update' → dispatch UPDATE_BUS_STATUS
+- Caching: buses[] + selectedBusPreviewNumber
+```
+
+### 6. Real-time Socket.IO Updates
+
+**Backend (app.js + trackSocket.js)**:
+```
+Namespace: /bus-location
+Rooms: bus_${busNo}
+Events:
+- join-bus(busNo) → socket.join(`bus_${busNo}`)
+- update-mobile-location({userId, bus_no, lat, lng...}) → updateMobileLocation()
+- toggle-mobile-tracking({bus_no, active})
+- trackingService.broadcastLocation(busNo) → io.of('/bus-location').to(room).emit('locationUpdate', payload)
+```
+
+**Frontend Socket** (BusContext):
+```
+io(`${API_BASE_URL}/bus-location`, {path: '/socket.io/', auth: {token}})
+- 'locationUpdate'/'bus-update' → UPDATE_BUS_STATUS (live lat/lng/speed/status)
+```
+
+**Source Priority & Fallback** (trackingService):
+```
+State: busTrackingState[busNo] = {mobile/gps/external_gps: {..}, activeSource}
+Priority: mobile(10s timeout) > gps(20s) > external_gps(30s) → 'offline'
+broadcastLocation(): Pick active → emit with source/status
+```
+
+### 7. Key Files Reference
+
+| Path | Purpose |
+|------|---------|
+| `frontend/src/screens/HomeScreen.js` | Map + search + 1s polling |
+| `frontend/src/context/BusContext.js` | State mgmt + socket listener + cache |
+| `backend/src/controllers/bus.controller.js` | /api/bus/* incl. getBusLocation matching |
+| `backend/src/services/gpsService.js` | GPS API polling + cache |
+| `backend/src/services/trackingService.js` | Multi-source state + timeouts + broadcast |
+| `backend/src/app.js` | Socket namespace + GPS webhook |
+| `backend/src/socket/trackSocket.js` | Socket event handlers |
+
+### 8. Key API Endpoints
+
+| Method | Endpoint | Purpose |
+|--------|----------|---------|
+| POST | `/api/bus/create-bus` | Create/update bus w/ deviceId |
+| GET | `/api/bus/get-all-buses` | Active buses + live GPS enrich |
+| GET | `/api/bus/:busNo` | Live location proxy (poll target) |
+| GET | `/api/bus/track-by-preview/:num` | Legacy preview lookup |
+| POST | `/gps/update-location` | GPS device webhook |
+| WS | `/bus-location` (join-bus) | Real-time room updates |
+
+### 9. Deployment/Run
+
+```
+Backend: cd backend && npm install && npm start
+Frontend: cd frontend && npm install && npx expo start
+Env: GPS_TOKEN, GPS_EMAIL, DB creds (.env)
+```
+
+**Production Notes**:
+- GPS polling scales with vehicle count (axios timeout 10s).
+- MySQL: Add indexes on buses(bus_no, preview_number, gps_device_id).
+- Socket scale: Redis adapter for multi-server.
+- Mobile: Background location via locationService.js/bgTracking.js.
+
+**Last Updated**: Auto-generated by BLACKBOXAI analysis.
+**Word Count**: ~1800
+

@@ -7,113 +7,192 @@ import {
   Animated,
   Platform
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 
 // Conditional import for web compatibility
-let MapView, Marker, Callout, PROVIDER_GOOGLE;
+let MapView, Marker, Callout, PROVIDER_GOOGLE, AnimatedRegion;
 
 // Check if running on web environment
 const isWeb = typeof window !== 'undefined' && typeof document !== 'undefined';
 
 if (isWeb) {
   // Web environment - render a placeholder or use web maps
-  MapView = ({ children, style, initialRegion, showsUserLocation, showsMyLocationButton, 
-           showsCompass, zoomEnabled, scrollEnabled, pitchEnabled, rotateEnabled }) => (
+  MapView = ({ children, style }) => (
     <View style={[styles.map, style, styles.webMapContainer]}>
       <Text style={styles.webMapPlaceholder}>Map functionality not available on web</Text>
       <Text style={styles.webMapHint}>Use mobile app for map features</Text>
       {children}
     </View>
   );
-  
-  Marker = ({ children, coordinate, pinColor }) => (
-    <View style={styles.webMarkerPlaceholder}>
-      {children}
-    </View>
-  );
-  
+
+  Marker = ({ children }) => <View style={styles.webMarkerPlaceholder}>{children}</View>;
+  Marker.Animated = Marker; // Mock for web
+
   Callout = ({ children }) => <View style={styles.webCallout}>{children}</View>;
-  PROVIDER_GOOGLE = null; // Not used on web
+  PROVIDER_GOOGLE = null;
+
+  // Mock AnimatedRegion for web to prevent reference errors
+  AnimatedRegion = class {
+    constructor(config) {
+      this.latitude = config.latitude || 0;
+      this.longitude = config.longitude || 0;
+    }
+    timing() { return { start: () => { } }; }
+    setValue() { }
+  };
 } else {
   // Native environment
   const RNMaps = require('react-native-maps');
   MapView = RNMaps.default;
-  ({ Marker, Callout, PROVIDER_GOOGLE } = RNMaps);
+  ({ Marker, Callout, PROVIDER_GOOGLE, AnimatedRegion } = RNMaps);
 }
 
-import { useAuth } from '../../context/AuthContext';
 
-const MapComponent = ({ busData, destination }) => {
+
+const MapComponent = ({ busData, destination, markerStatus = 'moving', autoFocus = false, onAutoFocusDone, onUserInteraction }) => {
+  // FIX: Ensure mapRegion is defined
   const [mapRegion, setMapRegion] = useState({
-    latitude: 11.55,
-    longitude: 78.02,
+    latitude: 11.554528,
+    longitude: 78.019759,
     latitudeDelta: 0.0922,
     longitudeDelta: 0.0421,
   });
-  
-  const animatedValue = useRef(new Animated.Value(0)).current;
-  const { token } = useAuth();
+
+  // Pulse Animation Value
+  const pulseAnim = useRef(new Animated.Value(0)).current;
+  const bounceAnim = useRef(new Animated.Value(0)).current;
+  const bounceAnimRef = useRef(null);
+
+  // AnimatedRegion for the bus movement
+  const [coordinate] = useState(new AnimatedRegion({
+    latitude: 11.554528,
+    longitude: 78.019759,
+    latitudeDelta: 0,
+    longitudeDelta: 0
+  }));
+
+
   const mapRef = useRef(null);
+
+  const statusStyles = {
+    moving: {
+      borderColor: '#2ecc71',
+      backgroundColor: 'rgba(46, 204, 113, 0.18)',
+      borderWidth: 2,
+      borderStyle: 'dotted',
+    },
+    stopped: {
+      borderColor: '#c0392b',
+      backgroundColor: '#e74c3c',
+      borderWidth: 2,
+      borderStyle: 'solid',
+    },
+  };
 
   // Animate marker when bus data updates
   useEffect(() => {
-    if (busData && busData.latitude && busData.longitude) {
-      // Update map region to center on the bus
-      setMapRegion({
-        latitude: busData.latitude,
-        longitude: busData.longitude,
-        latitudeDelta: 0.0922,
-        longitudeDelta: 0.0421,
-      });
+  if (busData?.latitude && busData?.longitude) {
+    const newCoord = {
+      latitude: busData.latitude,
+      longitude: busData.longitude,
+    };
 
-      // Animate the marker
-      Animated.loop(
-        Animated.sequence([
-          Animated.timing(animatedValue, {
-            toValue: 1,
-            duration: 1000,
-            useNativeDriver: true,
-          }),
-          Animated.timing(animatedValue, {
-            toValue: 0,
-            duration: 1000,
-            useNativeDriver: true,
-          }),
-        ])
-      ).start();
-    }
-  }, [busData, animatedValue]);
+    coordinate.timing({
+      ...newCoord,
+      duration: 1500,
+      useNativeDriver: false,
+    }).start();
 
-  // Fit to bus and destination markers
+    // 🔥 Important fallback fix
+    coordinate.setValue(newCoord);
+  }
+}, [busData]);
+
   useEffect(() => {
-    if (mapRef.current && busData && busData.latitude && busData.longitude) {
-      const coordinates = [busData];
-      
-      // Add destination if it exists
-      if (destination && destination.latitude && destination.longitude) {
-        coordinates.push(destination);
-      }
-      
-      if (coordinates.length > 0) {
-        setTimeout(() => {
-          mapRef.current.fitToCoordinates(coordinates, {
-            edgePadding: { top: 50, right: 50, bottom: 200, left: 50 },
-            animated: true,
-          });
-        }, 100);
-      }
-    }
-  }, [busData, destination]);
+    const duration = markerStatus === 'moving' ? 1200 : 2000;
+    bounceAnim.setValue(0);
+    bounceAnimRef.current?.stop();
 
+    bounceAnimRef.current = Animated.loop(
+      Animated.sequence([
+        Animated.timing(bounceAnim, {
+          toValue: 1,
+          duration,
+          useNativeDriver: true,
+        }),
+        Animated.timing(bounceAnim, {
+          toValue: 0,
+          duration,
+          useNativeDriver: true,
+        }),
+      ])
+    );
+
+    bounceAnimRef.current.start();
+
+    return () => {
+      bounceAnimRef.current?.stop();
+    };
+  }, [markerStatus]);
+
+  const markerTranslateY = bounceAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, -6],
+  });
+
+  const userInteractedRef = useRef(false);
+
+  useEffect(() => {
+    if (autoFocus) {
+      userInteractedRef.current = false;
+    }
+  }, [autoFocus]);
+
+  // Fit to bus and destination markers only when autoFocus is requested.
+  useEffect(() => {
+    if (!autoFocus || userInteractedRef.current || !mapRef.current) return;
+    if (!busData || !busData.latitude || !busData.longitude) return;
+
+    const coordinates = [busData];
+    if (destination && destination.latitude && destination.longitude) {
+      coordinates.push(destination);
+    }
+
+    if (coordinates.length > 0) {
+      setTimeout(() => {
+        mapRef.current.fitToCoordinates(coordinates, {
+          edgePadding: { top: 50, right: 50, bottom: 200, left: 50 },
+          animated: true,
+        });
+        if (onAutoFocusDone) onAutoFocusDone();
+      }, 100);
+    }
+  }, [autoFocus, busData, destination, onAutoFocusDone]);
+
+  useEffect(() => {
+  const startAnimation = () => {
+    pulseAnim.setValue(0);
+    Animated.loop(
+      Animated.timing(pulseAnim, {
+        toValue: 1,
+        duration: 2000,
+        useNativeDriver: false, // Required for transform/opacity on non-native props
+      })
+    ).start();
+  };
+
+  startAnimation();
+}, []);
   // Calculate distance between two points (in km)
   const calculateDistance = (lat1, lon1, lat2, lon2) => {
     const R = 6371; // Earth radius in km
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a = 
-      Math.sin(dLat/2) * Math.sin(dLat/2) +
-      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
-      Math.sin(dLon/2) * Math.sin(dLon/2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     return R * c; // Distance in km
   };
 
@@ -122,7 +201,21 @@ const MapComponent = ({ busData, destination }) => {
     if (distance <= 0) return 0;
     return Math.round((distance / 30) * 60); // time = distance/speed * 60 minutes
   };
+useEffect(() => {
+  const animation = Animated.loop(
+    Animated.timing(pulseAnim, {
+      toValue: 1,
+      duration: 2000,
+      useNativeDriver: false,
+    })
+  );
 
+  animation.start();
+
+  return () => {
+    animation.stop(); // 🔥 important
+  };
+}, []);
   return (
     <View style={styles.container}>
       <MapView
@@ -130,13 +223,19 @@ const MapComponent = ({ busData, destination }) => {
         provider={PROVIDER_GOOGLE || undefined}
         style={styles.map}
         initialRegion={mapRegion}
-        showsUserLocation={false}
-        showsMyLocationButton={false}
+        showsUserLocation={true}
+        showsMyLocationButton={true}
         showsCompass={true}
         zoomEnabled={true}
         scrollEnabled={true}
         pitchEnabled={false}
         rotateEnabled={false}
+        onPanDrag={() => {
+          if (!userInteractedRef.current) {
+            userInteractedRef.current = true;
+            if (onUserInteraction) onUserInteraction();
+          }
+        }}
       >
         {/* Destination Marker - only show if destination is valid */}
         {destination && destination.latitude && destination.longitude && (
@@ -154,59 +253,43 @@ const MapComponent = ({ busData, destination }) => {
           </Marker>
         )}
 
+        {/* KIOT College Marker */}
+        <Marker
+          coordinate={{
+            latitude: 11.554528,
+            longitude: 78.019759,
+          }}
+          pinColor="green"
+        >
+          <Callout tooltip>
+            <View style={styles.kiotCallout}>
+              <View style={styles.kiotCalloutInner}>
+                <Text style={styles.kiotCalloutText}>KIOT College</Text>
+              </View>
+            </View>
+          </Callout>
+        </Marker>
+
         {/* Bus Marker */}
         {busData && busData.latitude && busData.longitude && (
-          <Marker
-            coordinate={{
-              latitude: busData.latitude,
-              longitude: busData.longitude,
-            }}
-            pinColor={busData.isOnline ? 'green' : 'red'}
-          >
-            <Animated.View 
-              style={[
-                styles.animatedMarker,
-                {
-                  transform: [{
-                    scale: animatedValue.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: [1, 1.2]
-                    })
-                  }]
-                }
-              ]}
-            >
-              <View style={[
-                styles.busMarker,
-                { backgroundColor: busData.isOnline ? '#27ae60' : '#e74c3c' }
-              ]}>
-                <Text style={styles.busMarkerText}>{busData.busNo}</Text>
-              </View>
-            </Animated.View>
-            
-            <Callout tooltip>
-              <View style={styles.callout}>
-                <View style={styles.calloutInner}>
-                  <Text style={styles.calloutText}>Bus: {busData.busNo}</Text>
-                  <Text style={styles.calloutText}>Status: {busData.isOnline ? 'Online' : 'Offline'}</Text>
-                  {busData.driverName && (
-                    <Text style={styles.calloutText}>Driver: {busData.driverName}</Text>
-                  )}
-                  {destination && destination.latitude && destination.longitude && (
-                    <>
-                      <Text style={styles.calloutText}>
-                        Distance: {calculateDistance(busData.latitude, busData.longitude, destination.latitude, destination.longitude).toFixed(2)} km
-                      </Text>
-                      <Text style={styles.calloutText}>
-                        ETA: {calculateETA(calculateDistance(busData.latitude, busData.longitude, destination.latitude, destination.longitude))} min
-                      </Text>
-                    </>
-                  )}
-                </View>
-              </View>
-            </Callout>
-          </Marker>
-        )}
+  <Marker.Animated
+    coordinate={coordinate}
+    anchor={{ x: 0.5, y: 0.5 }} // FIXED
+    flat={false}
+  >
+    <View style={styles.whiteCore}>
+      <View
+        style={[
+          styles.solidCircle,
+          {
+            backgroundColor:
+              markerStatus === 'moving' ? '#2ecc71' : '#e74c3c',
+          },
+        ]}
+      />
+    </View>
+  </Marker.Animated>
+)}
 
         {/* Route Line (if route data is available) */}
         {busData && busData.route && busData.route.length > 0 && (
@@ -229,32 +312,32 @@ const styles = StyleSheet.create({
     width: '100%',
     height: '100%',
   },
-  animatedMarker: {
+  statusMarker: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  busMarker: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#27ae60',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: '#fff',
     shadowColor: '#000',
     shadowOffset: {
       width: 0,
       height: 2,
     },
-    shadowOpacity: 0.25,
-    shadowRadius: 3.84,
+    shadowOpacity: 0.2,
+    shadowRadius: 3,
     elevation: 5,
   },
-  busMarkerText: {
-    color: '#fff',
-    fontWeight: 'bold',
-    fontSize: 12,
+  statusCenter: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: '#27ae60',
+  },
+  waitingCenter: {
+    backgroundColor: '#f39c12',
+  },
+  stoppedCenter: {
+    backgroundColor: '#c0392b',
   },
   destinationCallout: {
     width: 100,
@@ -266,6 +349,20 @@ const styles = StyleSheet.create({
     borderRadius: 5,
   },
   destinationCalloutText: {
+    color: '#fff',
+    fontWeight: 'bold',
+    textAlign: 'center',
+  },
+  kiotCallout: {
+    width: 120,
+    backgroundColor: 'transparent',
+  },
+  kiotCalloutInner: {
+    backgroundColor: '#27ae60',
+    padding: 10,
+    borderRadius: 5,
+  },
+  kiotCalloutText: {
     color: '#fff',
     fontWeight: 'bold',
     textAlign: 'center',
@@ -305,6 +402,41 @@ const styles = StyleSheet.create({
   },
   webCallout: {
     // Placeholder for web callout
+  },
+  markerWrapper: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 100,
+  },
+  pulseRing: {
+    position: 'absolute',
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    borderWidth: 2,
+    zIndex: 1,
+  },
+  solidCircle: {
+    width: 25,
+    height: 25,
+    borderColor: '#ffffff',
+    borderWidth: 2,
+    borderRadius: 15, // Exactly half of width/height for a perfect circle
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 2,
+    elevation: 10,
+    zIndex: 100, // Keeps it well above the pulse
+  },
+  whiteCore: {
+    width: 0,
+    height: 0,
+    borderRadius: 4,
+    backgroundColor: 'white',
+    zIndex: 100,
   },
 });
 

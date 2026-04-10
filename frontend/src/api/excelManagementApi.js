@@ -16,6 +16,13 @@ export const excelManagementApi = {
       const data = rawText ? JSON.parse(rawText) : {};
 
       if (!response.ok) {
+        // Handle auth errors
+        if (response.status === 401 || response.status === 403) {
+          console.error('Auth error:', data.error);
+          // Trigger logout via AuthContext
+          const logout = require('../context/AuthContext').useAuth().logout;
+          logout().catch(console.error);
+        }
         throw new Error(data.error || 'Failed to fetch Excel uploads');
       }
 
