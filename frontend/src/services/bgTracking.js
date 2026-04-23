@@ -61,7 +61,7 @@ export const startBackgroundTracking = async () => {
 
     await Location.startLocationUpdatesAsync(TRACKING_TASK_NAME, {
         accuracy: Location.Accuracy.High,
-        timeInterval: 2000,
+        timeInterval: 30000,  // Updated to 30 seconds for rate limit
         distanceInterval: 0,
         foregroundService: {
             notificationTitle: "Bus Tracking Active",
@@ -75,6 +75,7 @@ export const startBackgroundTracking = async () => {
     const skt = await getSocket();
     skt.emit('toggle-mobile-tracking', { bus_no: user?.bus_no, active: true });
 
+    console.log('✅ Background GPS tracking started - 30s intervals');
     return true;
 };
 
@@ -93,8 +94,11 @@ export const stopBackgroundTracking = async () => {
         socket.disconnect();
         socket = null;
     }
+
+    console.log('🛑 Background GPS tracking stopped');
 };
 
 export const isTrackingActive = async () => {
     return await Location.hasStartedLocationUpdatesAsync(TRACKING_TASK_NAME);
 };
+

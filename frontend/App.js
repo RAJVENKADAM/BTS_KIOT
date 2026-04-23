@@ -1,6 +1,7 @@
 import 'react-native-gesture-handler';
 import React from 'react';
 import { NavigationContainer } from '@react-navigation/native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { createStackNavigator } from '@react-navigation/stack';
 
 import { AuthProvider } from './src/context/AuthContext';
@@ -71,7 +72,9 @@ export default function App() {
     <AuthProvider>
       <BusProvider>
         <NavigationContainer>
-          <AuthNavigator />
+          <GestureHandlerRootView style={{ flex: 1 }}>
+            <AuthNavigator />
+          </GestureHandlerRootView>
         </NavigationContainer>
       </BusProvider>
     </AuthProvider>

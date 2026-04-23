@@ -3,7 +3,7 @@ import { Alert, Platform } from 'react-native';
 
 class LocationService {
   constructor() {
-    this.watchId = null;
+    this.intervalId = null;
     this.isTracking = false;
     this.locationCallback = null;
   }
@@ -27,7 +27,7 @@ class LocationService {
     }
   }
 
-  // Start tracking location
+  // Start tracking location - NOW every 30 seconds exactly
   async startTracking(callback) {
     const hasPermission = await this.requestPermissions();
     
@@ -43,18 +43,41 @@ class LocationService {
     this.locationCallback = callback;
     this.isTracking = true;
 
-    // Start watching position
-    this.watchId = await Location.watchPositionAsync(
-      {
+    // Fetch immediately first
+    try {
+      console.log('📍 Initial GPS fetch...');
+      const position = await Location.getCurrentPositionAsync({
         enableHighAccuracy: true,
         accuracy: Location.Accuracy.High,
-        distanceInterval: 10, // Update every 10 meters
-        timeInterval: 5000, // Update every 5 seconds
-      },
-      (position) => {
+        timeout: 15000,
+        maximumAge: 10000,
+      });
+      const { latitude, longitude, accuracy } = position.coords;
+      if (this.locationCallback) {
+        this.locationCallback({
+          latitude,
+          longitude,
+          accuracy,
+          timestamp: position.timestamp
+        });
+      }
+    } catch (error) {
+      console.error('Initial GPS fetch error:', error);
+    }
+
+    // Set 30-second interval for rate limit compliance
+    this.intervalId = setInterval(async () => {
+      if (!this.isTracking || !this.locationCallback) return;
+      
+      try {
+        console.log('📍 GPS fetch every 30s...');
+        const position = await Location.getCurrentPositionAsync({
+          enableHighAccuracy: true,
+          accuracy: Location.Accuracy.High,
+          timeout: 15000,
+          maximumAge: 29000, // Almost 30s max age
+        });
         const { latitude, longitude, accuracy } = position.coords;
-        
-        // Call the callback with new location data
         if (this.locationCallback) {
           this.locationCallback({
             latitude,
@@ -63,23 +86,28 @@ class LocationService {
             timestamp: position.timestamp
           });
         }
+      } catch (error) {
+        console.error('Periodic GPS fetch error:', error);
+        // Don't stop tracking on single failure
       }
-    );
+    }, 30000); // Exactly 30 seconds
 
+    console.log('✅ GPS tracking started - 30s intervals');
     return true;
   }
 
   // Stop tracking location
   stopTracking() {
-    if (this.watchId !== null) {
-      this.watchId.remove();
-      this.watchId = null;
-      this.isTracking = false;
-      this.locationCallback = null;
+    if (this.intervalId !== null) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
     }
+    this.isTracking = false;
+    this.locationCallback = null;
+    console.log('🛑 GPS tracking stopped');
   }
 
-  // Get current position once
+  // Get current position once (unchanged)
   async getCurrentPosition() {
     const hasPermission = await this.requestPermissions();
     
@@ -110,3 +138,4 @@ class LocationService {
 // Export a singleton instance
 const locationService = new LocationService();
 export default locationService;
+

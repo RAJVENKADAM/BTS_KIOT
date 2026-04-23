@@ -31,8 +31,12 @@ const busReducer = (state, action) => {
     case 'UPDATE_BUS_STATUS':
       return {
         ...state,
-        buses: state.buses.map(bus => bus.busNo === action.payload.busNo ? { ...bus, ...action.payload } : bus),
-        selectedBus: state.selectedBus?.busNo === action.payload.busNo 
+        buses: state.buses.map(bus => 
+          (bus.busNo === action.payload.busNo || bus.bus_no === action.payload.busNo) 
+            ? { ...bus, ...action.payload } 
+            : bus
+        ),
+        selectedBus: state.selectedBus?.busNo === action.payload.busNo || state.selectedBus?.bus_no === action.payload.busNo
           ? { ...state.selectedBus, ...action.payload } 
           : state.selectedBus,
       };
@@ -85,7 +89,19 @@ export const BusProvider = ({ children }) => {
     });
 
     newSocket.on('bus-update', (data) => {
+      console.log('BusContext bus-update:', data);
       dispatch({ type: 'UPDATE_BUS_STATUS', payload: data });
+      
+      // Direct plan update if available, plus refresh for robustness
+      if (data.actionType === 'PLAN_CHANGED' && data.currentPlan) {
+        dispatch({ 
+          type: 'UPDATE_BUS_STATUS', 
+          payload: { busNo: data.busNo, currentPlan: data.currentPlan } 
+        });
+      }
+      if (data.actionType === 'PLAN_CHANGED') {
+        refreshBuses();
+      }
     });
 
     return () => {
@@ -140,6 +156,7 @@ export const BusProvider = ({ children }) => {
       dispatch({ type: 'SET_SELECTED_PREVIEW', payload: previewNumber });
       dispatch({ type: 'SET_SELECTED_BUS', payload: { previewNumber, busNo: data.busNo || 'Unknown' } });
       await AsyncStorage.setItem('selectedBusPreviewNumber', previewNumber);
+      const currentSocket = getSocket();
       if (currentSocket) currentSocket.emit('join-bus', data.busNo);
     } catch (error) {
       dispatch({ type: 'SET_ERROR', payload: error.message });
@@ -183,6 +200,7 @@ export const BusProvider = ({ children }) => {
     selectBus,
     setSelectedPlan,
     updateLocation,
+    getSocket,
   };
 
   return (

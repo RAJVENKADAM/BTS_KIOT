@@ -49,7 +49,7 @@ if (isWeb) {
 
 
 
-const MapComponent = ({ busData, destination, markerStatus = 'moving', autoFocus = false, onAutoFocusDone, onUserInteraction }) => {
+const MapComponent = ({ busData, destination, markerStatus = 'moving', autoFocus = false, animate = true, onAutoFocusDone, onUserInteraction }) => {
   // FIX: Ensure mapRegion is defined
   const [mapRegion, setMapRegion] = useState({
     latitude: 11.554528,
@@ -89,7 +89,7 @@ const MapComponent = ({ busData, destination, markerStatus = 'moving', autoFocus
     },
   };
 
-  // Animate marker when bus data updates
+// Animate marker when bus data updates
   useEffect(() => {
   if (busData?.latitude && busData?.longitude) {
     const newCoord = {
@@ -97,16 +97,20 @@ const MapComponent = ({ busData, destination, markerStatus = 'moving', autoFocus
       longitude: busData.longitude,
     };
 
-    coordinate.timing({
-      ...newCoord,
-      duration: 1500,
-      useNativeDriver: false,
-    }).start();
-
-    // 🔥 Important fallback fix
-    coordinate.setValue(newCoord);
+    // Instant snap for initial/search (animate=false), smooth for socket updates
+    if (!animate) {
+      coordinate.setValue(newCoord);
+    } else {
+      coordinate.timing({
+        ...newCoord,
+        duration: 1000, // Shorter for refresh
+        useNativeDriver: false,
+      }).start();
+      // Fallback
+      setTimeout(() => coordinate.setValue(newCoord), 100);
+    }
   }
-}, [busData]);
+}, [busData, animate]);
 
   useEffect(() => {
     const duration = markerStatus === 'moving' ? 1200 : 2000;

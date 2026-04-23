@@ -26,7 +26,8 @@ class NotificationService {
   }
 
   // Create DB message for each affected bus and send push notifications to users assigned to those buses
-  async notifyBusUpdate({ actorId = null, actionType, busNumbers = [], title = null, body = null }) {
+async notifyBusUpdate({ actorId = null, actionType, busNumbers = [], title = null, body = null, currentPlan = null }) {
+
     if (!actionType || !Array.isArray(busNumbers) || busNumbers.length === 0) {
       throw new Error('actionType and busNumbers are required for notifications');
     }
@@ -85,7 +86,7 @@ class NotificationService {
       if (io) {
         for (const busNo of busNumbers) {
           const room = `bus-${busNo}`;
-          io.to(room).emit('bus-update', { actionType, busNo, message: messageText, timestamp });
+          io.to(room).emit('bus-update', { actionType, busNo, currentPlan: data.currentPlan || 'Plan A', message: messageText, timestamp });
         }
       }
     } catch (err) {

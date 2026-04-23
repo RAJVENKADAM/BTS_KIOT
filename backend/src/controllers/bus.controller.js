@@ -260,15 +260,30 @@ async function updatePlan(req, res) {
   try {
     const { busNo } = req.params;
     const { plan } = req.body;
+    const userId = req.user.id;
 
-    await pool.execute(
-      'UPDATE buses SET current_plan = ? WHERE bus_no = ?',
-      [plan, busNo]
-    );
+    const result = await ExcelBusService.changeBusPlan(busNo, plan, userId);
+    
+    // Send push notification and socket emit with plan
+    await NotificationService.notifyBusUpdate({
+      actorId: userId,
+      actionType: 'PLAN_CHANGED',
+      busNumbers: [busNo],
+      title: `Route Plan Updated`,
+      body: `Bus ${busNo} now following ${plan}`,
+      currentPlan: plan
+    });
 
-    res.json({ message: 'Plan updated successfully' });
+
+    res.json({ 
+      success: true, 
+      message: 'Plan updated successfully',
+      busNo: result.busNo,
+      newPlan: result.newPlan 
+    });
 
   } catch (err) {
+    console.error('Update plan error:', err);
     res.status(500).json({ error: err.message });
   }
 }

@@ -2,7 +2,7 @@ import Constants from "expo-constants";
 
 const getApiBaseUrl = () => {
   // Use your actual PC IP address
-  return "http://10.197.120.77:5000";
+  return "http://10.244.55.77:5000";
 
   // FOR TESTING: Force localhost
   // return "http://localhost:5000";

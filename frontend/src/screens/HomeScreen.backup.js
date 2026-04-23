@@ -1,5 +1,4 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import MapComponent from '../components/Map/MapComponent';
 import {
   View,
   Text,
@@ -10,6 +9,7 @@ import {
   TouchableOpacity,
   Animated,
   Dimensions,
+  AsyncStorage,
   Modal,
   ScrollView,
   ActivityIndicator,
@@ -22,7 +22,7 @@ import busApi from '../api/busApi';
 import io from 'socket.io-client';
 import { COLORS, RADIUS, SHADOWS } from '../theme';
 import { useAuth } from '../context/AuthContext';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import MapComponent from '../components/Map/MapComponent';
 
 const { height } = Dimensions.get('window');
 
@@ -46,13 +46,20 @@ const calculateDistance = (lat1, lng1, lat2, lng2) => {
   return R * c;
 };
 
+const formatIndianTime = (hours, minutes, seconds) => {
+  const totalMinutes = hours * 60 + minutes + seconds / 60;
+  const hrs = Math.floor(totalMinutes / 60);
+  const mins = Math.floor(totalMinutes % 60);
+  const secs = Math.floor((totalMinutes % 1) * 60);
+  return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+};
+
 const HomeScreen = () => {
   const { token, user } = useAuth();
   const navigation = useNavigation();
   const role = (user?.role || 'student').toLowerCase();
   const isAdmin = role === 'superadmin';
-  const { error, refreshBuses, selectedPlan, setSelectedPlan, buses, getSocket } = useBus();
-  const socket = getSocket ? getSocket() : null;
+  const { error, refreshBuses, selectedPlan, setSelectedPlan, getSocket } = useBus();
 
   const [searchQuery, setSearchQuery] = useState('');
   const [busData, setBusData] = useState(null);
@@ -71,7 +78,7 @@ const HomeScreen = () => {
   const [routeStops, setRouteStops] = useState([]);
   const [loadingStops, setLoadingStops] = useState(false);
   const sheetHeight = useRef(new Animated.Value(MIN_HEIGHT)).current;
-
+  const pollInterval = useRef(null); // REMOVED - no polling
 
 
   useEffect(() => {
@@ -133,35 +140,6 @@ const HomeScreen = () => {
       setLocationStatus('loading');
     }
   }, [user, isAdmin, selectedBusNo, selectedPreviewNumber]);
-
-  // Removed auto-refresh on bus list change - manual only
-
-    // Socket room join for real-time updates
-  useEffect(() => {
-    if (socket && selectedBusNo) {
-      console.log('HomeScreen joining bus room:', `bus-${selectedBusNo}`);
-      socket.emit('join-bus', selectedBusNo);
-      return () => {
-        socket.emit('leave-bus', selectedBusNo);
-      };
-    }
-  }, [socket, selectedBusNo]);
-
-  // Local socket listener for immediate plan updates
-  useEffect(() => {
-    if (!socket) return;
-
-    const handleBusUpdate = (data) => {
-      console.log('HomeScreen bus-update:', data);
-      if ((data.busNo === selectedBusNo || data.bus_no === selectedBusNo) && data.currentPlan) {
-        setBusData(prev => prev ? { ...prev, currentPlan: data.currentPlan } : prev);
-        Alert.alert('Plan Updated', `Bus ${selectedBusNo} now on ${data.currentPlan}`);
-      }
-    };
-
-    socket.on('bus-update', handleBusUpdate);
-    return () => socket.off('bus-update', handleBusUpdate);
-  }, [socket, selectedBusNo]);
 
   useEffect(() => {
     refreshBuses();
@@ -227,8 +205,67 @@ const HomeScreen = () => {
     return 'moving';
   };
 
-  // Removed polling useEffect - socket + manual refresh only
-  useEffect(() => {}, [selectedBusNo, token]);
+  useEffect(() => {
+    if (selectedBusNo && token) {
+      let abortController = new AbortController();
+      const pollLiveLocation = async () => {
+        const signal = abortController.signal;
+        try {
+          // Only set loading if we don't have data yet
+          if (!busData) {
+            setLocationStatus('loading');
+          }
+          
+          const data = await busApi.getBusLocation(token, selectedBusNo);
+
+          if (data && data.latitude !== null && data.longitude !== null) {
+            const nextBusData = {
+              ...data,
+              source: data.source || 'gps'
+            };
+            setBusData(nextBusData);
+            setLastGoodLocation(nextBusData);
+            setLocationStatus(data.isStale ? 'stale' : 'live');
+            setNoBusFound(false);
+
+            const statusFromAPI = data.busState;
+            const statusFromCoordinates = detectBusStatus(data.latitude, data.longitude);
+            setMarkerStatus(chooseBusStatus(statusFromAPI, statusFromCoordinates));
+          } else {
+            console.log('No valid location in poll:', data);
+            // Only show error if we don't have any previous good location
+            if (!lastGoodLocation) {
+              setLocationStatus('error');
+              setNoBusFound(true);
+            } else {
+              setBusData(lastGoodLocation);
+              setLocationStatus('offline');
+            }
+          }
+        } catch (err) {
+          if (signal.aborted) return;
+          console.log('Poll error:', err.message);
+          // Only show error if we don't have any previous good location
+          if (!lastGoodLocation) {
+            setLocationStatus('error');
+            setNoBusFound(true);
+          } else {
+            setBusData(lastGoodLocation);
+            setLocationStatus('offline');
+          }
+        }
+      };
+
+      // Start polling immediately
+      pollLiveLocation();
+
+      // Continuous polling removed - use socket updates + manual refresh
+
+      return () => {
+        abortController.abort();
+      };
+    }
+  }, [selectedBusNo, token]);
 
 
   const toggleSheet = () => {
@@ -285,7 +322,6 @@ const HomeScreen = () => {
         setLastGoodLocation(nextBusData);
         setLocationStatus(data.isStale ? 'stale' : 'live');
         setNoBusFound(false);
-        setShouldAutoFocus(true);
         
         const statusFromAPI = data.busState;
         const statusFromCoordinates = detectBusStatus(data.latitude, data.longitude);
@@ -327,6 +363,8 @@ const HomeScreen = () => {
     setSearchQuery('');
     setNoBusFound(false);
     setLocationStatus('loading');
+
+    // Polling removed
 
     if (isPreviewSearch) {
       setSelectedPreviewNumber(query);
@@ -433,11 +471,21 @@ const HomeScreen = () => {
   const displayBusData = busData || lastGoodLocation;
   const displayBusLabel = selectedPreviewNumber || selectedBusNo || displayBusData?.busNo;
 
-  // Memoized bus card to prevent flicker (distance only, no ETA)
+  // Memoized bus card to prevent flicker
   const busCardContent = React.useMemo(() => {
     if (!displayBusData) return null;
 
     const distance = calculateDistance(displayBusData.latitude, displayBusData.longitude, KIOT_LAT, KIOT_LNG);
+    const speed = markerStatus === 'moving' ? (displayBusData.speed || 30) : 0;
+    let eta = 'No ETA';
+
+    if (speed > 0 && distance > 0) {
+      const timeHours = distance / speed;
+      const hours = Math.floor(timeHours);
+      const minutes = Math.floor((timeHours % 1) * 60);
+      const seconds = Math.floor((((timeHours % 1) * 60) % 1) * 60);
+      eta = formatIndianTime(hours, minutes, seconds);
+    }
 
     return (
       <View style={styles.busCard}>
@@ -452,15 +500,27 @@ const HomeScreen = () => {
         </View>
         
         <View style={styles.etaContainer}>
-          <Text style={styles.etaLabel}>Distance to College</Text>
+          <Text style={styles.etaLabel}>Estimated Time of Arrival</Text>
           <View style={styles.etaRow}>
             <View style={styles.etaItem}>
               <Text style={styles.etaValue}>{distance.toFixed(1)} KM</Text>
-              <Text style={styles.etaSubtext}>KIOT Campus</Text>
+              <Text style={styles.etaSubtext}>Distance</Text>
+            </View>
+            <View style={styles.etaDivider} />
+            <View style={styles.etaItem}>
+              <Text style={styles.etaValue}>{eta}</Text>
+              <Text style={styles.etaSubtext}>Time</Text>
             </View>
           </View>
         </View>
         
+        {/* ACTIVE PLAN SECTION */}
+{displayBusData?.currentPlan && (
+          <TouchableOpacity style={styles.planSection} onPress={handlePlanPress} activeOpacity={0.8}>
+            <Text style={styles.planLabel}>Active Plan</Text>
+            <Text style={styles.planValue}>{displayBusData.currentPlan}</Text>
+          </TouchableOpacity>
+        )}
       </View>
     );
   }, [displayBusData, displayBusLabel, markerStatus]);
@@ -474,7 +534,6 @@ const HomeScreen = () => {
         busData={busData}
         markerStatus={markerStatus}
         autoFocus={shouldAutoFocus}
-        animate={false}
         onAutoFocusDone={() => setShouldAutoFocus(false)}
         onUserInteraction={() => setShouldAutoFocus(false)}
       />
@@ -540,7 +599,6 @@ const HomeScreen = () => {
 </View>
   </View>
 
-
       {/* BOTTOM SHEET */}
       <Animated.View style={[styles.bottomSheet, { height: sheetHeight }]}>
         <TouchableOpacity style={styles.toggleButton} onPress={toggleSheet} activeOpacity={0.7}>
@@ -572,15 +630,7 @@ const HomeScreen = () => {
                user?.bus_no ? `Tracking your bus ${user.bus_no}...` : 'No bus assigned'}
             </Text>
           ) : displayBusData ? (
-            <>
-              {busCardContent}
-              {displayBusData?.currentPlan && (
-                <TouchableOpacity style={styles.planSection} onPress={handlePlanPress} activeOpacity={0.8}>
-                  <Text style={styles.planLabel}>Active Plan</Text>
-                  <Text style={styles.planValue}>{displayBusData.currentPlan}</Text>
-                </TouchableOpacity>
-              )}
-            </>
+            busCardContent
           ) : locationStatus === 'loading' ? (
             <Text style={styles.infoText}>Loading live location...</Text>
           ) : (
@@ -934,7 +984,12 @@ iconButtonPrimary: {
     color: COLORS.textBody,
   },
 
-  /* etaDivider removed */
+  etaDivider: {
+    width: 1,
+    height: 40,
+    backgroundColor: '#ddd',
+    marginHorizontal: 20,
+  },
 
   planSection: {
     marginTop: 16,
