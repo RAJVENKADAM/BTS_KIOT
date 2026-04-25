@@ -270,7 +270,7 @@ async function updatePlan(req, res) {
       actionType: 'PLAN_CHANGED',
       busNumbers: [busNo],
       title: `Route Plan Updated`,
-      body: `Bus ${busNo} now following ${plan}`,
+      body: `Now The bus plan is on ${plan}`,
       currentPlan: plan
     });
 
@@ -580,7 +580,47 @@ async function getRouteStops(req, res) {
 const getBusStatistics = async (req, res) => res.json({});
 const combineBuses = async (req, res) => res.json({});
 const uncombineBuses = async (req, res) => res.json({});
-const registerDeviceToken = async (req, res) => res.json({});
+
+// ================= SAVE PUSH TOKEN (new endpoint per task) =================
+async function savePushToken(req, res) {
+  try {
+    const { token, busNo } = req.body;
+    const userId = req.user.id;
+
+    if (!token) {
+      return res.status(400).json({ error: 'Token is required' });
+    }
+
+    // Use provided busNo or fallback to user's current bus_no
+    const effectiveBusNo = busNo || req.user.bus_no;
+    const result = await NotificationService.registerToken(userId, token, effectiveBusNo);
+    console.log(`[API] save-push-token: user=${userId}, bus=${effectiveBusNo}`);
+    res.json({ success: true, message: 'Push token saved', result });
+  } catch (err) {
+    console.error('Save push token error:', err);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+// ================= REGISTER DEVICE TOKEN (legacy, kept for compatibility) =================
+async function registerDeviceToken(req, res) {
+  try {
+    const { token, busNo } = req.body;
+    const userId = req.user.id;
+
+    if (!token) {
+      return res.status(400).json({ error: 'Token is required' });
+    }
+
+    const effectiveBusNo = busNo || req.user.bus_no;
+    const result = await NotificationService.registerToken(userId, token, effectiveBusNo);
+    console.log(`[API] register-device-token: user=${userId}, bus=${effectiveBusNo}`);
+    res.json({ success: true, message: 'Device token registered', result });
+  } catch (err) {
+    console.error('Register device token error:', err);
+    res.status(500).json({ error: err.message });
+  }
+}
 
 // CREATE BUS - Scalable model
 async function createBus(req, res) {
@@ -794,6 +834,7 @@ module.exports = {
   getBusStatistics,
   combineBuses,
   uncombineBuses,
+  savePushToken,
   registerDeviceToken,
   trackByPreview,
   createBus,

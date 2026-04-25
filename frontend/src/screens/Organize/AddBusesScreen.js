@@ -11,7 +11,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import * as DocumentPicker from 'expo-document-picker';
+import { pick } from '@react-native-documents/picker';
 
 import { useAuth } from '../../context/AuthContext';
 import { API_BASE_URL } from '../../api/api';

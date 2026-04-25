@@ -248,8 +248,8 @@ class ExcelBusService {
 
       // Create an auto message about the plan change
       const [messageResult] = await pool.execute(
-        'INSERT INTO messages (sender_id, recipient_role, bus_no, message, message_type, created_at) VALUES (?, ?, ?, ?, ?, NOW())',
-        [userId, 'ALL', busNo, `Bus ${busNo} has changed to plan: ${newPlan}`, 'AUTO_PLAN_CHANGE']
+        'INSERT INTO messages (bus_no, plan_name, message, created_by, created_at) VALUES (?, ?, ?, ?, NOW())',
+        [busNo, newPlan, `Bus ${busNo} has changed to plan: ${newPlan}`, userId]
       );
 
       // Get the created message

@@ -1,5 +1,5 @@
 import 'react-native-gesture-handler';
-import React from 'react';
+import React, { useEffect } from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { createStackNavigator } from '@react-navigation/stack';
@@ -16,6 +16,7 @@ import ProfileScreen from './src/screens/ProfileScreen';
 
 // Services
 import './src/services/bgTracking';
+import { initializeNotificationHandlers } from './src/services/notificationService';
 
 // Theme
 import { COLORS } from './src/theme';
@@ -68,6 +69,12 @@ function AuthNavigator() {
 
 // ✅ Root App (ONLY ONCE)
 export default function App() {
+  useEffect(() => {
+    // Setup notification handlers and listeners once on app mount
+    // Token registration happens AFTER login success in AuthContext
+    initializeNotificationHandlers();
+  }, []);
+
   return (
     <AuthProvider>
       <BusProvider>

@@ -15,11 +15,12 @@ const {
   getBusStatistics,
   combineBuses,
   uncombineBuses,
+  savePushToken,
   registerDeviceToken,
   validatePreviewNumber,
   updatePreviewNumber,
   trackByPreview,
-  createBus, // New
+  createBus,
   getBusLocation,
   getPlans
 } = BusController;
@@ -145,6 +146,11 @@ router.get('/route/:busNo/:planName',
 router.get('/current-plan/:busNo',
   authenticateToken,
   BusController.getCurrentPlan
+);
+
+router.post('/save-push-token',
+  authenticateToken,
+  BusController.savePushToken
 );
 
 router.post('/register-device-token',

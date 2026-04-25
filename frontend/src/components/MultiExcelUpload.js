@@ -8,7 +8,7 @@ import {
   Alert,
   Modal,
 } from 'react-native';
-import * as DocumentPicker from 'expo-document-picker';
+import { pick } from '@react-native-documents/picker';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, SPACING, RADIUS } from '../theme';
 import { Body, MutedText } from './UI/Typography';

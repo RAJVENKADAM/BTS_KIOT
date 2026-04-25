@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useRef } from 'r
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { CommonActions } from '@react-navigation/native';
 import { API_BASE_URL } from '../api/api';
+import { registerForPushNotificationsAsync } from '../services/notificationService';
 
 const AuthContext = createContext();
 
@@ -100,6 +101,18 @@ export const AuthProvider = ({ children }) => {
 
         setToken(data.token);
         setUser(data.user);
+
+        // Register push token AFTER login success (with bus_no)
+        if (data.user?.bus_no) {
+          try {
+            console.log('[AuthContext] Registering push token post-login for bus:', data.user.bus_no);
+            await registerForPushNotificationsAsync(data.user.bus_no);
+          } catch (pushErr) {
+            console.error('[AuthContext] Push token registration failed (non-blocking):', pushErr.message);
+          }
+        } else {
+          console.log('[AuthContext] User has no bus_no assigned, skipping push registration');
+        }
 
         return { success: true, data };
       } else {
