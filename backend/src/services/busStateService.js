@@ -6,9 +6,14 @@ class BusStateService {
         this.STOPPED_THRESHOLD = 10 * 60 * 1000; // 10 minutes
         this.CHECK_INTERVAL = 60 * 1000; // Check every minute
         this.intervalId = null;
+        this.started = false;
     }
 
     async startTracking() {
+        // Singleton per process
+        if (this.started) return;
+        this.started = true;
+
         console.log('Starting bus state tracking...');
         this.intervalId = setInterval(() => this.checkAndUpdateStates(), this.CHECK_INTERVAL);
         // Initial check

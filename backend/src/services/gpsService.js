@@ -7,10 +7,15 @@ class GPSService {
   constructor() {
     this.gpsCache = new Map(); // regNo → {latitude, longitude, speed, vehicleStatus, timestamp}
     this.cronJob = null;
+    this.started = false;
+
     this.GPS_TOKEN = process.env.GPS_TOKEN || '1v7XQwPwhKqcNEZc8m4rarQKqNFubSMJ';
     this.GPS_EMAIL = process.env.GPS_EMAIL || 'kiotcollege@gmail.com';
     this.GPS_API_BASE = 'https://app.gpstrack.in/api/get_current_data';
-    this.POLL_INTERVAL_MS = 35000; // 35 seconds to stay safe
+
+    // STRICT: 30s interval (rate limit is 1 req per 30s)
+    this.POLL_INTERVAL_MS = 30000;
+
     this.STALE_TIMEOUT_MS = 60000; // 60s cache validity
     this.lastFetchTime = 0;
     this.isFetching = false;
@@ -192,11 +197,21 @@ class GPSService {
 
 
   startPolling() {
+    // Singleton polling loop per process
+    if (this.started) return;
+    this.started = true;
+
+    // First fetch immediately, but rate-limit logic will prevent accidental bursts
     this.fetchGPSData();
-    this.cronJob = cron.schedule('*/35 * * * * *', () => {
+
+    // STRICT: every 30 seconds
+    const intervalSeconds = Math.floor(this.POLL_INTERVAL_MS / 1000);
+
+    this.cronJob = cron.schedule(`*/${intervalSeconds} * * * * *`, () => {
       this.fetchGPSData();
     });
-    console.log('🚀 GPS Polling started (35s interval)');
+
+    console.log(`🚀 GPS Polling started (${this.POLL_INTERVAL_MS / 1000}s interval)`);
   }
 
   stopPolling() {
@@ -235,4 +250,5 @@ class GPSService {
 }
 
 module.exports = new GPSService();
+
 

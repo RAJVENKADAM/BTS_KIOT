@@ -5,26 +5,44 @@ const socketIo = require("socket.io");
 const { setIO } = require("./socket");
 require("dotenv").config();
 
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
+
 // Add logging for incoming requests
-const morgan = require('morgan');
+const morgan = require("morgan");
 
 const app = express();
 
 // Disable ETag caching to prevent 304 responses
 app.disable("etag");
 
-/* ---------------- CORS CONFIG ---------------- */
+/* ---------------- SECURITY (PRODUCTION HARDENING) ---------------- */
+app.use(helmet());
+
+const corsOrigin = process.env.CORS_ORIGIN || "";
 const corsOptions = {
-  origin: "*", // dev only
+  origin: corsOrigin
+    ? corsOrigin.split(",").map((s) => s.trim())
+    : false,
   methods: ["GET", "POST", "PUT", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization"],
   credentials: true
 };
 
-// Enable request logging for debugging
-app.use(morgan('combined')); // Logs all requests
+// Enable request logging
+app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
 
 app.use(cors(corsOptions));
+
+// Basic rate limiting (tune as needed)
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.use("/api", apiLimiter);
 
 /* ---------------- SERVER ---------------- */
 const server = http.createServer(app);
@@ -47,12 +65,12 @@ try {
   console.warn('Track socket handlers not available:', err.message);
 }
 
-// Pre-require services that use getIO to warm them up
+// Pre-require services that do NOT start polling immediately
 require('./services/trackingService');
 require('./services/notificationService');
-require('./services/gpsService').startPolling();
-require('./services/busStateService').startTracking();
-console.log('✅ Socket services + GPS polling + Bus state tracking ready');
+
+// Services that require DB connectivity (GPS polling, bus state tracking)
+// are started from backend/server.js after DB readiness.
 
  /* ---------------- BODY PARSING ---------------- */
 app.use(express.json({ limit: "25mb", verify: (req, res, buf) => { req.rawBody = buf; } }));
@@ -145,6 +163,24 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
   });
+});
+
+// Global error handler (avoid leaking internals in production)
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  const statusCode = err.statusCode || err.status || 500;
+  const payload = {
+    error:
+      statusCode === 500 ? "Internal server error" : err.message || "Request failed",
+  };
+
+
+  if (process.env.NODE_ENV !== "production" && err.stack) {
+    payload.stack = err.stack;
+  }
+
+  console.error("API Error:", err);
+  res.status(statusCode).json(payload);
 });
 
 module.exports = { app, server };

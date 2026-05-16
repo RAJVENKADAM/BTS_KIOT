@@ -1,27 +1,53 @@
 const mysql = require('mysql2/promise');
 require('dotenv').config();
 
-const dbConfig = {
-  host: process.env.DB_HOST || 'localhost',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'bts_db',
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
-};
-
-const pool = mysql.createPool(dbConfig);
-
-// Test database connection
-const testConnection = async () => {
-  try {
-    const connection = await pool.getConnection();
-    console.log('Database connected successfully');
-    connection.release();
-  } catch (error) {
-    console.error('Database connection failed:', error.message);
+function requireDatabaseUrl() {
+  const url = process.env.DATABASE_URL;
+  if (!url) {
+    throw new Error('Missing DATABASE_URL env var');
   }
+  return url;
+}
+
+function parseMysql2PoolConfigFromDatabaseUrl(databaseUrl) {
+  // mysql://user:pass@host:port/database
+  // We only accept DATABASE_URL as the source of truth.
+  const url = new URL(databaseUrl);
+
+  return {
+    uri: undefined,
+    host: url.hostname,
+    port: url.port ? Number(url.port) : 3306,
+    user: url.username,
+    password: url.password,
+    database: url.pathname ? url.pathname.replace(/^\//, '') : undefined,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0,
+    // Avoid too aggressive timeouts during cold starts
+    connectTimeout: 10000,
+    acquireTimeout: 10000,
+  };
+}
+
+const pool = mysql.createPool(parseMysql2PoolConfigFromDatabaseUrl(requireDatabaseUrl()));
+
+async function testConnection() {
+  let conn;
+  try {
+    conn = await pool.getConnection();
+    await conn.query('SELECT 1 AS ok');
+    return true;
+  } catch (err) {
+    console.error('Database connection failed:', err.message);
+    return false;
+  } finally {
+    if (conn) conn.release();
+  }
+}
+
+module.exports = {
+  pool,
+  testConnection,
 };
 
-module.exports = { pool, testConnection };
