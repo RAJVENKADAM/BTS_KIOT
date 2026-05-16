@@ -4,8 +4,8 @@ const { pool } = require('../config/db');
 
 const { getIO } = require('../socket');
 
-const gpsService = require('./gpsService');
 const busStateService = require('./busStateService');
+
 const { getBusIdByBusNo } = require('./busIdHelper');
 
 class TrackingService {
@@ -48,7 +48,10 @@ class TrackingService {
   }
 
   async updateGpsLocation(deviceId, location) {
-    // Map deviceId -> bus_id (via bus table)
+    // IMPORTANT: trackingService must NOT call AGEPS GPS API.
+    // This method is only invoked by an external webhook (/gps/update-location),
+    // and it updates live location in DB via broadcastLocation().
+
     const [busResult] = await pool.execute(
       'SELECT id FROM buses WHERE gps_device_id = ?',
       [deviceId]
@@ -75,6 +78,7 @@ class TrackingService {
     this.broadcastLocation(busId);
     this.resetGpsTimeout(busId);
   }
+
 
   async updateExternalGPSLocation(busNo, location) {
     // External GPS currently arrives with regNo/busNo string at API boundary.

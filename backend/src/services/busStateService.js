@@ -111,17 +111,15 @@ class BusStateService {
 
   async checkAndUpdateStatesSafe() {
     if (this._inFlight) {
-      console.log(JSON.stringify({ code: 'STATE_CHECK_FAILED', reason: 'IN_FLIGHT', transient: false }));
       return;
     }
 
     this._inFlight = true;
     try {
-      // if DB fails, we just skip this cycle safely
       await this._ensureRepeatCountColumn();
 
       const [buses] = await pool.execute(`
-        SELECT bs.bus_id, bs.state, bs.last_latitude, bs.last_longitude, bs.last_coords_time,
+        SELECT bs.bus_id, bs.state, bs.last_latitude, bs.last_longitude, bs.last_coords_time, bs.state_changed_at,
                bll.latitude, bll.longitude, bll.updated_at
         FROM bus_states bs
         LEFT JOIN bus_live_locations bll ON bs.bus_id = bll.bus_id
@@ -129,7 +127,9 @@ class BusStateService {
         WHERE b.status = 'active'
       `);
 
-      const now = new Date();
+      const nowMs = Date.now();
+      const GPS_FRESHNESS_MS = 90 * 1000;
+      const MIN_STATE_CHANGE_DURATION_MS = 2 * 60 * 1000;
 
       for (const bus of buses) {
         let newState = bus.state;
@@ -138,24 +138,39 @@ class BusStateService {
         const liveLng = bus.longitude;
         const liveTime = bus.updated_at;
 
-        if (liveLat != null && liveLng != null && liveTime) {
+        // freshness check: ignore stale location records
+        const liveAgeMs = liveTime ? nowMs - new Date(liveTime).getTime() : null;
+        const liveFresh = liveAgeMs != null && liveAgeMs <= GPS_FRESHNESS_MS;
+
+        // default: keep last known location in DB; do not flicker when GPS stale
+
+        if (liveFresh && liveLat != null && liveLng != null) {
           const lastLat = parseFloat(bus.last_latitude);
           const lastLng = parseFloat(bus.last_longitude);
 
-          const latDiff = Math.abs(liveLat - lastLat);
-          const lngDiff = Math.abs(liveLng - lastLng);
-          const coordsChanged = latDiff > 0.0001 || lngDiff > 0.0001;
+          if (!Number.isNaN(lastLat) && !Number.isNaN(lastLng)) {
+            const latDiff = Math.abs(liveLat - lastLat);
+            const lngDiff = Math.abs(liveLng - lastLng);
+            const coordsChanged = latDiff > 0.0001 || lngDiff > 0.0001;
 
-          if (!coordsChanged && bus.last_coords_time) {
-            const timeSinceLastChange = now - new Date(bus.last_coords_time);
-            if (timeSinceLastChange >= this.STOPPED_THRESHOLD) newState = 'stopped';
-            else if (timeSinceLastChange >= this.WAITING_THRESHOLD) newState = 'waiting';
-          } else if (coordsChanged) {
-            newState = 'moving';
+            if (!coordsChanged && bus.last_coords_time) {
+              const timeSinceLastChange = nowMs - new Date(bus.last_coords_time).getTime();
+              if (timeSinceLastChange >= this.STOPPED_THRESHOLD) newState = 'stopped';
+              else if (timeSinceLastChange >= this.WAITING_THRESHOLD) newState = 'waiting';
+            } else if (coordsChanged) {
+              newState = 'moving';
+            }
           }
-        } else if (bus.last_coords_time) {
-          const timeSinceLastChange = now - new Date(bus.last_coords_time);
-          if (timeSinceLastChange >= this.STOPPED_THRESHOLD && bus.state !== 'stopped') newState = 'stopped';
+        }
+
+        // prevent state flickering: enforce minimum duration before allowing state change
+        const stateChangedAtMs = bus.state_changed_at ? new Date(bus.state_changed_at).getTime() : 0;
+        const stateAgeMs = stateChangedAtMs ? nowMs - stateChangedAtMs : Infinity;
+
+        if (newState !== bus.state) {
+          if (stateAgeMs < MIN_STATE_CHANGE_DURATION_MS) {
+            newState = bus.state;
+          }
         }
 
         if (newState !== bus.state) {
@@ -166,21 +181,24 @@ class BusStateService {
           `, [newState, bus.bus_id]);
         }
 
-        if (
-          liveLat != null && liveLng != null &&
-          (!bus.last_coords_time || new Date(liveTime) > new Date(bus.last_coords_time))
-        ) {
-          await pool.execute(`
-            UPDATE bus_states
-            SET last_latitude = ?, last_longitude = ?, last_coords_time = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE bus_id = ?
-          `, [liveLat, liveLng, liveTime, bus.bus_id]);
+        // Always update last coords when we have a fresh location
+        if (liveFresh && liveLat != null && liveLng != null) {
+          if (!bus.last_coords_time || new Date(liveTime).getTime() > new Date(bus.last_coords_time).getTime()) {
+            await pool.execute(`
+              UPDATE bus_states
+              SET last_latitude = ?, last_longitude = ?, last_coords_time = ?, updated_at = CURRENT_TIMESTAMP
+              WHERE bus_id = ?
+            `, [liveLat, liveLng, liveTime, bus.bus_id]);
+          }
         }
       }
     } catch (error) {
-      console.error('Error checking bus states:', error);
+      // silent skip cycle on failure
+    } finally {
+      this._inFlight = false;
     }
   }
+
 
   async getBusState(busId) {
     try {
