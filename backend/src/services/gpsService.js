@@ -1,19 +1,40 @@
 const axios = require('axios');
-const cron = require('node-cron');
 const { pool } = require('../config/db');
-// const trackingService = require('./trackingService'); // Remove circular dependency
+
+// Absolute singleton per process to ensure only ONE scheduler loop exists.
+const GLOBAL_STATE_KEY = '__BTS_AGEPS_GPS_SINGLE_LOOP__';
+if (!global[GLOBAL_STATE_KEY]) {
+  global[GLOBAL_STATE_KEY] = {
+    running: false,
+    lastRequestAt: 0,
+    // per-bus cooldown after 429 (min 2–5 minutes, capped)
+    busCooldown: new Map(), // busNo -> untilEpochMs
+    lastLogAt: 0,
+    logThrottleMs: 60 * 1000,
+  };
+}
 
 class GPSService {
   constructor() {
     this.gpsCache = new Map(); // regNo → {latitude, longitude, speed, vehicleStatus, timestamp}
-    this.cronJob = null;
     this.started = false;
+    this.isRunning = false; // anti-overlap lock
+    this.loopTimeout = null;
+    this.loopVersion = 0;
+
+    // 32s safe interval (must be 30–35s constraint friendly)
+    this.POLL_INTERVAL_SAFE_MS = 32000;
+
+    // cooldown caps: after 429, we do NOT immediately retry
+    this.MIN_429_COOLDOWN_MS = 2 * 60 * 1000;
+    this.MAX_429_COOLDOWN_MS = 5 * 60 * 1000;
 
     this.GPS_TOKEN = process.env.GPS_TOKEN || '1v7XQwPwhKqcNEZc8m4rarQKqNFubSMJ';
     this.GPS_EMAIL = process.env.GPS_EMAIL || 'kiotcollege@gmail.com';
     this.GPS_API_BASE = 'https://app.gpstrack.in/api/get_current_data';
 
-    // STRICT: 30s interval (rate limit is 1 req per 30s)
+    // STRICT: AGEPS constraint handled by single scheduler loop.
+    // Do not set interval here; use recursive setTimeout.
     this.POLL_INTERVAL_MS = 30000;
 
     this.STALE_TIMEOUT_MS = 60000; // 60s cache validity
@@ -23,27 +44,32 @@ class GPSService {
   }
 
 
-  async fetchGPSData() {
+  async fetchGPSData({ forced = false } = {}) {
     const now = Date.now();
+    const g = global[GLOBAL_STATE_KEY];
 
-    // Prevent overlapping requests
-    if (this.isFetching) {
-      console.log('📡 GPS fetch already in progress, skipping');
+    // anti-overlap lock
+    if (this.isRunning) return;
+
+    // global cooldown between requests (process-wide)
+    if (!forced && g.lastRequestAt && now - g.lastRequestAt < this.POLL_INTERVAL_SAFE_MS) {
       return;
     }
 
-    // Cooldown logic (production-safe): if last fetch < 30s ago => skip
-    if (now - this.lastFetchTime < 30000) {
-      console.log(JSON.stringify({ code: 'GPS_SKIPPED', reason: 'COOLDOWN', bus: null, ageMs: now - this.lastFetchTime }));
-      return;
-    }
+    this.isRunning = true;
+    this.isFetching = true;
+    g.lastRequestAt = now;
 
 
     this.isFetching = true;
     this.lastFetchTime = now;
 
     try {
-      console.log('📡 Fetching GPS data...');
+      // Throttled log to avoid spam
+      if (Date.now() - global[GLOBAL_STATE_KEY].lastLogAt > global[GLOBAL_STATE_KEY].logThrottleMs) {
+        global[GLOBAL_STATE_KEY].lastLogAt = Date.now();
+        console.log('📡 Fetching GPS data...');
+      }
       const url = `${this.GPS_API_BASE}?token=${this.GPS_TOKEN}&email=${this.GPS_EMAIL}`;
       const response = await axios.get(url, { timeout: 10000 });
 
@@ -75,6 +101,7 @@ class GPSService {
           });
 
           // Feed into tracking service (async-safe) - lazy require to avoid circular dependency
+          // Update DB via existing trackingService method (NO AGEPS calls inside trackingService).
           try {
             const trackingService = require('./trackingService');
             trackingService.updateExternalGPSLocation(regNo, {
@@ -85,8 +112,9 @@ class GPSService {
               timestamp: now
             });
           } catch (trackErr) {
-            console.warn('Tracking update failed:', trackErr.message);
+            // silent skip to keep scheduler stable
           }
+
         }
       });
 
@@ -101,15 +129,32 @@ class GPSService {
         }
       }
     } catch (error) {
-      if (error.response?.status === 429) {
-        const retryAfter = error.response.headers['retry-after'];
-        this.retryAfter = now + (retryAfter ? parseInt(retryAfter) * 1000 : 30000);
-        console.error('❌ GPS API 429 rate limit hit, retry after:', new Date(this.retryAfter).toISOString());
-      } else {
-        console.error('❌ GPS API Error:', error.message);
+      const status = error?.response?.status;
+      if (status === 429) {
+        // Enforce cooldown: do not immediately retry; min 2 min, cap 5 min
+        const retryAfterHeader = error?.response?.headers?.['retry-after'];
+        const retryAfterMs = retryAfterHeader ? parseInt(retryAfterHeader, 10) * 1000 : this.MIN_429_COOLDOWN_MS;
+        const cooldownMs = Math.min(this.MAX_429_COOLDOWN_MS, Math.max(this.MIN_429_COOLDOWN_MS, retryAfterMs));
+
+        // Since API is per-device and we don't have device mapping at request time,
+        // store a process-wide cooldown via lastRequestAt manipulation.
+        const until = Date.now() + cooldownMs;
+        global[GLOBAL_STATE_KEY].cooldownUntil = until;
+
+        if (Date.now() - global[GLOBAL_STATE_KEY].lastLogAt > global[GLOBAL_STATE_KEY].logThrottleMs) {
+          global[GLOBAL_STATE_KEY].lastLogAt = Date.now();
+          console.warn(`⚠️ AGEPS 429 rate limit hit. Cooling down for ${Math.round(cooldownMs / 1000)}s`);
+        }
+        return;
+      }
+
+      if (Date.now() - global[GLOBAL_STATE_KEY].lastLogAt > global[GLOBAL_STATE_KEY].logThrottleMs) {
+        global[GLOBAL_STATE_KEY].lastLogAt = Date.now();
+        console.warn('❌ GPS API Error:', error?.message || error);
       }
     } finally {
       this.isFetching = false;
+      this.isRunning = false;
     }
   }
 
@@ -143,69 +188,57 @@ class GPSService {
     return this.getLocationByRegNo(busNo);
   }
 
-  /**
-   * Fetch GPS data filtered by deviceId - for /bus/:busNo backend proxy
-   * @param {string} deviceId - Bus device ID
-   * @returns {Array} Raw GPS vehicles matching deviceId
-   */
-  async fetchGPSByDeviceId(deviceId) {
-    try {
-      const url = `${this.GPS_API_BASE}?token=${this.GPS_TOKEN}&email=${this.GPS_EMAIL}`;
-      const response = await axios.get(url, { timeout: 10000 });
-      const vehicles = response.data || [];
-      
-      // Normalize for matching (used by bus controller)
-      const normalizedDeviceId = String(deviceId || '').replace(/[^0-9]/g, '');
-      return vehicles.filter(v => 
-        String(v.deviceId || '').replace(/[^0-9]/g, '') === normalizedDeviceId || 
-        v.regNo === deviceId
-      );
-    } catch (error) {
-      console.error('GPS fetch by deviceId error:', error.message);
-      return [];
-    }
-  }
-
-  /**
-   * Fetch ALL GPS data without filtering - for bus location matching
-   */
-  async fetchAllGPSData() {
-    try {
-      const url = `${this.GPS_API_BASE}?token=${this.GPS_TOKEN}&email=${this.GPS_EMAIL}`;
-      const response = await axios.get(url, { timeout: 10000 });
-      return response.data || [];
-    } catch (error) {
-      console.error('GPS fetch all error:', error.message);
-      return [];
-    }
-  }
-
+  // IMPORTANT:
+  // - This service is the ONLY one that may call the AGEPS API.
+  // - All AGEPS API calls happen ONLY inside the single scheduler loop.
+  // - Any other exported methods must operate ONLY on the in-memory cache.
 
   startPolling() {
-    // Singleton polling loop per process
+    const g = global[GLOBAL_STATE_KEY];
+
+    // Absolute singleton guard across the process lifetime.
+    if (g.running) {
+      console.warn('⚠️ GPS scheduler already running. Skipping duplicate startPolling().');
+      return;
+    }
+    g.running = true;
+
+    // Start the loop only once.
     if (this.started) return;
     this.started = true;
 
-    // First fetch immediately, but rate-limit logic will prevent accidental bursts
-    this.fetchGPSData();
+    const loop = () => {
+      const cooldownUntil = g.cooldownUntil || 0;
+      const now = Date.now();
+      const delayMs = cooldownUntil > now
+        ? Math.max(0, Math.min(cooldownUntil - now, this.MAX_429_COOLDOWN_MS))
+        : this.POLL_INTERVAL_SAFE_MS;
 
-    // STRICT: every 30 seconds
-    const intervalSeconds = Math.floor(this.POLL_INTERVAL_MS / 1000);
+      this.loopTimeout = setTimeout(async () => {
+        try {
+          await this.fetchGPSData();
+        } catch (e) {
+          // never crash backend process
+        }
+        if (g.running) loop();
+      }, delayMs);
+    };
 
-    this.cronJob = cron.schedule(`*/${intervalSeconds} * * * * *`, () => {
-      this.fetchGPSData();
-    });
+    // Kick off immediately, then continue via recursive setTimeout.
+    loop();
 
-    console.log(`🚀 GPS Polling started (${this.POLL_INTERVAL_MS / 1000}s interval)`);
+    console.log('🚀 GPS single-loop scheduler started');
   }
 
   stopPolling() {
-    if (this.cronJob) {
-      this.cronJob.stop();
-    }
+    const g = global[GLOBAL_STATE_KEY];
+    g.running = false;
+    if (this.loopTimeout) clearTimeout(this.loopTimeout);
+    this.loopTimeout = null;
     this.gpsCache.clear();
-    console.log('🛑 GPS Polling stopped');
+    console.log('🛑 GPS single-loop scheduler stopped');
   }
+
 
   /**
    * Get all cached GPS locations as array for listing

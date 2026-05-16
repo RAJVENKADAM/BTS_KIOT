@@ -26,11 +26,22 @@ async function startDbDependentServices() {
   const gpsService = require('./gpsService');
   const busStateService = require('./busStateService');
 
-  // GPS polling is rate-limited internally; still ensure it does not create duplicates.
-  gpsService.startPolling();
-  busStateService.startTracking();
+  // Startup safety / ordering:
+  // - Start GPS scheduler first (single-loop)
+  // - Delay bus state tracking so it can read fresh DB rows
+  const START_DELAY_MS = 3000;
 
-  console.log('✅ DB ready: GPS polling and bus state tracking started');
+  gpsService.startPolling();
+
+  setTimeout(() => {
+    try {
+      busStateService.startTracking();
+      console.log('✅ DB ready: GPS polling started, bus state tracking started');
+    } catch (e) {
+      // never crash backend process
+    }
+  }, START_DELAY_MS);
+
 }
 
 module.exports = {
