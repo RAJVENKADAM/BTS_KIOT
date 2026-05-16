@@ -8,7 +8,7 @@ import {
   Alert,
   ScrollView,
 } from 'react-native';
-import { pick } from '@react-native-documents/picker';
+import * as DocumentPicker from 'expo-document-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { useBus } from '../context/BusContext';
 import { API_BASE_URL } from '../api/api';

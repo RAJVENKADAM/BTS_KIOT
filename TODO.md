@@ -1,14 +1,24 @@
-# TODO - BTS backend bus_id migration cleanup
+# TODO - Expo SDK 55 Android APK fix
 
-- [ ] Scan backend/src for any remaining `bus_no` usage.
-- [ ] Update `busStateService.js` to use `bus_id` exclusively (queries, joins, inserts/updates).
-- [ ] Update `trackingService.js` to map deviceId and mobile/user assignments to `bus_id` and insert into `bus_live_locations(bus_id, ...)`.
-- [ ] Update `gpsService.js` to ensure parameter passing uses `bus_id` internally (keep regNo/busNo only at API boundary).
-- [ ] Update `track.controller.js` to convert incoming busNo/user.bus_no into bus_id via helper before any DB operations.
-- [ ] Update `bus.controller.js` queries/joins/inserts to remove all `bus_no` usage in relational clauses.
-- [ ] Add a helper function `getBusIdByBusNo(busNo)` if needed (centralize in controller/service).
-- [ ] Run grep to ensure no `bus_no` remains in backend/src.
-- [ ] Run clean build / start locally (backend) and fix any runtime SQL errors.
-- [ ] Commit changes.
-- [ ] Push to GitHub `master` or `main` (detect correct default branch).
+## Step 1: Audit & plan approval
+- [x] Read `frontend/package.json`, `frontend/app.json`, `frontend/eas.json`
+- [x] Identify likely SDK-sensitive native module pins
+- [x] Confirm plan to align versions via `expo install`
+
+## Step 2: Dependency graph alignment
+- [ ] Update `frontend/package.json` (remove SDK-sensitive guess pins; rely on `expo install`)
+- [ ] Delete `frontend/node_modules` + `frontend/package-lock.json`
+- [ ] Run `npx expo install` inside `frontend/`
+
+## Step 3: Clean build environment
+- [ ] Ensure single dependency tree after install (no duplicates)
+
+## Step 4: Android config validation
+- [ ] Verify Android SDK/target/build tools via app config (already expected)
+
+## Step 5: Produce APK via EAS
+- [ ] Run: `eas build -p android --profile preview --clear-cache`
+
+## Step 6: Verify build output
+- [ ] Confirm APK artifact produced successfully
 

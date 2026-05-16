@@ -6,7 +6,7 @@ import {
   StyleSheet,
   Alert,
 } from 'react-native';
-import { pick } from '@react-native-documents/picker';
+import * as DocumentPicker from 'expo-document-picker';
 import { COLORS } from '../theme';
 
 const ExcelUpload = ({ onUpload, disabled = false }) => {

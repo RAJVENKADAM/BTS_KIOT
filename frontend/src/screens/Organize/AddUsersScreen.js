@@ -18,7 +18,7 @@ import { excelManagementApi } from '../../api/excelManagementApi';
 import ExcelUpload from '../../components/ExcelUpload';
 import MultiExcelUpload from '../../components/MultiExcelUpload';
 import ExcelUploadCard from '../../components/ExcelUploadCard';
-import { pick } from '@react-native-documents/picker';
+import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import XLSX from 'xlsx';
