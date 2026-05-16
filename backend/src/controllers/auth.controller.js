@@ -49,7 +49,7 @@ const login = async (req, res) => {
     // The frontend will handle redirecting them to the ChangePassword screen
 
     // Verify password
-    const isValidPassword = await bcrypt.compare(password, user.password_hash);
+    const isValidPassword = password === user.password_hash;
 
     if (!isValidPassword) {
       return res.status(401).json({
