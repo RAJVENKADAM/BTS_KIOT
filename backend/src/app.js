@@ -8,12 +8,10 @@ require("dotenv").config();
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 
-// Add logging for incoming requests
 const morgan = require("morgan");
 
 const app = express();
 
-// Disable ETag caching to prevent 304 responses
 app.disable("etag");
 
 /* ---------------- SECURITY (PRODUCTION HARDENING) ---------------- */
@@ -26,15 +24,12 @@ const corsOptions = {
     : false,
   methods: ["GET", "POST", "PUT", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization"],
-  credentials: true
+  credentials: true,
 };
 
-// Enable request logging
 app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
-
 app.use(cors(corsOptions));
 
-// Basic rate limiting (tune as needed)
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 300,
@@ -51,31 +46,33 @@ server.setTimeout(120000);
 /* ---------------- SOCKET.IO ---------------- */
 const io = socketIo(server, {
   path: "/socket.io",
-  cors: corsOptions
+  cors: corsOptions,
 });
 
 setIO(io);
 
-// Initialize socket handlers now that io is set
 try {
-  const { initTrackingHandlers } = require('./socket/trackSocket');
+  const { initTrackingHandlers } = require("./socket/trackSocket");
   initTrackingHandlers(io);
-  console.log('✅ Track socket handlers initialized');
+  console.log("✅ Track socket handlers initialized");
 } catch (err) {
-  console.warn('Track socket handlers not available:', err.message);
+  console.warn("Track socket handlers not available:", err.message);
 }
 
 // Pre-require services that do NOT start polling immediately
-require('./services/trackingService');
-require('./services/notificationService');
+require("./services/trackingService");
+require("./services/notificationService");
 
-// Services that require DB connectivity (GPS polling, bus state tracking)
-// are started from backend/server.js after DB readiness.
-
- /* ---------------- BODY PARSING ---------------- */
-app.use(express.json({ limit: "25mb", verify: (req, res, buf) => { req.rawBody = buf; } }));
+/* ---------------- BODY PARSING ---------------- */
+app.use(
+  express.json({
+    limit: "25mb",
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 app.use(express.urlencoded({ extended: true, limit: "25mb" }));
-
 
 /* ---------------- ROUTES ---------------- */
 app.use("/api/auth", require("./routes/auth.routes"));
@@ -87,33 +84,39 @@ app.use("/api/track", require("./routes/track.routes"));
 app.get("/health", (req, res) => {
   res.status(200).json({
     status: "OK",
-    message: "BTS Backend is running"
+    message: "BTS Backend is running",
   });
 });
 
-/* ---------------- 404 ---------------- */
 app.use("*", (req, res) => {
   res.status(404).json({ error: "Route not found" });
 });
 
 /* ---------------- SOCKET EVENTS & NAMESPACES ---------------- */
 const trackingService = require("./services/trackingService");
+const { getBusIdByBusNo } = require('./services/busIdHelper');
+
 const busLocationNamespace = io.of("/bus-location");
 
 busLocationNamespace.on("connection", (socket) => {
   console.log("Tracking client connected:", socket.id);
 
-  socket.on("join-bus", (busNo) => {
-    socket.join(`bus_${busNo}`);
-    console.log(`Socket ${socket.id} joined bus room: bus_${busNo}`);
+  socket.on("join-bus", async (busNo) => {
+    const busId = await getBusIdByBusNo(busNo);
+    if (!busId) return;
+    socket.join(`bus_${busId}`);
+    console.log(`Socket ${socket.id} joined bus room: bus_${busId}`);
   });
 
   // Mobile tracking update from Primary Admin
   socket.on("update-mobile-location", async (data) => {
     const { userId, bus_no, latitude, longitude, speed, heading } = data;
-    if (bus_no && latitude && longitude) {
+    if (bus_no && latitude != null && longitude != null) {
       await trackingService.updateMobileLocation(userId, bus_no, {
-        latitude, longitude, speed, heading
+        latitude,
+        longitude,
+        speed,
+        heading,
       });
     }
   });
@@ -140,7 +143,11 @@ app.post("/gps/update-location", async (req, res) => {
 
   try {
     await trackingService.updateGpsLocation(device_id, {
-      latitude, longitude, speed, heading, timestamp
+      latitude,
+      longitude,
+      speed,
+      heading,
+      timestamp,
     });
     res.status(200).json({ message: "GPS location updated" });
   } catch (error) {
@@ -158,22 +165,16 @@ io.on("connection", (socket) => {
     console.log(`Socket ${socket.id} joined room: ${room}`);
   });
 
-  // Message socket handlers removed
-
   socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
   });
 });
 
-// Global error handler (avoid leaking internals in production)
-// eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
   const statusCode = err.statusCode || err.status || 500;
   const payload = {
-    error:
-      statusCode === 500 ? "Internal server error" : err.message || "Request failed",
+    error: statusCode === 500 ? "Internal server error" : err.message || "Request failed",
   };
-
 
   if (process.env.NODE_ENV !== "production" && err.stack) {
     payload.stack = err.stack;
@@ -184,3 +185,4 @@ app.use((err, req, res, next) => {
 });
 
 module.exports = { app, server };
+

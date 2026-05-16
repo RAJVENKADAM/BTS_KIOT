@@ -108,16 +108,20 @@ async function updateBusNumber(req, res) {
 }
 
 // ================= GET ALL BUSES WITH LIVE GPS =================
+const { getBusIdByBusNo } = require('../services/busIdHelper');
+
+// ================= GET ALL BUSES WITH LIVE GPS =================
 async function getAllBuses(req, res) {
   try {
     const [dbBuses] = await pool.execute(`
-      SELECT bus_no, preview_number, status, gps_device_id, mobile_live, current_plan
+      SELECT id, bus_no, preview_number, status, gps_device_id, mobile_live, current_plan
       FROM buses WHERE status = 'active'
       ORDER BY CAST(preview_number AS UNSIGNED), bus_no ASC
     `);
 
     const gpsLocations = gpsService.getAllCachedLocations();
-    const gpsMap = new Map(gpsLocations.map(loc => [loc.busNo, loc]));
+    const gpsMap = new Map(gpsLocations.map((loc) => [loc.busNo, loc]));
+
 
     // Get live locations from tracking state
     const trackingLive = [];
@@ -187,7 +191,8 @@ async function deleteBus(req, res) {
 
     // 2. Delete related records (cascade)
     await pool.execute('DELETE FROM bus_routes WHERE bus_id = ?', [busId]);
-    await pool.execute('DELETE FROM bus_states WHERE bus_no = ?', [busNo]);
+    await pool.execute('DELETE FROM bus_states WHERE bus_id = ?', [busId]);
+
 
     // 3. Reset user assignments (if any)
     await pool.execute('UPDATE users SET bus_no = NULL WHERE bus_no = ?', [busNo]);
