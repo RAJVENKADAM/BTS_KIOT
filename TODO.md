@@ -1,24 +1,30 @@
-# TODO - Expo SDK 55 Android APK fix
+# TODO - Expo SDK 55 -> 54 Migration
 
-## Step 1: Audit & plan approval
-- [x] Read `frontend/package.json`, `frontend/app.json`, `frontend/eas.json`
-- [x] Identify likely SDK-sensitive native module pins
-- [x] Confirm plan to align versions via `expo install`
+## Step 1: Inspect current frontend config
+- [x] Read `frontend/package.json`
+- [x] Scan for Expo SDK 55 references
 
-## Step 2: Dependency graph alignment
-- [ ] Update `frontend/package.json` (remove SDK-sensitive guess pins; rely on `expo install`)
-- [ ] Delete `frontend/node_modules` + `frontend/package-lock.json`
-- [ ] Run `npx expo install` inside `frontend/`
+## Step 2: Prepare safe dependency downgrade
+- [ ] Update `frontend/package.json` to Expo SDK 54 compatible versions
+- [ ] Align `react`, `react-dom`, `react-native`, `react-native-*` versions with Expo SDK 54 expectations
+- [ ] Fix `react-native-maps` and `react-native-vector-icons/@expo/vector-icons` compatibility handling
 
-## Step 3: Clean build environment
-- [ ] Ensure single dependency tree after install (no duplicates)
 
-## Step 4: Android config validation
-- [ ] Verify Android SDK/target/build tools via app config (already expected)
 
-## Step 5: Produce APK via EAS
-- [ ] Run: `eas build -p android --profile preview --clear-cache`
+## Step 3: Clean lockfiles and reinstall
+- [ ] Delete `frontend/package-lock.json` and `frontend/node_modules`
+- [ ] Run exact npm install commands
 
-## Step 6: Verify build output
-- [ ] Confirm APK artifact produced successfully
+## Step 4: Apply Expo-managed install
+- [ ] Run exact `expo install` commands
+
+## Step 5: Cache cleanup + rebuild
+- [ ] Clear Expo/Metro caches
+- [ ] Run `expo doctor`
+- [ ] Run Android build: `expo run:android`
+- [ ] Verify Expo Go launch without native crashes
+
+## Step 6: Verification checklist
+- [ ] Confirm sockets, AsyncStorage, notifications, maps, animations still work
+- [ ] Confirm Android build and Expo Go testing are stable
 
