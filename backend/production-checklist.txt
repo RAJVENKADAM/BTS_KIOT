@@ -1,0 +1,15 @@
+Render Production Checklist (BTS)
+
+Backend
+- [ ] Redeploy after code changes
+- [ ] NODE_ENV=production
+- [ ] CORS_ORIGIN=<frontend origin or app origin>
+- [ ] JWT_SECRET=<strong secret>
+- [ ] DB_HOST, DB_USER, DB_PASSWORD, DB_NAME
+- [ ] EMAIL_USER, EMAIL_PASS (if using Nodemailer)
+- [ ] FIREBASE_* vars if using Firebase Admin
+
+Verification
+- [ ] GET /health returns 200
+- [ ] Socket.IO connects successfully (client can receive location updates)
+
