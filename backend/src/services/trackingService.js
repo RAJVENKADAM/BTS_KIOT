@@ -1,4 +1,7 @@
 const { pool } = require('../config/db');
+// (unused for now) const { safeExecute } = require('../config/dbQuery');
+
+
 const { getIO } = require('../socket');
 
 const gpsService = require('./gpsService');
@@ -33,7 +36,12 @@ class TrackingService {
     this.busTrackingState[busId].mobile = { ...location, timestamp: now };
     this.busTrackingState[busId].activeSource = 'mobile';
 
-    await pool.execute('UPDATE buses SET mobile_live = TRUE WHERE id = ?', [busId]);
+    try {
+      await pool.execute('UPDATE buses SET mobile_live = TRUE WHERE id = ?', [busId]);
+    } catch (err) {
+      const { structuredLog } = (() => ({}))();
+      console.log(JSON.stringify({ code: 'DB_ERROR', op: 'updateMobileLocation', busId, transient: true, message: err?.message }));
+    }
 
     this.broadcastLocation(busId);
     this.resetMobileTimeout(busId);
@@ -113,7 +121,11 @@ class TrackingService {
       this.busTrackingState[busId].mobile = null;
     }
 
-    await pool.execute('UPDATE buses SET mobile_live = ? WHERE id = ?', [active, busId]);
+    try {
+      await pool.execute('UPDATE buses SET mobile_live = ? WHERE id = ?', [active, busId]);
+    } catch (err) {
+      console.log(JSON.stringify({ code: 'DB_ERROR', op: 'setMobileTrackingStatus', busId, transient: true, message: err?.message }));
+    }
     this.broadcastLocation(busId);
   }
 
@@ -175,7 +187,7 @@ class TrackingService {
     }
   }
 
-  broadcastLocation(busId, gpsSignalLost = false) {
+  async broadcastLocation(busId, gpsSignalLost = false) {
     const state = this.busTrackingState[busId];
     const io = getIO();
     if (!io || !state) return;
@@ -237,17 +249,25 @@ class TrackingService {
     console.log(`📡 Broadcast ${busId}: ${payload.status} (${payload.source}) lat:${payload.latitude?.toFixed(4)}`);
 
     if (payload.latitude != null && payload.longitude != null) {
-      pool.execute(`
-        INSERT INTO bus_live_locations (bus_id, latitude, longitude, speed, updated_at)
-        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-        ON DUPLICATE KEY UPDATE
-          latitude = VALUES(latitude),
-          longitude = VALUES(longitude),
-          speed = VALUES(speed),
-          updated_at = CURRENT_TIMESTAMP
-      `, [busId, payload.latitude, payload.longitude, payload.speed || 0]);
+      try {
+        await pool.execute(`
+          INSERT INTO bus_live_locations (bus_id, latitude, longitude, speed, updated_at)
+          VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+          ON DUPLICATE KEY UPDATE
+            latitude = VALUES(latitude),
+            longitude = VALUES(longitude),
+            speed = VALUES(speed),
+            updated_at = CURRENT_TIMESTAMP
+        `, [busId, payload.latitude, payload.longitude, payload.speed || 0]);
+      } catch (err) {
+        console.log(JSON.stringify({ code: 'DB_ERROR', op: 'broadcastLocation:upsertLiveLocation', busId, transient: true, message: err?.message }));
+      }
 
-      busStateService.updateBusLocation(busId, payload.latitude, payload.longitude);
+      try {
+        await busStateService.updateBusLocation(busId, payload.latitude, payload.longitude);
+      } catch (err) {
+        console.log(JSON.stringify({ code: 'STATE_CHECK_FAILED', op: 'busStateService.updateBusLocation', busId, transient: true, message: err?.message }));
+      }
     }
   }
 }

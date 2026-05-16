@@ -14,8 +14,11 @@ class BusStateService {
     if (this.started) return;
     this.started = true;
     console.log('Starting bus state tracking...');
-    this.intervalId = setInterval(() => this.checkAndUpdateStates(), this.CHECK_INTERVAL);
-    await this.checkAndUpdateStates();
+    this._inFlight = false;
+    this.intervalId = setInterval(() => {
+      this.checkAndUpdateStatesSafe().catch(() => {});
+    }, this.CHECK_INTERVAL);
+    await this.checkAndUpdateStatesSafe();
   }
 
   async stopTracking() {
@@ -102,7 +105,19 @@ class BusStateService {
   }
 
   async checkAndUpdateStates() {
+    // kept for backward compatibility - not used directly by interval
+    return this.checkAndUpdateStatesSafe();
+  }
+
+  async checkAndUpdateStatesSafe() {
+    if (this._inFlight) {
+      console.log(JSON.stringify({ code: 'STATE_CHECK_FAILED', reason: 'IN_FLIGHT', transient: false }));
+      return;
+    }
+
+    this._inFlight = true;
     try {
+      // if DB fails, we just skip this cycle safely
       await this._ensureRepeatCountColumn();
 
       const [buses] = await pool.execute(`

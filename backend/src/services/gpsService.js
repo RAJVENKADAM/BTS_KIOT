@@ -19,8 +19,9 @@ class GPSService {
     this.STALE_TIMEOUT_MS = 60000; // 60s cache validity
     this.lastFetchTime = 0;
     this.isFetching = false;
-    this.retryAfter = 0;
+    // retryAfter removed from cooldown behavior to prevent long freezes
   }
+
 
   async fetchGPSData() {
     const now = Date.now();
@@ -31,17 +32,12 @@ class GPSService {
       return;
     }
 
-    // Check if we're still in cooldown from rate limit
-    if (now < this.retryAfter) {
-      console.log(`📡 GPS rate limited, retry after ${new Date(this.retryAfter).toISOString()}`);
+    // Cooldown logic (production-safe): if last fetch < 30s ago => skip
+    if (now - this.lastFetchTime < 30000) {
+      console.log(JSON.stringify({ code: 'GPS_SKIPPED', reason: 'COOLDOWN', bus: null, ageMs: now - this.lastFetchTime }));
       return;
     }
 
-    // Check if last fetch was too recent (shouldn't happen with cron, but safety check)
-    if (now - this.lastFetchTime < 30000) {
-      console.log('📡 GPS fetch too soon, skipping');
-      return;
-    }
 
     this.isFetching = true;
     this.lastFetchTime = now;
@@ -51,30 +47,19 @@ class GPSService {
       const url = `${this.GPS_API_BASE}?token=${this.GPS_TOKEN}&email=${this.GPS_EMAIL}`;
       const response = await axios.get(url, { timeout: 10000 });
 
-      // Check for HTTP 429
+      // Required behavior: DO NOT lock permanently using “future timestamp” cooldown.
+      // If GPS responds with 429, we simply let the next 30s cycle handle it.
       if (response.status === 429) {
-        const retryAfter = response.headers['retry-after'];
-        this.retryAfter = now + (retryAfter ? parseInt(retryAfter) * 1000 : 30000);
-        console.error('❌ GPS API 429 rate limit hit, retry after:', new Date(this.retryAfter).toISOString());
+        console.log(JSON.stringify({ code: 'GPS_SKIPPED', reason: 'GPS_429_HTTP', bus: null }));
         return;
       }
 
       // Check for 429 inside response body (GPS API quirk)
       if (response.data?.response === 429) {
-        // Extract retry-after from message if available
-        const match = response.data.message?.match(/after\s+(\d{1,2}):(\d{2}):(\d{2})/);
-        if (match) {
-          const [_, hours, mins, secs] = match;
-          const retryTime = new Date();
-          retryTime.setHours(parseInt(hours), parseInt(mins), parseInt(secs));
-          this.retryAfter = retryTime.getTime();
-        } else {
-          this.retryAfter = now + 30000;
-        }
-        console.error('❌ GPS API 429 rate limit (in body), retry after:', new Date(this.retryAfter).toISOString());
-        console.error('   Message:', response.data.message);
+        console.log(JSON.stringify({ code: 'GPS_SKIPPED', reason: 'GPS_429_BODY', bus: null }));
         return;
       }
+
 
       const vehicles = Array.isArray(response.data) ? response.data : [];
 

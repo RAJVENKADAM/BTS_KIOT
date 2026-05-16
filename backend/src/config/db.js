@@ -21,12 +21,20 @@ function parseMysql2PoolConfigFromDatabaseUrl(databaseUrl) {
     user: url.username,
     password: url.password,
     database: url.pathname ? url.pathname.replace(/^\//, '') : undefined,
+
+    // Production pool stability settings
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,
+    enableKeepAlive: true,
+
     // Avoid too aggressive timeouts during cold starts
     connectTimeout: 10000,
     acquireTimeout: 10000,
+    // Keep a small number of connections warm (defaults are usually fine, but these help Render/Railway churn)
+    // Note: mysql2 ignores unknown options; these are safe.
+    maxIdle: 5 * 60 * 1000,
+    idleTimeout: 5 * 60 * 1000,
   };
 }
 
