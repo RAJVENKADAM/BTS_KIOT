@@ -87,8 +87,14 @@ export const stopBackgroundTracking = async () => {
 
     const userData = await AsyncStorage.getItem('user');
     const user = userData ? JSON.parse(userData) : null;
-    const skt = await getSocket();
-    skt.emit('toggle-mobile-tracking', { bus_no: user?.bus_no, active: false });
+
+    // Best-effort: don't crash if socket cannot connect during shutdown
+    try {
+      const skt = await getSocket();
+      skt.emit('toggle-mobile-tracking', { bus_no: user?.bus_no, active: false });
+    } catch (err) {
+      console.error('Failed to notify tracking stop:', err);
+    }
 
     if (socket) {
         socket.disconnect();

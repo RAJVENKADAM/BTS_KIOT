@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, useEffect, useState } from 'react';
-import { io } from 'socket.io-client';
+import io from 'socket.io-client';
 import { API_BASE_URL } from '../api/api';
 import { useAuth } from './AuthContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';

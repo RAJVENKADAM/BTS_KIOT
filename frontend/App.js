@@ -15,7 +15,8 @@ import OrganizeScreen from './src/screens/OrganizeScreen';
 import ProfileScreen from './src/screens/ProfileScreen';
 
 // Services
-import './src/services/bgTracking';
+// Background tracking is initialized explicitly/guarded to avoid startup side-effect crashes.
+
 
 // Theme
 import { COLORS } from './src/theme';
