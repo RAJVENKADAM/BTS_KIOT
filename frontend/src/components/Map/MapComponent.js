@@ -9,8 +9,9 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
-// Conditional import for web compatibility
-let MapView, Marker, Callout, PROVIDER_GOOGLE, AnimatedRegion;
+// Import for native + safe web fallback
+let MapView, Marker, Callout, PROVIDER_DEFAULT, AnimatedRegion;
+
 
 // Check if running on web environment
 const isWeb = typeof window !== 'undefined' && typeof document !== 'undefined';
@@ -29,7 +30,8 @@ if (isWeb) {
   Marker.Animated = Marker; // Mock for web
 
   Callout = ({ children }) => <View style={styles.webCallout}>{children}</View>;
-  PROVIDER_GOOGLE = null;
+  PROVIDER_DEFAULT = null;
+
 
   // Mock AnimatedRegion for web to prevent reference errors
   AnimatedRegion = class {
@@ -44,32 +46,55 @@ if (isWeb) {
   // Native environment
   const RNMaps = require('react-native-maps');
   MapView = RNMaps.default;
-  ({ Marker, Callout, PROVIDER_GOOGLE, AnimatedRegion } = RNMaps);
+  ({ Marker, Callout, PROVIDER_DEFAULT, AnimatedRegion } = RNMaps);
+
 }
 
 
 
-const MapComponent = ({ busData, destination, markerStatus = 'moving', autoFocus = false, animate = true, onAutoFocusDone, onUserInteraction }) => {
-  // FIX: Ensure mapRegion is defined
-  const [mapRegion, setMapRegion] = useState({
-    latitude: 11.554528,
-    longitude: 78.019759,
-    latitudeDelta: 0.0922,
-    longitudeDelta: 0.0421,
-  });
+const KIOT_FALLBACK = {
+  latitude: 11.554528,
+  longitude: 78.019759,
+  latitudeDelta: 0.0922,
+  longitudeDelta: 0.0421,
+};
+
+const isValidCoord = (v) => typeof v === 'number' && Number.isFinite(v) && v !== 0;
+
+const toCoord = (obj) => {
+  const lat = obj?.latitude;
+  const lon = obj?.longitude;
+  return isValidCoord(lat) && isValidCoord(lon) ? { latitude: lat, longitude: lon } : null;
+};
+
+const MapComponent = ({
+  busData,
+  destination,
+  markerStatus = 'moving',
+  autoFocus = false,
+  animate = true,
+  onAutoFocusDone,
+  onUserInteraction,
+}) => {
+  // Always keep a safe, non-crashing region
+  const [mapRegion, setMapRegion] = useState(KIOT_FALLBACK);
+
 
   // Pulse Animation Value
   const pulseAnim = useRef(new Animated.Value(0)).current;
   const bounceAnim = useRef(new Animated.Value(0)).current;
   const bounceAnimRef = useRef(null);
 
-  // AnimatedRegion for the bus movement
-  const [coordinate] = useState(new AnimatedRegion({
-    latitude: 11.554528,
-    longitude: 78.019759,
-    latitudeDelta: 0,
-    longitudeDelta: 0
-  }));
+  // AnimatedRegion for the bus movement (always initialize with safe coords)
+  const [coordinate] = useState(
+    new AnimatedRegion({
+      latitude: KIOT_FALLBACK.latitude,
+      longitude: KIOT_FALLBACK.longitude,
+      latitudeDelta: 0,
+      longitudeDelta: 0,
+    })
+  );
+
 
 
   const mapRef = useRef(null);
@@ -91,26 +116,28 @@ const MapComponent = ({ busData, destination, markerStatus = 'moving', autoFocus
 
 // Animate marker when bus data updates
   useEffect(() => {
-  if (busData?.latitude && busData?.longitude) {
-    const newCoord = {
-      latitude: busData.latitude,
-      longitude: busData.longitude,
-    };
+    const newCoord = toCoord(busData);
+    if (!newCoord) return;
 
     // Instant snap for initial/search (animate=false), smooth for socket updates
     if (!animate) {
       coordinate.setValue(newCoord);
-    } else {
-      coordinate.timing({
+      return;
+    }
+
+    // Smooth updates; guard against crashes
+    coordinate
+      .timing({
         ...newCoord,
         duration: 1000, // Shorter for refresh
         useNativeDriver: false,
-      }).start();
-      // Fallback
-      setTimeout(() => coordinate.setValue(newCoord), 100);
-    }
-  }
-}, [busData, animate]);
+      })
+      .start();
+
+    // Fallback
+    setTimeout(() => coordinate.setValue(newCoord), 100);
+  }, [busData, animate]);
+
 
   useEffect(() => {
     const duration = markerStatus === 'moving' ? 1200 : 2000;
@@ -155,12 +182,16 @@ const MapComponent = ({ busData, destination, markerStatus = 'moving', autoFocus
   // Fit to bus and destination markers only when autoFocus is requested.
   useEffect(() => {
     if (!autoFocus || userInteractedRef.current || !mapRef.current) return;
-    if (!busData || !busData.latitude || !busData.longitude) return;
 
-    const coordinates = [busData];
-    if (destination && destination.latitude && destination.longitude) {
-      coordinates.push(destination);
+    const busCoord = toCoord(busData);
+    if (!busCoord) return;
+
+    const coordinates = [busCoord];
+    const destCoord = toCoord(destination);
+    if (destCoord) {
+      coordinates.push(destCoord);
     }
+
 
     if (coordinates.length > 0) {
       setTimeout(() => {
@@ -224,7 +255,7 @@ useEffect(() => {
     <View style={styles.container}>
       <MapView
         ref={mapRef}
-        provider={PROVIDER_GOOGLE || undefined}
+        provider={PROVIDER_DEFAULT}
         style={styles.map}
         initialRegion={mapRegion}
         showsUserLocation={true}
@@ -242,20 +273,22 @@ useEffect(() => {
         }}
       >
         {/* Destination Marker - only show if destination is valid */}
-        {destination && destination.latitude && destination.longitude && (
-          <Marker
-            coordinate={destination}
-            pinColor="red"
-          >
-            <Callout tooltip>
-              <View style={styles.destinationCallout}>
-                <View style={styles.destinationCalloutInner}>
-                  <Text style={styles.destinationCalloutText}>Destination</Text>
+        {(() => {
+          const destCoord = toCoord(destination);
+          if (!destCoord) return null;
+          return (
+            <Marker coordinate={destCoord} pinColor="red">
+              <Callout tooltip>
+                <View style={styles.destinationCallout}>
+                  <View style={styles.destinationCalloutInner}>
+                    <Text style={styles.destinationCalloutText}>Destination</Text>
+                  </View>
                 </View>
-              </View>
-            </Callout>
-          </Marker>
-        )}
+              </Callout>
+            </Marker>
+          );
+        })()}
+
 
         {/* KIOT College Marker */}
         <Marker

@@ -134,18 +134,16 @@ const HomeScreen = () => {
     }
   }, [user, isAdmin, selectedBusNo, selectedPreviewNumber]);
 
-  // Removed auto-refresh on bus list change - manual only
+  // Join/leave socket room when selectedBusNo changes
   useEffect(() => {
-    // Placeholder - removed legacy polling logic
-    // Real-time updates come from socket.io
-  }, [token]);
-    if (socket && selectedBusNo) {
-      console.log('HomeScreen joining bus room:', `bus-${selectedBusNo}`);
-      socket.emit('join-bus', selectedBusNo);
-      return () => {
-        socket.emit('leave-bus', selectedBusNo);
-      };
-    }
+    if (!socket || !selectedBusNo) return;
+
+    console.log('HomeScreen joining bus room:', `bus-${selectedBusNo}`);
+    socket.emit('join-bus', selectedBusNo);
+
+    return () => {
+      socket.emit('leave-bus', selectedBusNo);
+    };
   }, [socket, selectedBusNo]);
 
   // Local socket listener for immediate plan updates
@@ -229,7 +227,7 @@ const HomeScreen = () => {
   };
 
   // Removed polling useEffect - socket + manual refresh only
-  useEffect(() => {}, [selectedBusNo, token]);
+
 
 
   const toggleSheet = () => {
