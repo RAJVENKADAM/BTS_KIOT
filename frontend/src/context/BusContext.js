@@ -67,12 +67,23 @@ export const BusProvider = ({ children }) => {
   // Socket connection for real-time updates
   const [socket, setSocket] = useState(null);
   useEffect(() => {
-    if (!token) return;
+    if (!token) {
+      // Disconnect socket if token is cleared
+      if (socket) {
+        socket.disconnect();
+        setSocket(null);
+      }
+      return;
+    }
 
     const newSocket = io(`${API_BASE_URL}/bus-location`, { 
       path: '/socket.io/',
       transports: ['websocket'],
-      auth: { token } 
+      auth: { token },
+      reconnection: true,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      reconnectionAttempts: 5,
     });
 
     newSocket.on('connect', () => {
@@ -104,9 +115,11 @@ export const BusProvider = ({ children }) => {
       }
     });
 
+    // Cleanup: disconnect socket when token changes or component unmounts
     return () => {
-      newSocket.disconnect();
-      setSocket(null);
+      if (newSocket && newSocket.connected) {
+        newSocket.disconnect();
+      }
     };
   }, [token]);
 

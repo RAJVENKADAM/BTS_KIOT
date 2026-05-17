@@ -1,12 +1,12 @@
 import React from 'react';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { View, ActivityIndicator } from 'react-native';
 import { useAuth } from '../context/AuthContext';
 import { Ionicons as Icon } from '@expo/vector-icons';
 import { COLORS } from '../theme';
 
 // Import screens
 import HomeScreen from '../screens/HomeScreen';
-// import MessagesScreen from '../screens/MessagesScreen';
 import TrackMeScreen from '../screens/TrackMe/TrackMeScreen';
 import OrganizeScreen from '../screens/OrganizeScreen';
 import ProfileScreen from '../screens/ProfileScreen';
@@ -16,8 +16,14 @@ const Tab = createBottomTabNavigator();
 export default function BottomNavigator() {
   const { user, loading } = useAuth();
 
+  // NEVER return null - always return JSX
+  // Show loading indicator while auth loads
   if (loading) {
-    return null;
+    return (
+      <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: COLORS.background }}>
+        <ActivityIndicator color={COLORS.primary} size="large" />
+      </View>
+    );
   }
 
   const role = (user?.role || 'student').toLowerCase();

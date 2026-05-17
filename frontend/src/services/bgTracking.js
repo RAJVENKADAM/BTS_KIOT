@@ -12,12 +12,42 @@ const getSocket = async () => {
     if (socket && socket.connected) return socket;
 
     const token = await AsyncStorage.getItem('token');
-    socket = io(`${API_BASE_URL}/bus-location`, {
-        path: '/socket.io/',
-        transports: ['websocket'],
-        auth: { token }
+    
+    // Retry logic: ensure socket connects before returning
+    return new Promise((resolve, reject) => {
+      try {
+        socket = io(`${API_BASE_URL}/bus-location`, {
+            path: '/socket.io/',
+            transports: ['websocket'],
+            auth: { token },
+            reconnection: true,
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 5000,
+            reconnectionAttempts: 3,
+            timeout: 10000,
+        });
+
+        // Set a timeout to prevent hanging if connection fails
+        const connectionTimeout = setTimeout(() => {
+          if (!socket.connected) {
+            reject(new Error('Socket connection timeout'));
+          }
+        }, 10000);
+
+        socket.on('connect', () => {
+          clearTimeout(connectionTimeout);
+          resolve(socket);
+        });
+
+        socket.on('connect_error', (error) => {
+          console.error('Background socket connect error:', error);
+          clearTimeout(connectionTimeout);
+          reject(error);
+        });
+      } catch (err) {
+        reject(err);
+      }
     });
-    return socket;
 };
 
 TaskManager.defineTask(TRACKING_TASK_NAME, async ({ data, error }) => {
@@ -34,16 +64,21 @@ TaskManager.defineTask(TRACKING_TASK_NAME, async ({ data, error }) => {
                 const user = userData ? JSON.parse(userData) : null;
 
                 if (user && user.bus_no) {
-                    const skt = await getSocket();
-                    skt.emit('update-mobile-location', {
-                        userId: user.id,
-                        bus_no: user.bus_no,
-                        latitude: location.coords.latitude,
-                        longitude: location.coords.longitude,
-                        speed: location.coords.speed,
-                        heading: location.coords.heading,
-                        timestamp: location.timestamp
-                    });
+                    try {
+                      const skt = await getSocket();
+                      skt.emit('update-mobile-location', {
+                          userId: user.id,
+                          bus_no: user.bus_no,
+                          latitude: location.coords.latitude,
+                          longitude: location.coords.longitude,
+                          speed: location.coords.speed,
+                          heading: location.coords.heading,
+                          timestamp: location.timestamp
+                      });
+                    } catch (socketErr) {
+                      console.error('Failed to get socket connection:', socketErr);
+                      // Continue anyway - next update will retry
+                    }
                 }
             } catch (err) {
                 console.error('Failed to send background location:', err);

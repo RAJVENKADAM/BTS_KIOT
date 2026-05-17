@@ -135,9 +135,10 @@ const HomeScreen = () => {
   }, [user, isAdmin, selectedBusNo, selectedPreviewNumber]);
 
   // Removed auto-refresh on bus list change - manual only
-
-    // Socket room join for real-time updates
   useEffect(() => {
+    // Placeholder - removed legacy polling logic
+    // Real-time updates come from socket.io
+  }, [token]);
     if (socket && selectedBusNo) {
       console.log('HomeScreen joining bus room:', `bus-${selectedBusNo}`);
       socket.emit('join-bus', selectedBusNo);

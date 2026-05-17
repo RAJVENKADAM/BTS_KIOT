@@ -106,18 +106,11 @@ export const AuthProvider = ({ children }) => {
       console.log('PARSED LOGIN DATA:', data);
 
       if (response.ok) {
-        // IMPORTANT CHECK
-        if (!data.token) {
+        // IMPORTANT CHECK - validate both token and user before saving
+        if (!data.token || !data.user) {
           return {
             success: false,
-            error: 'Token missing from backend response',
-          };
-        }
-
-        if (!data.user) {
-          return {
-            success: false,
-            error: 'User data missing from backend response',
+            error: 'Incomplete server response - missing token or user data',
           };
         }
 
@@ -131,8 +124,6 @@ export const AuthProvider = ({ children }) => {
 
         console.log('Login success');
         console.log('Token saved successfully');
-
-
 
         return {
           success: true,
@@ -273,11 +264,8 @@ export const AuthProvider = ({ children }) => {
     isAuthenticated: !!token && !!user,
   };
 
-  // PREVENT APP FROM RENDERING BEFORE AUTH LOADS
-  if (loading) {
-    return null;
-  }
-
+  // ALWAYS return JSX from provider - never return null
+  // Loading state is handled by the app navigator
   return (
     <AuthContext.Provider value={value}>
       {children}

@@ -16,12 +16,10 @@ export const excelManagementApi = {
       const data = rawText ? JSON.parse(rawText) : {};
 
       if (!response.ok) {
-        // Handle auth errors
+        // Handle auth errors - let caller decide what to do
         if (response.status === 401 || response.status === 403) {
-          console.error('Auth error:', data.error);
-          // Trigger logout via AuthContext
-          const logout = require('../context/AuthContext').useAuth().logout;
-          logout().catch(console.error);
+          console.error('Auth error - token may be invalid:', data.error);
+          throw new Error('Authentication failed. Please login again.');
         }
         throw new Error(data.error || 'Failed to fetch Excel uploads');
       }

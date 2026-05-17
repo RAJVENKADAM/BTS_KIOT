@@ -103,7 +103,7 @@ class LocationService {
       this.intervalId = null;
     }
     this.isTracking = false;
-    this.locationCallback = null;
+    this.locationCallback = null; // IMPORTANT: Clear callback
     console.log('🛑 GPS tracking stopped');
   }
 
