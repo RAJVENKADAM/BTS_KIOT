@@ -1,42 +1,28 @@
 import React, { useEffect, useRef } from 'react';
 import { View, StyleSheet, Image, Animated, StatusBar } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+
 import { COLORS } from '../theme';
 import { Header, Subtitle, MutedText } from '../components/UI/Typography';
-import { useAuth } from '../context/AuthContext';
 
-export default function SplashScreen({ navigation }) {
-  const { token } = useAuth();
-
+export default function SplashScreen() {
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const scaleAnim = useRef(new Animated.Value(0.8)).current;
 
   useEffect(() => {
-    // Animation
     Animated.parallel([
       Animated.timing(fadeAnim, {
         toValue: 1,
-        duration: 800,
+        duration: 900,
         useNativeDriver: true,
       }),
       Animated.spring(scaleAnim, {
         toValue: 1,
-        friction: 6,
+        friction: 5,
         useNativeDriver: true,
       }),
     ]).start();
-
-    // Navigation after delay
-    const timer = setTimeout(() => {
-      if (token) {
-        navigation.replace('MainApp'); // ✅ Logged in
-      } else {
-        navigation.replace('Login'); // ✅ Not logged in
-      }
-    }, 2000);
-
-    return () => clearTimeout(timer);
-  }, [token]);
+  }, []);
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -62,20 +48,23 @@ export default function SplashScreen({ navigation }) {
         </Animated.View>
 
         {/* Title */}
-        <Animated.View style={[styles.textContainer, { opacity: fadeAnim }]}>
+        <Animated.View style={{ opacity: fadeAnim, alignItems: 'center' }}>
           <Header style={styles.title}>BTS App</Header>
           <Subtitle style={styles.subtitle}>Bus Tracking System</Subtitle>
         </Animated.View>
 
         {/* Footer */}
         <Animated.View style={[styles.footer, { opacity: fadeAnim }]}>
-          <MutedText style={styles.loading}>Tracking...</MutedText>
+          <MutedText style={styles.loading}>Loading...</MutedText>
         </Animated.View>
       </View>
     </SafeAreaView>
   );
 }
 
+/**
+ * Styles
+ */
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
@@ -93,41 +82,34 @@ const styles = StyleSheet.create({
     width: 120,
     height: 120,
     borderRadius: 40,
-    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+    backgroundColor: 'rgba(255,255,255,0.15)',
     justifyContent: 'center',
     alignItems: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
   },
   logo: {
     width: 70,
     height: 70,
-    tintColor: COLORS.white,
-  },
-  textContainer: {
-    alignItems: 'center',
+    tintColor: '#fff',
   },
   title: {
     fontSize: 36,
-    color: COLORS.white,
-    marginBottom: 4,
+    color: '#fff',
     fontWeight: '900',
   },
   subtitle: {
     fontSize: 16,
-    color: 'rgba(255, 255, 255, 0.7)',
+    color: 'rgba(255,255,255,0.7)',
+    marginTop: 4,
     fontWeight: '600',
   },
   footer: {
     position: 'absolute',
     bottom: 60,
-    alignItems: 'center',
   },
   loading: {
-    color: 'rgba(255, 255, 255, 0.5)',
-    fontWeight: '700',
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 12,
     letterSpacing: 1.5,
     textTransform: 'uppercase',
-    fontSize: 11,
   },
 });

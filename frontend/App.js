@@ -4,92 +4,68 @@ import { NavigationContainer } from '@react-navigation/native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { createStackNavigator } from '@react-navigation/stack';
 
-import { AuthProvider } from './src/context/AuthContext';
+import { AuthProvider, useAuth } from './src/context/AuthContext';
 import { BusProvider } from './src/context/BusContext';
 
-// Screens
-import LoginScreen from './src/screens/LoginScreen';
 import SplashScreen from './src/screens/SplashScreen';
+import LoginScreen from './src/screens/LoginScreen';
 import HomeScreen from './src/screens/HomeScreen';
 import OrganizeScreen from './src/screens/OrganizeScreen';
 import ProfileScreen from './src/screens/ProfileScreen';
 
-// Services
-// Background tracking is initialized explicitly/guarded to avoid startup side-effect crashes.
-
-
-// Theme
-import { COLORS } from './src/theme';
-
 const Stack = createStackNavigator();
 
-
-// ✅ Main App Navigator
-function MainApp() {
+/**
+ * Main authenticated app stack
+ */
+function MainStack() {
   return (
     <Stack.Navigator
       screenOptions={{
-        headerStyle: {
-          backgroundColor: COLORS.primary,
-        },
+        headerStyle: { backgroundColor: '#1976D2' },
         headerTintColor: '#fff',
-        headerTitleStyle: {
-          fontWeight: 'bold',
-        },
+        headerTitleStyle: { fontWeight: 'bold' },
       }}
     >
-      <Stack.Screen
-        name="Home"
-        component={HomeScreen}
-        options={{ headerShown: false }}
-      />
-
-      <Stack.Screen
-        name="Profile"
-        component={ProfileScreen}
-      />
-
-      <Stack.Screen
-        name="Organize"
-        component={OrganizeScreen}
-        options={{ headerTitle: 'Admin Dashboard' }}
-      />
+      <Stack.Screen name="Home" component={HomeScreen} options={{ headerShown: false }} />
+      <Stack.Screen name="Profile" component={ProfileScreen} />
+      <Stack.Screen name="Organize" component={OrganizeScreen} options={{ title: 'Admin Dashboard' }} />
     </Stack.Navigator>
   );
 }
 
+/**
+ * Auth + App routing controller
+ */
+function AppNavigator() {
+  const { token, loading } = useAuth();
 
-// ✅ Auth Navigator
-function AuthNavigator() {
+  // IMPORTANT: never return null in native apps for root navigation
+  if (loading) {
+    return <SplashScreen />;
+  }
+
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
-      <Stack.Screen
-        name="Splash"
-        component={SplashScreen}
-      />
-
-      <Stack.Screen
-        name="Login"
-        component={LoginScreen}
-      />
-
-      <Stack.Screen
-        name="MainApp"
-        component={MainApp}
-      />
+      {token ? (
+        <Stack.Screen name="MainStack" component={MainStack} />
+      ) : (
+        <Stack.Screen name="Login" component={LoginScreen} />
+      )}
     </Stack.Navigator>
   );
 }
 
-
-// ✅ Root App
+/**
+ * Root App
+ */
 export default function App() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <AuthProvider>
         <BusProvider>
           <NavigationContainer>
-            <AuthNavigator />
+            <AppNavigator />
           </NavigationContainer>
         </BusProvider>
       </AuthProvider>
