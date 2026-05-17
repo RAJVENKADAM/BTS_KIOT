@@ -1,30 +1,16 @@
-# TODO - Expo SDK 55 -> 54 Migration
+- [ ] Inspect push notification related code paths (frontend + backend) (already done)
+- [ ] Create edit plan and confirm with user (already done)
+- [x] Delete frontend/src/services/notificationService.js
 
-## Step 1: Inspect current frontend config
-- [x] Read `frontend/package.json`
-- [x] Scan for Expo SDK 55 references
+- [x] Update frontend/src/context/AuthContext.js to remove push registration after login
 
-## Step 2: Prepare safe dependency downgrade
-- [ ] Update `frontend/package.json` to Expo SDK 54 compatible versions
-- [ ] Align `react`, `react-dom`, `react-native`, `react-native-*` versions with Expo SDK 54 expectations
-- [ ] Fix `react-native-maps` and `react-native-vector-icons/@expo/vector-icons` compatibility handling
+- [x] Update backend/src/services/notificationService.js to only emit socket.io bus-update events (no Expo / push token logic)
 
+- [x] Update backend/src/controllers/bus.controller.js to remove push-token endpoints from exports/handlers
 
+- [x] Update backend/src/routes/bus.routes.js to remove /save-push-token and /register-device-token routes
 
-## Step 3: Clean lockfiles and reinstall
-- [ ] Delete `frontend/package-lock.json` and `frontend/node_modules`
-- [ ] Run exact npm install commands
+- [x] Verify there are no remaining imports/references to removed push code
 
-## Step 4: Apply Expo-managed install
-- [ ] Run exact `expo install` commands
-
-## Step 5: Cache cleanup + rebuild
-- [ ] Clear Expo/Metro caches
-- [ ] Run `expo doctor`
-- [ ] Run Android build: `expo run:android`
-- [ ] Verify Expo Go launch without native crashes
-
-## Step 6: Verification checklist
-- [ ] Confirm sockets, AsyncStorage, notifications, maps, animations still work
-- [ ] Confirm Android build and Expo Go testing are stable
+- [x] Run backend start / frontend build (as available)
 

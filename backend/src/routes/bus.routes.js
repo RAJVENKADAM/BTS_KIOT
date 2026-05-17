@@ -15,8 +15,6 @@ const {
   getBusStatistics,
   combineBuses,
   uncombineBuses,
-  savePushToken,
-  registerDeviceToken,
   validatePreviewNumber,
   updatePreviewNumber,
   trackByPreview,
@@ -148,15 +146,6 @@ router.get('/current-plan/:busNo',
   BusController.getCurrentPlan
 );
 
-router.post('/save-push-token',
-  authenticateToken,
-  BusController.savePushToken
-);
-
-router.post('/register-device-token',
-  authenticateToken,
-  BusController.registerDeviceToken
-);
-
 module.exports = router;
+
 

@@ -1,5 +1,5 @@
 import 'react-native-gesture-handler';
-import React, { useEffect } from 'react';
+import React from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { createStackNavigator } from '@react-navigation/stack';
@@ -16,7 +16,6 @@ import ProfileScreen from './src/screens/ProfileScreen';
 
 // Services
 import './src/services/bgTracking';
-import { initializeNotificationHandlers } from './src/services/notificationService';
 
 // Theme
 import { COLORS } from './src/theme';
@@ -38,52 +37,61 @@ function MainApp() {
         },
       }}
     >
-      <Stack.Screen 
-        name="Home" 
-        component={HomeScreen} 
-        options={{ headerShown: false }} 
+      <Stack.Screen
+        name="Home"
+        component={HomeScreen}
+        options={{ headerShown: false }}
       />
-      <Stack.Screen name="Profile" component={ProfileScreen} />
+
+      <Stack.Screen
+        name="Profile"
+        component={ProfileScreen}
+      />
+
       <Stack.Screen
         name="Organize"
         component={OrganizeScreen}
         options={{ headerTitle: 'Admin Dashboard' }}
       />
-      
     </Stack.Navigator>
   );
 }
 
 
-// ✅ Auth Navigator (ONLY ONCE)
+// ✅ Auth Navigator
 function AuthNavigator() {
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
-      <Stack.Screen name="Splash" component={SplashScreen} />
-      <Stack.Screen name="Login" component={LoginScreen} />
-      <Stack.Screen name="MainApp" component={MainApp} />
+      <Stack.Screen
+        name="Splash"
+        component={SplashScreen}
+      />
+
+      <Stack.Screen
+        name="Login"
+        component={LoginScreen}
+      />
+
+      <Stack.Screen
+        name="MainApp"
+        component={MainApp}
+      />
     </Stack.Navigator>
   );
 }
 
 
-// ✅ Root App (ONLY ONCE)
+// ✅ Root App
 export default function App() {
-  useEffect(() => {
-    // Setup notification handlers and listeners once on app mount
-    // Token registration happens AFTER login success in AuthContext
-    initializeNotificationHandlers();
-  }, []);
-
   return (
-    <AuthProvider>
-      <BusProvider>
-        <NavigationContainer>
-          <GestureHandlerRootView style={{ flex: 1 }}>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <AuthProvider>
+        <BusProvider>
+          <NavigationContainer>
             <AuthNavigator />
-          </GestureHandlerRootView>
-        </NavigationContainer>
-      </BusProvider>
-    </AuthProvider>
+          </NavigationContainer>
+        </BusProvider>
+      </AuthProvider>
+    </GestureHandlerRootView>
   );
 }

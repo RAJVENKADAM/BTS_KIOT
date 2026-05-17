@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_BASE_URL } from '../api/api';
-import { registerForPushNotificationsAsync } from '../services/notificationService';
+
 
 const AuthContext = createContext();
 
@@ -132,22 +132,7 @@ export const AuthProvider = ({ children }) => {
         console.log('Login success');
         console.log('Token saved successfully');
 
-        // REGISTER PUSH TOKEN
-        if (data.user?.bus_no) {
-          try {
-            console.log(
-              '[AuthContext] Registering push token for bus:',
-              data.user.bus_no
-            );
 
-            await registerForPushNotificationsAsync(data.user.bus_no);
-          } catch (pushErr) {
-            console.log(
-              '[AuthContext] Push token registration failed:',
-              pushErr.message
-            );
-          }
-        }
 
         return {
           success: true,

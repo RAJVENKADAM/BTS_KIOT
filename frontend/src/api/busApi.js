@@ -75,17 +75,7 @@ export const busApi = {
     return response.json();
   },
 
-  savePushToken: async (token, pushToken, busNo) => {
-    const response = await fetch(`${API_BASE_URL}/api/bus/save-push-token`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ token: pushToken, busNo }),
-    });
-    return response.json();
-  },
+
 };
 
 // Export for convenience
