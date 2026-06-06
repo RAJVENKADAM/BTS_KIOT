@@ -1,29 +1,25 @@
-const { pool } = require('../config/db');
+const User = require('../models/User');
+const Bus = require('../models/Bus');
+const BusLiveLocation = require('../models/BusLiveLocation');
 const { getIO } = require('../socket');
-const trackingService = require('../services/trackingService');
-const { getBusIdByBusNo } = require('../services/busIdHelper');
 
-// Update user's live location (mobile push)
+// ================= UPDATE LOCATION =================
 async function updateLocation(req, res) {
   try {
     const userId = req.user.id;
     const { latitude, longitude } = req.body;
 
-    const [userResult] = await pool.execute(
-      'SELECT id, name, email, role, bus_no FROM users WHERE id = ? AND is_active = TRUE',
-      [userId]
-    );
-
-    if (userResult.length === 0) {
+    // Find user
+    const user = await User.findById(userId);
+    if (!user || !user.is_active) {
       return res.status(404).json({ error: 'User not found or inactive' });
     }
-
-    const user = userResult[0];
 
     if (!user.bus_no) {
       return res.status(400).json({ error: 'User is not assigned to a bus' });
     }
 
+    // Validate coordinates
     if (
       typeof latitude !== 'number' ||
       typeof longitude !== 'number' ||
@@ -35,27 +31,33 @@ async function updateLocation(req, res) {
       return res.status(400).json({ error: 'Invalid coordinates' });
     }
 
-    const busId = await getBusIdByBusNo(user.bus_no);
-    if (!busId) {
-      return res.status(404).json({ error: 'Bus not found for user assignment' });
+    // Find bus
+    const bus = await Bus.findOne({ bus_no: user.bus_no });
+    if (!bus) {
+      return res.status(404).json({ error: 'Bus not found' });
     }
 
-    await pool.execute(`
-      INSERT INTO bus_live_locations (bus_id, latitude, longitude, user_id, is_online)
-      VALUES (?, ?, ?, ?, TRUE)
-      ON DUPLICATE KEY UPDATE
-        latitude = VALUES(latitude),
-        longitude = VALUES(longitude),
-        user_id = VALUES(user_id),
-        is_online = TRUE,
-        updated_at = CURRENT_TIMESTAMP
-    `, [busId, latitude, longitude, userId]);
+    // Update or create live location
+    await BusLiveLocation.updateOne(
+      { bus_id: bus._id },
+      {
+        bus_id: bus._id,
+        user_id: userId,
+        latitude,
+        longitude,
+        is_online: true,
+        source: 'mobile',
+        updatedAt: new Date()
+      },
+      { upsert: true }
+    );
 
+    // Emit via Socket.io
     const io = getIO();
     if (io) {
-      io.to(`bus_${busId}`).emit('liveLocationUpdate', {
-        busId,
-        busNo: user.bus_no,
+      io.of('/bus-location').to(`bus_${bus._id}`).emit('liveLocationUpdate', {
+        busId: bus._id,
+        busNo: bus.bus_no,
         latitude,
         longitude,
         timestamp: new Date(),
@@ -66,11 +68,9 @@ async function updateLocation(req, res) {
       });
     }
 
-    // Keep response compatible with existing frontend (busNo)
     res.status(200).json({
       message: 'Location updated successfully',
-      busNo: user.bus_no,
-      busId,
+      busNo: bus.bus_no,
       latitude,
       longitude
     });
@@ -80,52 +80,33 @@ async function updateLocation(req, res) {
   }
 }
 
-// Get live location for a specific bus (API param is busNo)
+// ================= GET LIVE LOCATION =================
 async function getLiveLocation(req, res) {
   try {
     const { busNo } = req.params;
 
-    const busId = await getBusIdByBusNo(busNo);
-    if (!busId) {
+    // Find bus
+    const bus = await Bus.findOne({
+      $or: [{ bus_no: busNo }, { preview_number: busNo }]
+    });
+
+    if (!bus) {
       return res.status(404).json({ error: 'Bus not found' });
     }
 
-    // Memory state is keyed by busId
-    const memState = trackingService.busTrackingState[busId];
-    if (memState && memState.activeSource !== 'none') {
-      const data = memState.activeSource === 'mobile' ? memState.mobile : memState.gps;
-      return res.status(200).json({
-        busId,
-        busNo,
-        latitude: data.latitude,
-        longitude: data.longitude,
-        isOnline: true,
-        status: memState.activeSource,
-        lastUpdated: new Date(data.timestamp)
-      });
-    }
+    // Get live location
+    const location = await BusLiveLocation.findOne({ bus_id: bus._id })
+      .populate('user_id', 'name email role');
 
-    const [locationResult] = await pool.execute(`
-      SELECT bl.*, u.name as driver_name
-      FROM bus_live_locations bl
-      LEFT JOIN users u ON bl.user_id = u.id AND u.role = 'primary_admin'
-      WHERE bl.bus_id = ?
-    `, [busId]);
-
-    if (locationResult.length === 0) {
-      return res.status(404).json({ error: 'No live location found for this bus' });
-    }
-
-    const location = locationResult[0];
-
-    res.status(200).json({
-      busId: location.bus_id,
-      busNo,
-      latitude: location.latitude,
-      longitude: location.longitude,
-      isOnline: location.is_online,
-      lastUpdated: location.updated_at,
-      driverName: location.driver_name
+    res.status(location ? 200 : 404).json({
+      busId: bus._id,
+      busNo: bus.bus_no,
+      latitude: location?.latitude || null,
+      longitude: location?.longitude || null,
+      isOnline: location?.is_online || false,
+      lastUpdated: location?.updatedAt || null,
+      driverName: location?.user_id?.name || null,
+      source: location?.source || 'offline'
     });
   } catch (error) {
     console.error('Error getting live location:', error);
@@ -133,7 +114,7 @@ async function getLiveLocation(req, res) {
   }
 }
 
-// Toggle tracking status (start/stop)
+// ================= TOGGLE TRACKING =================
 async function toggleTracking(req, res) {
   try {
     const userId = req.user.id;
@@ -143,41 +124,42 @@ async function toggleTracking(req, res) {
       return res.status(400).json({ error: 'Action must be either "start" or "stop"' });
     }
 
-    const [userResult] = await pool.execute(
-      'SELECT id, name, email, role, bus_no FROM users WHERE id = ? AND is_active = TRUE',
-      [userId]
-    );
-
-    if (userResult.length === 0) {
+    // Find user
+    const user = await User.findById(userId);
+    if (!user || !user.is_active) {
       return res.status(404).json({ error: 'User not found or inactive' });
     }
-
-    const user = userResult[0];
 
     if (!user.bus_no) {
       return res.status(400).json({ error: 'User is not assigned to a bus' });
     }
 
-    const busId = await getBusIdByBusNo(user.bus_no);
-    if (!busId) {
-      return res.status(404).json({ error: 'Bus not found for user assignment' });
+    // Find bus
+    const bus = await Bus.findOne({ bus_no: user.bus_no });
+    if (!bus) {
+      return res.status(404).json({ error: 'Bus not found' });
     }
 
     const isOnline = action === 'start';
 
-    await pool.execute(`
-      INSERT INTO bus_live_locations (bus_id, latitude, longitude, user_id, is_online)
-      VALUES (?, 0, 0, ?, ?)
-      ON DUPLICATE KEY UPDATE
-        is_online = ?,
-        updated_at = CURRENT_TIMESTAMP
-    `, [busId, userId, isOnline, isOnline]);
+    // Update location record
+    await BusLiveLocation.updateOne(
+      { bus_id: bus._id },
+      {
+        bus_id: bus._id,
+        user_id: userId,
+        is_online: isOnline,
+        updatedAt: new Date()
+      },
+      { upsert: true }
+    );
 
+    // Emit via Socket.io
     const io = getIO();
     if (io) {
-      io.to(`bus_${busId}`).emit('trackingStatusUpdate', {
-        busId,
-        busNo: user.bus_no,
+      io.of('/bus-location').to(`bus_${bus._id}`).emit('trackingStatusUpdate', {
+        busId: bus._id,
+        busNo: bus.bus_no,
         isOnline,
         action,
         timestamp: new Date(),
@@ -190,8 +172,7 @@ async function toggleTracking(req, res) {
 
     res.status(200).json({
       message: `Tracking ${action === 'start' ? 'started' : 'stopped'} successfully`,
-      busNo: user.bus_no,
-      busId,
+      busNo: bus.bus_no,
       isOnline
     });
   } catch (error) {
@@ -205,4 +186,3 @@ module.exports = {
   getLiveLocation,
   toggleTracking
 };
-

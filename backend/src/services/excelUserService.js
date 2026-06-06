@@ -1,40 +1,10 @@
 const xlsx = require('xlsx');
-const bcrypt = require('bcryptjs');
-const { pool } = require('../config/db');
+const User = require('../models/User');
 const { sendEmail } = require('../services/emailService');
 
 class ExcelUserService {
-  async processExcelFile(filePath) {
-    try {
-      // Verify the file exists and is readable before processing
-      const fs = require('fs');
-      if (!fs.existsSync(filePath)) {
-        throw new Error('Uploaded file not found on server');
-      }
-
-      const stats = fs.statSync(filePath);
-      if (stats.size === 0) {
-        throw new Error('Uploaded file is empty');
-      }
-
-      const workbook = xlsx.readFile(filePath);
-      const sheetName = workbook.SheetNames[0];
-      const worksheet = workbook.Sheets[sheetName];
-      const jsonData = xlsx.utils.sheet_to_json(worksheet);
-
-      if (!jsonData || jsonData.length === 0) {
-        throw new Error('Excel file contains no data');
-      }
-
-      return this.validateAndNormalizeData(jsonData);
-    } catch (error) {
-      throw new Error(`Error processing Excel file: ${error.message}`);
-    }
-  }
-
   async processExcelBuffer(buffer) {
     try {
-      // Process Excel from buffer (for memory storage uploads)
       const workbook = xlsx.read(buffer, { type: 'buffer' });
       const sheetName = workbook.SheetNames[0];
       const worksheet = workbook.Sheets[sheetName];
@@ -42,14 +12,12 @@ class ExcelUserService {
 
       return this.validateAndNormalizeData(jsonData);
     } catch (error) {
-      throw new Error(`Error processing Excel buffer: ${error.message}`);
+      throw new Error(`Error processing Excel: ${error.message}`);
     }
   }
 
   validateAndNormalizeData(jsonData) {
     try {
-
-      // Validate required columns
       const requiredColumns = ['name', 'email', 'busno', 'role', 'mobile_no', 'date_of_year'];
       const headers = Object.keys(jsonData[0] || {});
 
@@ -59,20 +27,18 @@ class ExcelUserService {
         }
       }
 
-      // Normalize role values
       const normalizedData = jsonData.map(row => ({
         name: row.name?.toString().trim(),
         email: row.email?.toString().toLowerCase().trim(),
-        busno: row.busno?.toString().trim() || null,
+        bus_no: row.busno?.toString().trim() || null,
         role: this.normalizeRole(row.role?.toString().trim()),
         phone: row.mobile_no?.toString().trim(),
         dob: row.date_of_year?.toString().trim()
       }));
 
-      // Validate data
       for (const user of normalizedData) {
         if (!this.isValidEmail(user.email)) {
-          throw new Error(`Invalid email format: ${user.email}`);
+          throw new Error(`Invalid email: ${user.email}`);
         }
         if (!user.name || user.name.length < 2) {
           throw new Error(`Invalid name: ${user.name}`);
@@ -82,26 +48,24 @@ class ExcelUserService {
         }
       }
 
-      // Check for duplicate emails in the Excel file
       const emailCounts = {};
       for (const user of normalizedData) {
         emailCounts[user.email] = (emailCounts[user.email] || 0) + 1;
       }
       const duplicates = Object.keys(emailCounts).filter(email => emailCounts[email] > 1);
       if (duplicates.length > 0) {
-        throw new Error(`Duplicate emails found in Excel: ${duplicates.join(', ')}`);
+        throw new Error(`Duplicate emails in Excel: ${duplicates.join(', ')}`);
       }
 
       return normalizedData;
     } catch (error) {
-      throw new Error(`Error validating Excel data: ${error.message}`);
+      throw new Error(`Error validating Excel: ${error.message}`);
     }
   }
 
   normalizeRole(role) {
     const roles = ['student', 'primary_admin', 'superadmin'];
     const normalizedRole = (role || '').toLowerCase().trim();
-    // Support legacy names during transition if needed, or just map them
     if (normalizedRole === 'user') return 'student';
     return roles.includes(normalizedRole) ? normalizedRole : 'student';
   }
@@ -120,52 +84,57 @@ class ExcelUserService {
         emailsToNotify: []
       };
 
-      // Get all existing users from the database
-      const [existingUsers] = await pool.execute('SELECT id, email, name, role FROM users WHERE is_active = 1');
+      // Get all existing active users
+      const existingUsers = await User.find({ is_active: true });
       const existingEmails = existingUsers.map(user => user.email.toLowerCase());
 
-      // Process each user from the Excel file
+      // Process each user
       for (const excelUser of users) {
         const existingUser = existingUsers.find(user => user.email === excelUser.email);
 
         if (existingUser) {
           // Update existing user
-          await pool.execute(
-            'UPDATE users SET name = ?, role = ?, bus_no = ? WHERE email = ?',
-            [excelUser.name, excelUser.role, excelUser.busno, excelUser.email]
+          await User.updateOne(
+            { email: excelUser.email },
+            { 
+              name: excelUser.name,
+              role: excelUser.role,
+              bus_no: excelUser.bus_no 
+            }
           );
 
           results.updated.push({
             email: excelUser.email,
             name: excelUser.name,
             role: excelUser.role,
-            busno: excelUser.busno
+            bus_no: excelUser.bus_no
           });
 
-          // Add to notification list for updated users
           results.emailsToNotify.push({
             email: excelUser.email,
             name: excelUser.name,
             type: 'updated'
           });
         } else {
-          // Create new user with permanent password based on phone and DOB
+          // Create new user
           const permanentPassword = this.generatePermanentPassword(excelUser.phone, excelUser.dob);
-          const hashedPassword = await bcrypt.hash(permanentPassword, 12);
-
-          await pool.execute(
-            'INSERT INTO users (name, email, password_hash, role, bus_no, is_active, temp_password) VALUES (?, ?, ?, ?, ?, TRUE, FALSE)',
-            [excelUser.name, excelUser.email, hashedPassword, excelUser.role, excelUser.busno]
-          );
+          
+          await User.create({
+            name: excelUser.name,
+            email: excelUser.email,
+            password_hash: permanentPassword,  // Will be hashed by pre-save middleware
+            role: excelUser.role,
+            bus_no: excelUser.bus_no,
+            is_active: true
+          });
 
           results.created.push({
             email: excelUser.email,
             name: excelUser.name,
             role: excelUser.role,
-            busno: excelUser.busno
+            bus_no: excelUser.bus_no
           });
 
-          // Add to notification list for new users
           results.emailsToNotify.push({
             email: excelUser.email,
             name: excelUser.name,
@@ -175,14 +144,14 @@ class ExcelUserService {
         }
       }
 
-      // Deactivate users who are not in the Excel file but exist in the database
+      // Deactivate users not in Excel
       const excelEmails = users.map(user => user.email);
       const usersToDeactivate = existingEmails.filter(email => !excelEmails.includes(email));
 
       for (const email of usersToDeactivate) {
-        await pool.execute(
-          'UPDATE users SET is_active = FALSE WHERE email = ?',
-          [email]
+        await User.updateOne(
+          { email },
+          { is_active: false }
         );
         results.skipped.push(email);
       }
@@ -194,19 +163,9 @@ class ExcelUserService {
   }
 
   generatePermanentPassword(phone, dob) {
-    // First 4 digits of phone number + year from date of birth
     const phoneDigits = phone.replace(/\D/g, '').substring(0, 4);
     const birthYear = dob.toString();
     return phoneDigits + birthYear;
-  }
-
-  generateTempPassword() {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*';
-    let password = '';
-    for (let i = 0; i < 8; i++) {
-      password += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return password;
   }
 
   async sendNotifications(emailsToNotify) {
@@ -217,34 +176,31 @@ class ExcelUserService {
         if (userData.type === 'new') {
           await sendEmail(
             userData.email,
-            'Your BTS Account Has Been Created',
+            'Your BTS Account Created',
             `Hello ${userData.name},
 
-Your BTS (Bus Tracking System) account has been created.
-
-Your permanent password is: ${userData.permanentPassword}
-
-Please log in with this password.
+Your BTS account has been created.
+Password: ${userData.permanentPassword}
 
 Best regards,
-BTS Administration`
+BTS Team`
           );
         } else if (userData.type === 'updated') {
           await sendEmail(
             userData.email,
-            'Your BTS Account Has Been Updated',
+            'Your BTS Account Updated',
             `Hello ${userData.name},
 
-Your BTS (Bus Tracking System) account has been updated.
+Your BTS account has been updated.
 
 Best regards,
-BTS Administration`
+BTS Team`
           );
         }
         notifications.push({ email: userData.email, status: 'sent' });
       } catch (error) {
         console.error(`Error sending email to ${userData.email}:`, error.message);
-        notifications.push({ email: userData.email, status: 'failed', error: error.message });
+        notifications.push({ email: userData.email, status: 'failed' });
       }
     }
 

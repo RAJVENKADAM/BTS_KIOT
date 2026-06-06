@@ -1,280 +1,105 @@
-const { pool } = require('../config/db');
-// (unused for now) const { safeExecute } = require('../config/dbQuery');
+const axios = require('axios');
+const Bus = require('../models/Bus');
+const BusLiveLocation = require('../models/BusLiveLocation');
 
-
-const { getIO } = require('../socket');
-
-const busStateService = require('./busStateService');
-
-const { getBusIdByBusNo } = require('./busIdHelper');
-
-class TrackingService {
+class BusTrackerService {
   constructor() {
-    // In-memory state keyed by bus_id
-    // busTrackingState[busId] = { mobile, gps, external_gps, activeSource }
     this.busTrackingState = {};
-    this.staleTimeouts = {};
-    this.FALLBACK_TIMEOUT = 10000; // 10s for mobile
-    this.GPS_STALE_TIMEOUT = 20000; // 20s for GPS
-    this.EXTERNAL_GPS_STALE_TIMEOUT = 30000; // 30s for external GPS
+    this.pollingInterval = null;
+    this.pollFrequency = 30000; // 30 seconds
   }
 
-  async _busIdFromBusNoOrNull(busNo) {
-    if (!busNo) return null;
-    return getBusIdByBusNo(busNo);
-  }
+  async startTracking() {
+    console.log('🚀 Starting bus tracking from GPS API...');
 
-  async updateMobileLocation(userId, busNo, location) {
-    const busId = await this._busIdFromBusNoOrNull(busNo);
-    if (!busId) return;
-
-    if (!this.busTrackingState[busId]) {
-      this.busTrackingState[busId] = { mobile: null, gps: null, activeSource: 'none' };
-    }
-
-    const now = Date.now();
-    this.busTrackingState[busId].mobile = { ...location, timestamp: now };
-    this.busTrackingState[busId].activeSource = 'mobile';
-
-    try {
-      await pool.execute('UPDATE buses SET mobile_live = TRUE WHERE id = ?', [busId]);
-    } catch (err) {
-      const { structuredLog } = (() => ({}))();
-      console.log(JSON.stringify({ code: 'DB_ERROR', op: 'updateMobileLocation', busId, transient: true, message: err?.message }));
-    }
-
-    this.broadcastLocation(busId);
-    this.resetMobileTimeout(busId);
-  }
-
-  async updateGpsLocation(deviceId, location) {
-    // IMPORTANT: trackingService must NOT call AGEPS GPS API.
-    // This method is only invoked by an external webhook (/gps/update-location),
-    // and it updates live location in DB via broadcastLocation().
-
-    const [busResult] = await pool.execute(
-      'SELECT id FROM buses WHERE gps_device_id = ?',
-      [deviceId]
-    );
-
-    if (busResult.length === 0) return;
-    const busId = busResult[0].id;
-
-    if (!this.busTrackingState[busId]) {
-      this.busTrackingState[busId] = { mobile: null, gps: null, external_gps: null, activeSource: 'none' };
-    }
-
-    const now = Date.now();
-    this.busTrackingState[busId].gps = { ...location, timestamp: now };
-
-    const determineActiveSource = () => {
-      if (this.busTrackingState[busId].mobile) return 'mobile';
-      if (this.busTrackingState[busId].gps) return 'gps';
-      if (this.busTrackingState[busId].external_gps) return 'external_gps';
-      return 'none';
-    };
-
-    this.busTrackingState[busId].activeSource = determineActiveSource();
-    this.broadcastLocation(busId);
-    this.resetGpsTimeout(busId);
-  }
-
-
-  async updateExternalGPSLocation(busNo, location) {
-    // External GPS currently arrives with regNo/busNo string at API boundary.
-    // Convert immediately to bus_id.
-    const busId = await this._busIdFromBusNoOrNull(busNo);
-    if (!busId) return;
-
-    if (!this.busTrackingState[busId]) {
-      this.busTrackingState[busId] = { mobile: null, gps: null, external_gps: null, activeSource: 'none' };
-    }
-
-    const now = Date.now();
-    this.busTrackingState[busId].external_gps = { ...location, timestamp: now };
-
-    const determineActiveSource = () => {
-      if (this.busTrackingState[busId].mobile) return 'mobile';
-      if (this.busTrackingState[busId].gps) return 'gps';
-      if (this.busTrackingState[busId].external_gps) return 'external_gps';
-      return 'none';
-    };
-
-    this.busTrackingState[busId].activeSource = determineActiveSource();
-    this.broadcastLocation(busId);
-    this.resetExternalGPSTimeout(busId);
-  }
-
-  async setMobileTrackingStatus(busNo, active) {
-    const busId = await this._busIdFromBusNoOrNull(busNo);
-    if (!busId) return;
-
-    if (!this.busTrackingState[busId]) {
-      this.busTrackingState[busId] = { mobile: null, gps: null, external_gps: null, activeSource: 'none' };
-    }
-
-    if (active) {
-      this.busTrackingState[busId].activeSource = 'mobile';
-    } else {
-      const determineActiveSource = () => {
-        if (this.busTrackingState[busId].gps) return 'gps';
-        if (this.busTrackingState[busId].external_gps) return 'external_gps';
-        return 'none';
-      };
-      this.busTrackingState[busId].activeSource = determineActiveSource();
-      this.busTrackingState[busId].mobile = null;
-    }
-
-    try {
-      await pool.execute('UPDATE buses SET mobile_live = ? WHERE id = ?', [active, busId]);
-    } catch (err) {
-      console.log(JSON.stringify({ code: 'DB_ERROR', op: 'setMobileTrackingStatus', busId, transient: true, message: err?.message }));
-    }
-    this.broadcastLocation(busId);
-  }
-
-  resetMobileTimeout(busId) {
-    if (this.staleTimeouts[busId]?.mobile) {
-      clearTimeout(this.staleTimeouts[busId].mobile);
-    }
-    if (!this.staleTimeouts[busId]) this.staleTimeouts[busId] = {};
-
-    this.staleTimeouts[busId].mobile = setTimeout(() => {
-      console.log(`Mobile tracking for ${busId} stale, falling back to other sources`);
-      this._updateActiveSource(busId);
-      this.broadcastLocation(busId);
-    }, this.FALLBACK_TIMEOUT);
-  }
-
-  resetGpsTimeout(busId) {
-    if (this.staleTimeouts[busId]?.gps) {
-      clearTimeout(this.staleTimeouts[busId].gps);
-    }
-    if (!this.staleTimeouts[busId]) this.staleTimeouts[busId] = {};
-
-    this.staleTimeouts[busId].gps = setTimeout(() => {
-      console.log(`GPS tracking for ${busId} lost signal`);
-      this._updateActiveSource(busId);
-      this.broadcastLocation(busId);
-    }, this.GPS_STALE_TIMEOUT);
-  }
-
-  resetExternalGPSTimeout(busId) {
-    if (this.staleTimeouts[busId]?.external_gps) {
-      clearTimeout(this.staleTimeouts[busId].external_gps);
-    }
-    if (!this.staleTimeouts[busId]) this.staleTimeouts[busId] = {};
-
-    this.staleTimeouts[busId].external_gps = setTimeout(() => {
-      console.log(`External GPS for ${busId} stale`);
-      this._updateActiveSource(busId);
-      this.broadcastLocation(busId);
-    }, this.EXTERNAL_GPS_STALE_TIMEOUT);
-  }
-
-  _updateActiveSource(busId) {
-    if (!this.busTrackingState[busId]) return;
-
-    const oldSource = this.busTrackingState[busId].activeSource;
-
-    const determineActiveSource = () => {
-      if (this.busTrackingState[busId].mobile?.timestamp > Date.now() - this.FALLBACK_TIMEOUT) return 'mobile';
-      if (this.busTrackingState[busId].gps?.timestamp > Date.now() - this.GPS_STALE_TIMEOUT) return 'gps';
-      if (this.busTrackingState[busId].external_gps?.timestamp > Date.now() - this.EXTERNAL_GPS_STALE_TIMEOUT) return 'external_gps';
-      return 'none';
-    };
-
-    this.busTrackingState[busId].activeSource = determineActiveSource();
-
-    if (oldSource !== this.busTrackingState[busId].activeSource) {
-      console.log(`Source changed for ${busId}: ${oldSource} → ${this.busTrackingState[busId].activeSource}`);
-    }
-  }
-
-  async broadcastLocation(busId, gpsSignalLost = false) {
-    const state = this.busTrackingState[busId];
-    const io = getIO();
-    if (!io || !state) return;
-
-    const now = Date.now();
-
-    let payload = {
-      success: false,
-      busId,
-      latitude: null,
-      longitude: null,
-      speed: null,
-      status: 'offline',
-      source: 'none',
-      updatedAt: new Date().toISOString(),
-      isStale: false
-    };
-
-    if (state.activeSource === 'mobile' && state.mobile && state.mobile.timestamp > now - this.FALLBACK_TIMEOUT) {
-      payload = {
-        success: true,
-        busId,
-        latitude: state.mobile.latitude,
-        longitude: state.mobile.longitude,
-        speed: state.mobile.speed || null,
-        status: 'online',
-        source: 'mobile',
-        updatedAt: new Date(state.mobile.timestamp).toISOString(),
-        isStale: false
-      };
-    } else if (state.activeSource === 'gps' && state.gps && state.gps.timestamp > now - this.GPS_STALE_TIMEOUT) {
-      payload = {
-        success: true,
-        busId,
-        latitude: state.gps.latitude,
-        longitude: state.gps.longitude,
-        speed: state.gps.speed || null,
-        status: gpsSignalLost ? 'signal_lost' : 'online',
-        source: 'gps',
-        updatedAt: new Date(state.gps.timestamp).toISOString(),
-        isStale: false
-      };
-    } else if (state.activeSource === 'external_gps' && state.external_gps && state.external_gps.timestamp > now - this.EXTERNAL_GPS_STALE_TIMEOUT) {
-      payload = {
-        success: true,
-        busId,
-        latitude: state.external_gps.latitude,
-        longitude: state.external_gps.longitude,
-        speed: state.external_gps.speed || null,
-        status: 'online',
-        source: 'external_gps',
-        updatedAt: new Date(state.external_gps.timestamp).toISOString(),
-        isStale: false
-      };
-    }
-
-    io.of('/bus-location').to(`bus_${busId}`).emit('locationUpdate', payload);
-
-    console.log(`📡 Broadcast ${busId}: ${payload.status} (${payload.source}) lat:${payload.latitude?.toFixed(4)}`);
-
-    if (payload.latitude != null && payload.longitude != null) {
+    this.pollingInterval = setInterval(async () => {
       try {
-        await pool.execute(`
-          INSERT INTO bus_live_locations (bus_id, latitude, longitude, speed, updated_at)
-          VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-          ON DUPLICATE KEY UPDATE
-            latitude = VALUES(latitude),
-            longitude = VALUES(longitude),
-            speed = VALUES(speed),
-            updated_at = CURRENT_TIMESTAMP
-        `, [busId, payload.latitude, payload.longitude, payload.speed || 0]);
-      } catch (err) {
-        console.log(JSON.stringify({ code: 'DB_ERROR', op: 'broadcastLocation:upsertLiveLocation', busId, transient: true, message: err?.message }));
-      }
+        const buses = await Bus.find({ status: 'active' });
 
-      try {
-        await busStateService.updateBusLocation(busId, payload.latitude, payload.longitude);
-      } catch (err) {
-        console.log(JSON.stringify({ code: 'STATE_CHECK_FAILED', op: 'busStateService.updateBusLocation', busId, transient: true, message: err?.message }));
+        for (const bus of buses) {
+          try {
+            const location = await this.fetchBusLocation(bus.gps_device_id, bus.reg_no);
+            if (location) {
+              this.updateBusLocationState(bus.bus_no, location);
+              
+              // Also update MongoDB
+              await BusLiveLocation.updateOne(
+                { bus_id: bus._id },
+                {
+                  latitude: location.latitude,
+                  longitude: location.longitude,
+                  speed: location.speed,
+                  is_online: true,
+                  updatedAt: new Date()
+                },
+                { upsert: true }
+              );
+            }
+          } catch (error) {
+            console.error(`Error fetching location for ${bus.bus_no}:`, error.message);
+          }
+        }
+      } catch (error) {
+        console.error('Error in bus tracking poll:', error.message);
       }
+    }, this.pollFrequency);
+  }
+
+  stopTracking() {
+    if (this.pollingInterval) {
+      clearInterval(this.pollingInterval);
+      this.pollingInterval = null;
+      console.log('⏹️ Bus tracking stopped');
     }
+  }
+
+  async fetchBusLocation(deviceId, regNo) {
+    try {
+      const response = await axios.get('https://app.gpstrack.in/api/get_current_data', {
+        params: {
+          token: '1v7XQwPwhKqcNEZc8m4rarQKqNFubSMJ',
+          email: 'kiotcollege@gmail.com',
+          device_id: deviceId,
+          reg_no: regNo
+        },
+        timeout: 8000
+      });
+
+      if (response.data?.status === 'success' && response.data?.data) {
+        const data = response.data.data;
+        return {
+          latitude: parseFloat(data.latitude),
+          longitude: parseFloat(data.longitude),
+          speed: parseFloat(data.speed) || 0,
+          timestamp: Date.now(),
+          status: 'online'
+        };
+      }
+      return null;
+    } catch (error) {
+      console.error(`GPS fetch error for device ${deviceId}:`, error.message);
+      return null;
+    }
+  }
+
+  updateBusLocationState(busNo, location) {
+    if (!this.busTrackingState[busNo]) {
+      this.busTrackingState[busNo] = {};
+    }
+    this.busTrackingState[busNo] = {
+      ...location,
+      busNo,
+      updatedAt: new Date()
+    };
+  }
+
+  getBusLocation(busNo) {
+    return this.busTrackingState[busNo] || null;
+  }
+
+  getAllBusLocations() {
+    return Object.values(this.busTrackingState);
   }
 }
 
-module.exports = new TrackingService();
-
+module.exports = new BusTrackerService();

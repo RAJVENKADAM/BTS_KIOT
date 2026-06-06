@@ -1,10 +1,12 @@
-const ExcelManagementService = require('../services/excelManagementService');
+const ExcelUpload = require('../models/ExcelUpload');
+const User = require('../models/User');
 
 // Get all Excel uploads for current user
 async function getAllExcelUploads(req, res) {
   try {
     const userId = req.user.id;
-    const uploads = await ExcelManagementService.getAllExcelUploads(userId);
+    const uploads = await ExcelUpload.find({ uploaded_by: userId })
+      .sort({ createdAt: -1 });
     
     res.status(200).json({
       success: true,
@@ -23,7 +25,7 @@ async function getAllExcelUploads(req, res) {
 async function getExcelUpload(req, res) {
   try {
     const { id } = req.params;
-    const upload = await ExcelManagementService.getExcelUploadById(id);
+    const upload = await ExcelUpload.findById(id);
     
     if (!upload) {
       return res.status(404).json({
@@ -45,13 +47,12 @@ async function getExcelUpload(req, res) {
   }
 }
 
-// Re-upload/Edit Excel file
+// Re-upload Excel file
 async function reuploadExcel(req, res) {
   try {
     const { id } = req.params;
     const userId = req.user.id;
     
-    // Check file
     if (!req.file || !req.file.buffer) {
       return res.status(400).json({
         success: false,
@@ -65,23 +66,27 @@ async function reuploadExcel(req, res) {
       size: req.file.size
     });
 
-    const result = await ExcelManagementService.reuploadExcel(
+    // Update Excel upload record
+    const upload = await ExcelUpload.findByIdAndUpdate(
       id,
-      req.file.buffer,
-      req.file.originalname,
-      userId
+      {
+        file_name: req.file.originalname,
+        updatedAt: new Date()
+      },
+      { new: true }
     );
+
+    if (!upload) {
+      return res.status(404).json({
+        success: false,
+        error: 'Excel upload not found'
+      });
+    }
 
     res.status(200).json({
       success: true,
-      message: result.message,
-      results: {
-        created: result.results.created.length,
-        updated: result.results.updated.length,
-        deactivated: result.results.skipped.length,
-        emailsSent: result.emailResults.filter(e => e.status === 'sent').length,
-        emailsFailed: result.emailResults.filter(e => e.status === 'failed').length
-      }
+      message: 'Excel file re-uploaded successfully',
+      data: upload
     });
   } catch (error) {
     console.error('Re-upload Excel error:', error);
@@ -98,30 +103,32 @@ async function deleteExcelUpload(req, res) {
     const { id } = req.params;
     const userId = req.user.id;
     
-    const result = await ExcelManagementService.deleteExcelUpload(id, userId);
+    const upload = await ExcelUpload.findById(id);
     
+    if (!upload) {
+      return res.status(404).json({
+        success: false,
+        error: 'Excel upload not found'
+      });
+    }
+
+    // Only user who uploaded or admin can delete
+    if (upload.uploaded_by.toString() !== userId && req.user.role !== 'superadmin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Unauthorized to delete this upload'
+      });
+    }
+
+    // Delete the upload
+    await ExcelUpload.findByIdAndDelete(id);
+
     res.status(200).json({
       success: true,
-      message: result.message,
-      usersDeleted: result.usersDeleted
+      message: 'Excel upload deleted successfully'
     });
   } catch (error) {
     console.error('Delete Excel upload error:', error);
-    
-    if (error.message.includes('Unauthorized')) {
-      return res.status(403).json({
-        success: false,
-        error: error.message
-      });
-    }
-    
-    if (error.message.includes('not found')) {
-      return res.status(404).json({
-        success: false,
-        error: error.message
-      });
-    }
-    
     res.status(500).json({
       success: false,
       error: error.message
@@ -133,8 +140,20 @@ async function deleteExcelUpload(req, res) {
 async function getUsersByExcelUpload(req, res) {
   try {
     const { id } = req.params;
-    const users = await ExcelManagementService.getUsersByExcelUpload(id);
     
+    // Find Excel upload
+    const upload = await ExcelUpload.findById(id);
+    if (!upload) {
+      return res.status(404).json({
+        success: false,
+        error: 'Excel upload not found'
+      });
+    }
+
+    // Find users linked to this Excel upload
+    const users = await User.find({ excel_upload_id: id })
+      .select('name email role bus_no is_active');
+
     res.status(200).json({
       success: true,
       data: users
