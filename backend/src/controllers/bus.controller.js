@@ -12,7 +12,10 @@ async function uploadBusRoutes(req, res) {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    const { busNo, previewNumber, gpsId } = req.body;
+    const { busNo, previewNumber, gpsId, deviceId } = req.body;
+
+    // Accept both deviceId (frontend) and gpsId (legacy/backend)
+    const finalGpsId = gpsId || deviceId;
 
     if (!busNo) {
       return res.status(400).json({ error: 'Bus number is required' });
@@ -23,7 +26,7 @@ async function uploadBusRoutes(req, res) {
     const busData = {
       busNo,
       previewNumber: previewNumber || null,
-      gpsId,
+      gpsId: finalGpsId,
       routes: routesData.routes
     };
 

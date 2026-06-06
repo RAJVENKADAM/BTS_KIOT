@@ -1,480 +1,228 @@
-import React, { useState, useEffect, useRef } from 'react';
-import {
-  View,
-  Text,
-  StyleSheet,
-  Dimensions,
-  Animated,
-  Platform
-} from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
+import React, { useEffect, useMemo, useRef } from 'react';
+import MapView, {
+  Circle,
+  Marker,
+  Polyline,
+  PROVIDER_DEFAULT,
+  UrlTile,
+} from 'react-native-maps';
 
-// Import for native + safe web fallback
-let MapView, Marker, Callout, PROVIDER_DEFAULT, AnimatedRegion;
+const KIOT_LAT = 11.554528;
+const KIOT_LNG = 78.019759;
 
+const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 
-// Check if running on web environment
-const isWeb = typeof window !== 'undefined' && typeof document !== 'undefined';
+const toCoord = (lat, lng) => {
+  if (!isNum(lat) || !isNum(lng)) return null;
+  return { latitude: lat, longitude: lng };
+};
 
-if (isWeb) {
-  // Web environment - render a placeholder or use web maps
-  MapView = ({ children, style }) => (
-    <View style={[styles.map, style, styles.webMapContainer]}>
-      <Text style={styles.webMapPlaceholder}>Map functionality not available on web</Text>
-      <Text style={styles.webMapHint}>Use mobile app for map features</Text>
-      {children}
-    </View>
-  );
-
-  Marker = ({ children }) => <View style={styles.webMarkerPlaceholder}>{children}</View>;
-  Marker.Animated = Marker; // Mock for web
-
-  Callout = ({ children }) => <View style={styles.webCallout}>{children}</View>;
-  PROVIDER_DEFAULT = null;
-
-
-  // Mock AnimatedRegion for web to prevent reference errors
-  AnimatedRegion = class {
-    constructor(config) {
-      this.latitude = config.latitude || 0;
-      this.longitude = config.longitude || 0;
-    }
-    timing() { return { start: () => { } }; }
-    setValue() { }
-  };
-} else {
-  // Native environment
-  const RNMaps = require('react-native-maps');
-  MapView = RNMaps.default;
-  ({ Marker, Callout, PROVIDER_DEFAULT, AnimatedRegion } = RNMaps);
-
+function safeLatLngOrFallback({ latitude, longitude }, fallback) {
+  const c = toCoord(latitude, longitude);
+  return c || fallback;
 }
 
-
-
-const KIOT_FALLBACK = {
-  latitude: 11.554528,
-  longitude: 78.019759,
-  latitudeDelta: 0.0922,
-  longitudeDelta: 0.0421,
-};
-
-const isValidCoord = (v) => typeof v === 'number' && Number.isFinite(v) && v !== 0;
-
-const toCoord = (obj) => {
-  const lat = obj?.latitude;
-  const lon = obj?.longitude;
-  return isValidCoord(lat) && isValidCoord(lon) ? { latitude: lat, longitude: lon } : null;
-};
-
-const MapComponent = ({
+export default function MapComponent({
   busData,
-  destination,
-  markerStatus = 'moving',
-  autoFocus = false,
-  animate = true,
+  markerStatus,
+  autoFocus,
+  animate = false,
   onAutoFocusDone,
   onUserInteraction,
-}) => {
-  // Always keep a safe, non-crashing region
-  const [mapRegion, setMapRegion] = useState(KIOT_FALLBACK);
-
-
-  // Pulse Animation Value
-  const pulseAnim = useRef(new Animated.Value(0)).current;
-  const bounceAnim = useRef(new Animated.Value(0)).current;
-  const bounceAnimRef = useRef(null);
-
-  // AnimatedRegion for the bus movement (always initialize with safe coords)
-  const [coordinate] = useState(
-    new AnimatedRegion({
-      latitude: KIOT_FALLBACK.latitude,
-      longitude: KIOT_FALLBACK.longitude,
-      latitudeDelta: 0,
-      longitudeDelta: 0,
-    })
-  );
-
-
-
+  // user location props (optional; app may set them elsewhere)
+  userLocation,
+  routeStops = [],
+  routePolylineCoords = [],
+}) {
   const mapRef = useRef(null);
 
-  const statusStyles = {
-    moving: {
-      borderColor: '#2ecc71',
-      backgroundColor: 'rgba(46, 204, 113, 0.18)',
-      borderWidth: 2,
-      borderStyle: 'dotted',
-    },
-    stopped: {
-      borderColor: '#c0392b',
-      backgroundColor: '#e74c3c',
-      borderWidth: 2,
-      borderStyle: 'solid',
-    },
-  };
-
-// Animate marker when bus data updates
-  useEffect(() => {
-    const newCoord = toCoord(busData);
-    if (!newCoord) return;
-
-    // Instant snap for initial/search (animate=false), smooth for socket updates
-    if (!animate) {
-      coordinate.setValue(newCoord);
-      return;
-    }
-
-    // Smooth updates; guard against crashes
-    coordinate
-      .timing({
-        ...newCoord,
-        duration: 1000, // Shorter for refresh
-        useNativeDriver: false,
-      })
-      .start();
-
-    // Fallback
-    setTimeout(() => coordinate.setValue(newCoord), 100);
-  }, [busData, animate]);
-
-
-  useEffect(() => {
-    const duration = markerStatus === 'moving' ? 1200 : 2000;
-    bounceAnim.setValue(0);
-    bounceAnimRef.current?.stop();
-
-    bounceAnimRef.current = Animated.loop(
-      Animated.sequence([
-        Animated.timing(bounceAnim, {
-          toValue: 1,
-          duration,
-          useNativeDriver: true,
-        }),
-        Animated.timing(bounceAnim, {
-          toValue: 0,
-          duration,
-          useNativeDriver: true,
-        }),
-      ])
-    );
-
-    bounceAnimRef.current.start();
-
-    return () => {
-      bounceAnimRef.current?.stop();
-    };
-  }, [markerStatus]);
-
-  const markerTranslateY = bounceAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0, -6],
-  });
-
-  const userInteractedRef = useRef(false);
-
-  useEffect(() => {
-    if (autoFocus) {
-      userInteractedRef.current = false;
-    }
-  }, [autoFocus]);
-
-  // Fit to bus and destination markers only when autoFocus is requested.
-  useEffect(() => {
-    if (!autoFocus || userInteractedRef.current || !mapRef.current) return;
-
-    const busCoord = toCoord(busData);
-    if (!busCoord) return;
-
-    const coordinates = [busCoord];
-    const destCoord = toCoord(destination);
-    if (destCoord) {
-      coordinates.push(destCoord);
-    }
-
-
-    if (coordinates.length > 0) {
-      setTimeout(() => {
-        mapRef.current.fitToCoordinates(coordinates, {
-          edgePadding: { top: 50, right: 50, bottom: 200, left: 50 },
-          animated: true,
-        });
-        if (onAutoFocusDone) onAutoFocusDone();
-      }, 100);
-    }
-  }, [autoFocus, busData, destination, onAutoFocusDone]);
-
-  useEffect(() => {
-  const startAnimation = () => {
-    pulseAnim.setValue(0);
-    Animated.loop(
-      Animated.timing(pulseAnim, {
-        toValue: 1,
-        duration: 2000,
-        useNativeDriver: false, // Required for transform/opacity on non-native props
-      })
-    ).start();
-  };
-
-  startAnimation();
-}, []);
-  // Calculate distance between two points (in km)
-  const calculateDistance = (lat1, lon1, lat2, lon2) => {
-    const R = 6371; // Earth radius in km
-    const dLat = (lat2 - lat1) * Math.PI / 180;
-    const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-      Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c; // Distance in km
-  };
-
-  // Calculate ETA (in minutes) - assuming average speed of 30 km/h
-  const calculateETA = (distance) => {
-    if (distance <= 0) return 0;
-    return Math.round((distance / 30) * 60); // time = distance/speed * 60 minutes
-  };
-useEffect(() => {
-  const animation = Animated.loop(
-    Animated.timing(pulseAnim, {
-      toValue: 1,
-      duration: 2000,
-      useNativeDriver: false,
-    })
+  const fallbackRegion = useMemo(
+    () => ({
+      latitude: KIOT_LAT,
+      longitude: KIOT_LNG,
+      latitudeDelta: 0.05,
+      longitudeDelta: 0.05,
+    }),
+    []
   );
 
-  animation.start();
+  const busCoord = useMemo(() => {
+    if (!busData) return null;
+    const lat = busData.latitude ?? busData.lat;
+    const lng = busData.longitude ?? busData.lng;
+    return toCoord(lat, lng);
+  }, [busData]);
 
-  return () => {
-    animation.stop(); // 🔥 important
-  };
-}, []);
-  return (
-    <View style={styles.container}>
-      <MapView
-        ref={mapRef}
-        provider={PROVIDER_DEFAULT}
-        style={styles.map}
-        initialRegion={mapRegion}
-        showsUserLocation={true}
-        showsMyLocationButton={true}
-        showsCompass={true}
-        zoomEnabled={true}
-        scrollEnabled={true}
-        pitchEnabled={false}
-        rotateEnabled={false}
-        onPanDrag={() => {
-          if (!userInteractedRef.current) {
-            userInteractedRef.current = true;
-            if (onUserInteraction) onUserInteraction();
-          }
-        }}
-      >
-        {/* Destination Marker - only show if destination is valid */}
-        {(() => {
-          const destCoord = toCoord(destination);
-          if (!destCoord) return null;
-          return (
-            <Marker coordinate={destCoord} pinColor="red">
-              <Callout tooltip>
-                <View style={styles.destinationCallout}>
-                  <View style={styles.destinationCalloutInner}>
-                    <Text style={styles.destinationCalloutText}>Destination</Text>
-                  </View>
-                </View>
-              </Callout>
-            </Marker>
-          );
-        })()}
+  const userCoord = useMemo(() => {
+    const lat = userLocation?.latitude;
+    const lng = userLocation?.longitude;
+    // If caller doesn't provide userLocation, we intentionally keep it null.
+    return toCoord(lat, lng);
+  }, [userLocation]);
 
+  const initialRegion = useMemo(() => {
+    // Never provide a null/undefined coordinate to initialRegion.
+    const c = busCoord || userCoord;
+    return c
+      ? {
+          ...c,
+          latitudeDelta: 0.05,
+          longitudeDelta: 0.05,
+        }
+      : fallbackRegion;
+  }, [busCoord, userCoord, fallbackRegion]);
 
-        {/* KIOT College Marker */}
-        <Marker
-          coordinate={{
-            latitude: 11.554528,
-            longitude: 78.019759,
-          }}
-          pinColor="green"
-        >
-          <Callout tooltip>
-            <View style={styles.kiotCallout}>
-              <View style={styles.kiotCalloutInner}>
-                <Text style={styles.kiotCalloutText}>KIOT College</Text>
-              </View>
-            </View>
-          </Callout>
-        </Marker>
+  const polylineCoords = useMemo(() => {
+    if (Array.isArray(routePolylineCoords) && routePolylineCoords.length) {
+      return routePolylineCoords
+        .map((p) => toCoord(p?.latitude, p?.longitude) || toCoord(p?.lat, p?.lng))
+        .filter(Boolean);
+    }
 
-        {/* Bus Marker */}
-        {busData && busData.latitude && busData.longitude && (
-  <Marker.Animated
-    coordinate={coordinate}
-    anchor={{ x: 0.5, y: 0.5 }} // FIXED
-    flat={false}
-  >
-    <View style={styles.whiteCore}>
-      <View
-        style={[
-          styles.solidCircle,
+    // Fallback: derive from routeStops if provided as "lat,lng" strings.
+    if (!Array.isArray(routeStops) || routeStops.length === 0) return [];
+    const coords = [];
+    for (const stop of routeStops) {
+      if (typeof stop === 'string') {
+        const parts = stop.split(',').map((x) => x.trim());
+        if (parts.length >= 2) {
+          const lat = Number(parts[0]);
+          const lng = Number(parts[1]);
+          const c = toCoord(lat, lng);
+          if (c) coords.push(c);
+        }
+      } else if (stop && typeof stop === 'object') {
+        const c = toCoord(stop?.latitude, stop?.longitude) || toCoord(stop?.lat, stop?.lng);
+        if (c) coords.push(c);
+      }
+    }
+    return coords;
+  }, [routeStops, routePolylineCoords]);
+
+  // Auto-focus / fitToCoordinates
+  useEffect(() => {
+    if (!autoFocus) return;
+    if (!mapRef.current) return;
+
+    const coordsToFit = [];
+    if (busCoord) coordsToFit.push(busCoord);
+    if (userCoord) coordsToFit.push(userCoord);
+
+    const shouldFit = coordsToFit.length > 0;
+    const fallback = { latitude: KIOT_LAT, longitude: KIOT_LNG };
+    const target = shouldFit ? coordsToFit : [fallback];
+
+    // If fitToCoordinates gets an empty array, some native versions can crash.
+    const safeTarget = Array.isArray(target) && target.length ? target : [fallback];
+
+    try {
+      mapRef.current.fitToCoordinates(safeTarget, {
+        edgePadding: { top: 80, right: 40, bottom: 120, left: 40 },
+        animated: !!animate,
+      });
+    } catch (e) {
+      // As a fallback, just animate to the bus coordinate (or KIOT).
+      const c = safeLatLngOrFallback(busCoord ? { latitude: busCoord.latitude, longitude: busCoord.longitude } : null, fallback);
+      try {
+        mapRef.current.animateToRegion(
           {
-            backgroundColor:
-              markerStatus === 'moving' ? '#2ecc71' : '#e74c3c',
+            latitude: c.latitude,
+            longitude: c.longitude,
+            latitudeDelta: 0.05,
+            longitudeDelta: 0.05,
           },
-        ]}
+          !!animate
+        );
+      } catch (_) {
+        // ignore
+      }
+    }
+
+    onAutoFocusDone?.();
+  }, [autoFocus, animate, busCoord, userCoord, onAutoFocusDone]);
+
+  return (
+    <MapView
+      ref={mapRef}
+      style={{ flex: 1 }}
+      initialRegion={initialRegion}
+      // Expo Go compatible (no custom native map providers)
+      provider={PROVIDER_DEFAULT}
+      // Prevent “black screen” scenarios by never letting the map be uninitialized.
+      onTouchStart={() => onUserInteraction?.()}
+      onPanDrag={() => onUserInteraction?.()}
+      onMapReady={() => {
+        // noop: leaving hook for future compatibility
+      }}
+      // iOS: helps avoid blank map when used with tiles
+      showsUserLocation={false}
+    >
+      {/* OpenStreetMap tiles (no API key) */}
+      <UrlTile
+        urlTemplate={'https://tile.openstreetmap.org/{z}/{x}/{y}.png'}
+        maximumZ={19}
+        flipY={false}
       />
-    </View>
-  </Marker.Animated>
-)}
 
-        {/* Route Line (if route data is available) */}
-        {busData && busData.route && busData.route.length > 0 && (
-          <MapView.Polyline
-            coordinates={busData.route}
-            strokeColor="#3498db"
-            strokeWidth={4}
-          />
-        )}
-      </MapView>
-    </View>
+      {/* Bus marker */}
+      {busCoord ? (
+        <Marker
+          coordinate={busCoord}
+          tracksViewChanges={false}
+          title={busData?.busNo ? `Bus ${busData.busNo}` : 'Bus'}
+          description={markerStatus ? String(markerStatus) : undefined}
+        >
+          {/* Keep marker light-weight to avoid AIRMap registration issues from re-mounting */}
+          <React.Fragment>
+            <Circle
+              center={busCoord}
+              radius={25}
+              fillColor={markerStatus === 'stopped' ? 'rgba(231, 76, 60, 0.25)' : 'rgba(46, 204, 113, 0.25)'}
+              strokeWidth={0}
+            />
+            <Circle
+              center={busCoord}
+              radius={8}
+              fillColor={markerStatus === 'stopped' ? 'rgba(231, 76, 60, 0.95)' : 'rgba(46, 204, 113, 0.95)'}
+              strokeColor={'white'}
+              strokeWidth={2}
+            />
+          </React.Fragment>
+        </Marker>
+      ) : null}
+
+      {/* User marker (only if provided) */}
+      {userCoord ? (
+        <Marker coordinate={userCoord} title={'You'}>
+          <React.Fragment>
+            <Circle
+              center={userCoord}
+              radius={25}
+              fillColor={'rgba(59, 130, 246, 0.25)'}
+              strokeWidth={0}
+            />
+            <Circle
+              center={userCoord}
+              radius={8}
+              fillColor={'rgba(59, 130, 246, 0.95)'}
+              strokeColor={'white'}
+              strokeWidth={2}
+            />
+          </React.Fragment>
+        </Marker>
+      ) : null}
+
+      {/* Route polyline */}
+      {polylineCoords.length > 0 ? (
+        <Polyline
+          coordinates={polylineCoords}
+          strokeWidth={4}
+          strokeColor={'rgba(255, 165, 0, 0.95)'}
+          fillColor={'rgba(255, 165, 0, 0.45)'}
+          lineCap={'round'}
+          lineJoin={'round'}
+        />
+      ) : null}
+    </MapView>
   );
-};
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-  },
-  map: {
-    width: '100%',
-    height: '100%',
-  },
-  statusMarker: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 2,
-    },
-    shadowOpacity: 0.2,
-    shadowRadius: 3,
-    elevation: 5,
-  },
-  statusCenter: {
-    width: 16,
-    height: 16,
-    borderRadius: 8,
-    backgroundColor: '#27ae60',
-  },
-  waitingCenter: {
-    backgroundColor: '#f39c12',
-  },
-  stoppedCenter: {
-    backgroundColor: '#c0392b',
-  },
-  destinationCallout: {
-    width: 100,
-    backgroundColor: 'transparent',
-  },
-  destinationCalloutInner: {
-    backgroundColor: '#e74c3c',
-    padding: 10,
-    borderRadius: 5,
-  },
-  destinationCalloutText: {
-    color: '#fff',
-    fontWeight: 'bold',
-    textAlign: 'center',
-  },
-  kiotCallout: {
-    width: 120,
-    backgroundColor: 'transparent',
-  },
-  kiotCalloutInner: {
-    backgroundColor: '#27ae60',
-    padding: 10,
-    borderRadius: 5,
-  },
-  kiotCalloutText: {
-    color: '#fff',
-    fontWeight: 'bold',
-    textAlign: 'center',
-  },
-  callout: {
-    width: 150,
-    backgroundColor: 'transparent',
-  },
-  calloutInner: {
-    backgroundColor: '#34495e',
-    padding: 10,
-    borderRadius: 5,
-  },
-  calloutText: {
-    color: '#fff',
-    fontSize: 12,
-    marginBottom: 3,
-  },
-  webMapContainer: {
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  webMapPlaceholder: {
-    fontSize: 16,
-    textAlign: 'center',
-    marginVertical: 20,
-    color: '#666',
-  },
-  webMapHint: {
-    fontSize: 14,
-    textAlign: 'center',
-    color: '#888',
-    fontStyle: 'italic',
-  },
-  webMarkerPlaceholder: {
-    // Placeholder for web marker
-  },
-  webCallout: {
-    // Placeholder for web callout
-  },
-  markerWrapper: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 100,
-  },
-  pulseRing: {
-    position: 'absolute',
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    borderWidth: 2,
-    zIndex: 1,
-  },
-  solidCircle: {
-    width: 25,
-    height: 25,
-    borderColor: '#ffffff',
-    borderWidth: 2,
-    borderRadius: 15, // Exactly half of width/height for a perfect circle
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 2,
-    elevation: 10,
-    zIndex: 100, // Keeps it well above the pulse
-  },
-  whiteCore: {
-    width: 0,
-    height: 0,
-    borderRadius: 4,
-    backgroundColor: 'white',
-    zIndex: 100,
-  },
-});
-
-export default MapComponent;
+}

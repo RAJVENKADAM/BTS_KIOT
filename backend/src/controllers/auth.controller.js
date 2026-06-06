@@ -48,8 +48,8 @@ const login = async (req, res) => {
     // This check allows users with temporary passwords to log in regardless of active status
     // The frontend will handle redirecting them to the ChangePassword screen
 
-    // Verify password
-    const isValidPassword = password === user.password_hash;
+    // Verify password (password_hash is stored hashed)
+    const isValidPassword = await require('bcryptjs').compare(password, user.password_hash);
 
     if (!isValidPassword) {
       return res.status(401).json({

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import MapComponent from '../components/Map/MapComponent';
+import OSMMap from '../components/Map/OSMMap';
 import {
   View,
   Text,
@@ -469,14 +469,9 @@ const HomeScreen = () => {
       <StatusBar translucent backgroundColor="transparent" barStyle="dark-content" />
 
       {/* MAP */}
-      <MapComponent
-        busData={busData}
-        markerStatus={markerStatus}
-        autoFocus={shouldAutoFocus}
-        animate={false}
-        onAutoFocusDone={() => setShouldAutoFocus(false)}
-        onUserInteraction={() => setShouldAutoFocus(false)}
-      />
+      <View style={styles.mapBackground}>
+        <OSMMap busData={busData} />
+      </View>
       <View style={styles.topBar}>
     {isAdmin ? (
       <View style={styles.searchContainer}>
@@ -637,6 +632,15 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.background,
   },
 
+  mapBackground: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 0,
+  },
+
   topBar: {
     position: 'absolute',
     top: Platform.OS === 'ios' ? 60 : 50,
@@ -754,6 +758,7 @@ iconButtonPrimary: {
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
     padding: 16,
+    zIndex: 10,
     ...SHADOWS.soft,
   },
 
