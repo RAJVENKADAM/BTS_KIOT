@@ -59,8 +59,15 @@ try {
   console.warn("Track socket handlers not available:", err.message);
 }
 
-// Pre-require services that do NOT start polling immediately
-require("./services/trackingService");
+// Start GPS scheduler only after MongoDB is ready
+try {
+  const { startDbDependentServices } = require('./services/startServices');
+  // run async but don't block startup
+  startDbDependentServices().catch((e) => console.error('startDbDependentServices failed:', e.message));
+} catch (e) {
+  console.error('Failed to initialize startServices:', e.message);
+}
+
 require("./services/notificationService");
 
 /* ---------------- BODY PARSING ---------------- */
@@ -127,32 +134,13 @@ app.get("/health", (req, res) => {
   });
 });
 
-/* ---------------- GPS WEBHOOK (must be before 404 catch-all) ---------------- */
+/* ---------------- GPS WEBHOOK (deprecated - retained for backward compatibility) ---------------- */
+// This endpoint is not used for live updates in the 35s scheduler architecture.
+// The GPS provider is contacted only by the backend scheduler.
 app.post("/gps/update-location", async (req, res) => {
-  const { device_id, latitude, longitude, speed, heading, timestamp, token: gpsToken } = req.body;
-
-  // Validate GPS token for security
-  if (gpsToken !== process.env.GPS_TOKEN) {
-    return res.status(401).json({ error: "Unauthorized GPS device" });
-  }
-
-  if (!device_id || latitude === undefined || longitude === undefined) {
-    return res.status(400).json({ error: "Missing required fields" });
-  }
-
-  try {
-    await trackingService.updateGpsLocation(device_id, {
-      latitude,
-      longitude,
-      speed,
-      heading,
-      timestamp,
-    });
-    res.status(200).json({ message: "GPS location updated" });
-  } catch (error) {
-    console.error("GPS Webhook error:", error);
-    res.status(500).json({ error: "Internal server error" });
-  }
+  return res.status(410).json({
+    error: 'GPS webhook is deprecated. Live GPS updates are handled by the 35s backend scheduler.',
+  });
 });
 
 app.use("*", (req, res) => {

@@ -28,6 +28,11 @@ const busLiveLocationSchema = new mongoose.Schema(
     is_online: {
       type: Boolean,
       default: true
+    },
+    // Explicit requirement: track when GPS provider last succeeded
+    lastSuccessfulGpsUpdate: {
+      type: Date,
+      default: null,
     }
   },
   { timestamps: true }

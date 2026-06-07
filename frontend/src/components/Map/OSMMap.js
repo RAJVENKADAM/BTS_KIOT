@@ -44,7 +44,7 @@ export default function OSMMap({ busData }) {
       var initialLat = ${KIOT_LAT};
       var initialLng = ${KIOT_LNG};
 
-      var map = L.map('map', { zoomControl: true }).setView([initialLat, initialLng], 14);
+      var map = L.map('map', { zoomControl: false }).setView([initialLat, initialLng], 14);
 
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '© OpenStreetMap',

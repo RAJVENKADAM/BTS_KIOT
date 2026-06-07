@@ -20,15 +20,15 @@ async function startDbDependentServices() {
     return;
   }
 
-  console.log('✅ MongoDB connected. Starting tracking service...');
+  console.log('✅ MongoDB connected. Starting GPS sync scheduler...');
 
-  // Start bus tracking service (polls GPS API)
+  // Start GPS sync scheduler (polls GPS provider on a single loop)
   const trackingService = require('./trackingService');
   try {
-    trackingService.startTracking();
-    console.log('✅ Bus tracking started successfully');
+    trackingService.start();
+    console.log('✅ GPS sync scheduler started successfully');
   } catch (error) {
-    console.error('Error starting tracking service:', error.message);
+    console.error('Error starting GPS sync scheduler:', error.message);
   }
 }
 

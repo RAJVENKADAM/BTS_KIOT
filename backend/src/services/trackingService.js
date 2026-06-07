@@ -1,105 +1,90 @@
-const axios = require('axios');
 const Bus = require('../models/Bus');
 const BusLiveLocation = require('../models/BusLiveLocation');
+const gpsService = require('./gpsService');
 
-class BusTrackerService {
+// Background GPS sync scheduler (single loop, 35s)
+class BusGpsSyncScheduler {
   constructor() {
-    this.busTrackingState = {};
-    this.pollingInterval = null;
-    this.pollFrequency = 30000; // 30 seconds
+    this.syncIntervalMs = 35000;
+    this.syncLock = false; // prevent overlapping cycles
+    this.started = false;
   }
 
-  async startTracking() {
-    console.log('🚀 Starting bus tracking from GPS API...');
+  async start() {
+    if (this.started) return;
+    this.started = true;
 
-    this.pollingInterval = setInterval(async () => {
-      try {
-        const buses = await Bus.find({ status: 'active' });
+    console.log('🚀 Starting GPS sync scheduler (every 35s)...');
 
-        for (const bus of buses) {
-          try {
-            const location = await this.fetchBusLocation(bus.gps_device_id, bus.reg_no);
-            if (location) {
-              this.updateBusLocationState(bus.bus_no, location);
-              
-              // Also update MongoDB
-              await BusLiveLocation.updateOne(
-                { bus_id: bus._id },
-                {
-                  latitude: location.latitude,
-                  longitude: location.longitude,
-                  speed: location.speed,
-                  is_online: true,
-                  updatedAt: new Date()
-                },
-                { upsert: true }
-              );
-            }
-          } catch (error) {
-            console.error(`Error fetching location for ${bus.bus_no}:`, error.message);
-          }
-        }
-      } catch (error) {
-        console.error('Error in bus tracking poll:', error.message);
-      }
-    }, this.pollFrequency);
+    // run immediately once (optional). still counts as a single cycle.
+    this.runCycle().catch((e) => console.error('Initial GPS sync cycle failed:', e.message));
+
+    setInterval(() => {
+      this.runCycle().catch((e) => console.error('GPS sync cycle failed:', e.message));
+    }, this.syncIntervalMs);
   }
 
-  stopTracking() {
-    if (this.pollingInterval) {
-      clearInterval(this.pollingInterval);
-      this.pollingInterval = null;
-      console.log('⏹️ Bus tracking stopped');
+  async runCycle() {
+    if (this.syncLock) {
+      console.log('GPS sync skipped (previous cycle still running)');
+      return;
     }
-  }
 
-  async fetchBusLocation(deviceId, regNo) {
+    this.syncLock = true;
     try {
-      const response = await axios.get('https://app.gpstrack.in/api/get_current_data', {
-        params: {
-          token: process.env.GPS_TOKEN,
-          email: process.env.GPS_EMAIL,
-          device_id: deviceId,
-          reg_no: regNo
-        },
-        timeout: 8000
-      });
+      const buses = await Bus.find({ status: 'active' }).select('_id bus_no gps_device_id reg_no');
+      const now = new Date();
 
-      if (response.data?.status === 'success' && response.data?.data) {
-        const data = response.data.data;
-        return {
-          latitude: parseFloat(data.latitude),
-          longitude: parseFloat(data.longitude),
-          speed: parseFloat(data.speed) || 0,
-          timestamp: Date.now(),
-          status: 'online'
-        };
+      // Fetch GPS data once per bus/device from the provider.
+      // Requirement says: fetch GPS provider data only through this scheduler.
+      // Provider does not support a true bulk call in current integration, so we fetch per bus inside the cycle.
+      for (const bus of buses) {
+        try {
+          const location = await gpsService.getLocationForBus(bus.gps_device_id, bus.reg_no);
+
+          if (location) {
+            await BusLiveLocation.updateOne(
+              { bus_id: bus._id },
+              {
+                latitude: location.latitude,
+                longitude: location.longitude,
+                speed: location.speed,
+                is_online: true,
+                source: location.source || 'gps',
+                lastSuccessfulGpsUpdate: now,
+              },
+              { upsert: true }
+            );
+          } else {
+            // GPS fetch returned no data -> mark stale/offline but keep previous coords
+            // We update status and timestamps, but avoid overwriting lat/lng.
+            await BusLiveLocation.updateOne(
+              { bus_id: bus._id },
+              {
+                is_online: false,
+                source: 'gps',
+              },
+              { upsert: true }
+            );
+          }
+        } catch (busErr) {
+          console.error(`GPS sync error for bus ${bus.bus_no}:`, busErr.message);
+          // Mark bus stale/offline; do not crash
+          await BusLiveLocation.updateOne(
+            { bus_id: bus._id },
+            {
+              is_online: false,
+              source: 'gps',
+            },
+            { upsert: true }
+          );
+        }
       }
-      return null;
-    } catch (error) {
-      console.error(`GPS fetch error for device ${deviceId}:`, error.message);
-      return null;
+    } finally {
+      this.syncLock = false;
     }
-  }
-
-  updateBusLocationState(busNo, location) {
-    if (!this.busTrackingState[busNo]) {
-      this.busTrackingState[busNo] = {};
-    }
-    this.busTrackingState[busNo] = {
-      ...location,
-      busNo,
-      updatedAt: new Date()
-    };
-  }
-
-  getBusLocation(busNo) {
-    return this.busTrackingState[busNo] || null;
-  }
-
-  getAllBusLocations() {
-    return Object.values(this.busTrackingState);
   }
 }
 
-module.exports = new BusTrackerService();
+module.exports = new BusGpsSyncScheduler();
+

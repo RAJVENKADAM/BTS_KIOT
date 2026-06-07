@@ -1,8 +1,6 @@
 const Bus = require('../models/Bus');
 const BusRoute = require('../models/BusRoute');
 const BusLiveLocation = require('../models/BusLiveLocation');
-const gpsService = require('../services/gpsService');
-const trackingService = require('../services/trackingService');
 const NotificationService = require('../services/notificationService');
 
 // ================= UPLOAD BUS ROUTES =================
@@ -113,8 +111,7 @@ async function getAllBuses(req, res) {
 
     const enrichedBuses = buses.map(bus => {
       const liveLocation = locationMap.get(bus._id.toString());
-      const gpsLocation = gpsService.getCachedLocation(bus.bus_no);
-      const location = liveLocation || gpsLocation;
+      const location = liveLocation;
 
       return {
         busNo: bus.bus_no,
@@ -123,10 +120,12 @@ async function getAllBuses(req, res) {
         gpsDeviceId: bus.gps_device_id,
         mobileLive: bus.mobile_live,
         currentPlan: bus.current_plan,
-        latitude: location?.latitude || null,
-        longitude: location?.longitude || null,
-        speed: location?.speed || 0,
-        isOnline: location ? true : false
+        latitude: location?.latitude ?? null,
+        longitude: location?.longitude ?? null,
+        speed: location?.speed ?? 0,
+        isOnline: !!location,
+        lastUpdated: location?.lastSuccessfulGpsUpdate ?? location?.updatedAt ?? null,
+        source: location?.source ?? 'offline'
       };
     });
 
@@ -287,19 +286,18 @@ async function getLiveLocation(req, res) {
       });
     }
 
-    const liveLocation = await BusLiveLocation.findOne({ bus_id: bus._id });
-    const gpsLocation = await gpsService.getCachedLocation(bus.bus_no);
-    const location = liveLocation || gpsLocation;
+    const location = await BusLiveLocation.findOne({ bus_id: bus._id });
 
     res.status(location ? 200 : 404).json({
       success: !!location,
       busNo: bus.bus_no,
-      latitude: location?.latitude || null,
-      longitude: location?.longitude || null,
-      speed: location?.speed || 0,
-      status: location ? 'online' : 'offline',
-      source: location?.source || 'none',
-      updatedAt: location?.updatedAt || new Date()
+      latitude: location?.latitude ?? null,
+      longitude: location?.longitude ?? null,
+      speed: location?.speed ?? 0,
+      status: location ? (location.is_online ? 'online' : 'offline') : 'offline',
+      source: location?.source || 'offline',
+      lastSuccessfulGpsUpdate: location?.lastSuccessfulGpsUpdate ?? null,
+      lastUpdated: location?.lastSuccessfulGpsUpdate ?? location?.updatedAt ?? null
     });
 
   } catch (error) {
@@ -325,18 +323,18 @@ async function trackByPreview(req, res) {
       return res.status(404).json({ error: 'No bus found for preview number' });
     }
 
-    const liveLocation = await BusLiveLocation.findOne({ bus_id: bus._id });
-    const gpsLocation = await gpsService.getCachedLocation(bus.bus_no);
-    const location = liveLocation || gpsLocation;
+    const location = await BusLiveLocation.findOne({ bus_id: bus._id });
 
     res.status(location ? 200 : 404).json({
       success: !!location,
       busNo: bus.bus_no,
       previewNumber: bus.preview_number,
-      latitude: location?.latitude || null,
-      longitude: location?.longitude || null,
-      speed: location?.speed || 0,
-      status: location ? 'online' : 'offline'
+      latitude: location?.latitude ?? null,
+      longitude: location?.longitude ?? null,
+      speed: location?.speed ?? 0,
+      status: location ? (location.is_online ? 'online' : 'offline') : 'offline',
+      lastSuccessfulGpsUpdate: location?.lastSuccessfulGpsUpdate ?? null,
+      lastUpdated: location?.lastSuccessfulGpsUpdate ?? location?.updatedAt ?? null
     });
 
   } catch (error) {
