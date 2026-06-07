@@ -17,37 +17,28 @@ const Stack = createStackNavigator();
 
 /**
  * Auth + App routing controller
- * - While loading: show splash
- * - No token: show Login
- * - Has token: show Home (main app)
  */
 function AppNavigator() {
   const { token, loading } = useAuth();
 
-  // Show splash while auth loads from storage
   if (loading) {
     return <SplashScreen />;
   }
 
-  // Not authenticated → show Login flow
-  if (!token) {
-    return (
-      <Stack.Navigator screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="Login" component={LoginScreen} />
-      </Stack.Navigator>
-    );
-  }
-
-  // Authenticated → show main app
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
-      <Stack.Screen name="Home" component={BottomNavigator} />
-      <Stack.Screen name="Organize" component={OrganizeScreen} />
-      <Stack.Screen name="Profile" component={ProfileScreen} />
+      {token ? (
+        <>
+          <Stack.Screen name="Home" component={BottomNavigator} />
+          <Stack.Screen name="Organize" component={OrganizeScreen} />
+          <Stack.Screen name="Profile" component={ProfileScreen} />
+        </>
+      ) : (
+        <Stack.Screen name="Login" component={LoginScreen} />
+      )}
     </Stack.Navigator>
   );
 }
-
 /**
  * Root App
  */
