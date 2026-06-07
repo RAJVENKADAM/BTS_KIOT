@@ -144,18 +144,24 @@ export default function MapComponent({
   return (
     <MapView
       ref={mapRef}
-      style={{ flex: 1 }}
-      initialRegion={initialRegion}
-      // Expo Go compatible (no custom native map providers)
-      provider={PROVIDER_DEFAULT}
+  style={{ flex: 1 }}
+  initialRegion={initialRegion}
+  provider={PROVIDER_DEFAULT}
+  rotateEnabled={true}
+  pitchEnabled={false}
+
+  scrollEnabled={true}
+  zoomEnabled={true}
+  onTouchStart={() => onUserInteraction?.()}
+  onPanDrag={() => onUserInteraction?.()}
+  showsUserLocation={false}
       // Prevent “black screen” scenarios by never letting the map be uninitialized.
-      onTouchStart={() => onUserInteraction?.()}
-      onPanDrag={() => onUserInteraction?.()}
+      
       onMapReady={() => {
         // noop: leaving hook for future compatibility
       }}
       // iOS: helps avoid blank map when used with tiles
-      showsUserLocation={false}
+
     >
       {/* OpenStreetMap tiles (no API key) */}
       <UrlTile
@@ -166,29 +172,40 @@ export default function MapComponent({
 
       {/* Bus marker */}
       {busCoord ? (
-        <Marker
-          coordinate={busCoord}
-          tracksViewChanges={false}
-          title={busData?.busNo ? `Bus ${busData.busNo}` : 'Bus'}
-          description={markerStatus ? String(markerStatus) : undefined}
-        >
-          {/* Keep marker light-weight to avoid AIRMap registration issues from re-mounting */}
-          <React.Fragment>
-            <Circle
-              center={busCoord}
-              radius={25}
-              fillColor={markerStatus === 'stopped' ? 'rgba(231, 76, 60, 0.25)' : 'rgba(46, 204, 113, 0.25)'}
-              strokeWidth={0}
-            />
-            <Circle
-              center={busCoord}
-              radius={8}
-              fillColor={markerStatus === 'stopped' ? 'rgba(231, 76, 60, 0.95)' : 'rgba(46, 204, 113, 0.95)'}
-              strokeColor={'white'}
-              strokeWidth={2}
-            />
-          </React.Fragment>
-        </Marker>
+        <Marker coordinate={busCoord} tracksViewChanges={false}>
+  <>
+    {/* outer glow */}
+    <Circle
+      center={busCoord}
+      radius={72}
+      fillColor={
+        markerStatus === 'stopped'
+          ? 'rgba(255, 0, 0, 0.07)'
+          : 'rgba(0, 200, 100, 0.07)'
+      }
+    />
+
+    {/* mid glow (bigger) */}
+    <Circle
+      center={busCoord}
+      radius={36}
+      fillColor={
+        markerStatus === 'stopped'
+          ? 'rgba(255, 0, 0, 0.18)'
+          : 'rgba(0, 200, 100, 0.18)'
+      }
+    />
+
+    {/* center dot (bigger) */}
+    <Circle
+      center={busCoord}
+      radius={10}
+      fillColor={markerStatus === 'stopped' ? '#ff3b30' : '#00c853'}
+      strokeColor="white"
+      strokeWidth={2}
+    />
+  </>
+</Marker>
       ) : null}
 
       {/* User marker (only if provided) */}

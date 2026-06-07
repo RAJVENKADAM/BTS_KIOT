@@ -51,18 +51,20 @@ const io = socketIo(server, {
 
 setIO(io);
 
+// Tracking sockets disabled for this deployment (no mobile/primary/secondary admins).
+// GPS sync is handled exclusively by gpsSyncWorker.
+
 try {
   const { initTrackingHandlers } = require("./socket/trackSocket");
   initTrackingHandlers(io);
-  console.log("✅ Track socket handlers initialized");
+  console.log("✅ Track socket handlers initialized (legacy disabled endpoints)." );
 } catch (err) {
   console.warn("Track socket handlers not available:", err.message);
 }
 
-// Start GPS scheduler only after MongoDB is ready
+// Start GPS worker only after MongoDB is ready
 try {
   const { startDbDependentServices } = require('./services/startServices');
-  // run async but don't block startup
   startDbDependentServices().catch((e) => console.error('startDbDependentServices failed:', e.message));
 } catch (e) {
   console.error('Failed to initialize startServices:', e.message);
@@ -71,7 +73,6 @@ try {
 require("./services/notificationService");
 
 /* ---------------- BODY PARSING ---------------- */
-
 app.use(
   express.json({
     limit: "25mb",
@@ -84,8 +85,6 @@ app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 
 /* ---------------- ROUTES ---------------- */
 
-// DB guard: wait briefly for MongoDB connection instead of rejecting immediately
-// This handles Render cold-start where the first request arrives before DB connects
 const mongoose = require('mongoose');
 
 function waitForDb(maxWaitMs = 10000) {
@@ -108,7 +107,6 @@ app.use(async (req, res, next) => {
 
   if (mongoose.connection.readyState === 1) return next();
 
-  // DB not ready yet — wait up to 10s for connection
   const ready = await waitForDb(10000);
   if (ready) return next();
 
@@ -126,7 +124,6 @@ app.use("/api/superadmin", require("./routes/superadminImport.routes"));
 app.use("/api/superadmin", require("./routes/superadminUsers.routes"));
 app.use("/api/track", require("./routes/track.routes"));
 
-
 app.get("/health", (req, res) => {
   res.status(200).json({
     status: "OK",
@@ -134,61 +131,15 @@ app.get("/health", (req, res) => {
   });
 });
 
-/* ---------------- GPS WEBHOOK (deprecated - retained for backward compatibility) ---------------- */
-// This endpoint is not used for live updates in the 35s scheduler architecture.
-// The GPS provider is contacted only by the backend scheduler.
 app.post("/gps/update-location", async (req, res) => {
   return res.status(410).json({
-    error: 'GPS webhook is deprecated. Live GPS updates are handled by the 35s backend scheduler.',
+    error: 'GPS webhook is deprecated. Live GPS updates are handled by the backend worker.',
   });
 });
 
 app.use("*", (req, res) => {
   res.status(404).json({ error: "Route not found" });
 });
-
-/* ---------------- SOCKET EVENTS & NAMESPACES ---------------- */
-const trackingService = require("./services/trackingService");
-
-const busLocationNamespace = io.of("/bus-location");
-
-busLocationNamespace.on("connection", (socket) => {
-  console.log("Tracking client connected:", socket.id);
-
-  socket.on("join-bus", async (busNo) => {
-    if (!busNo) return;
-    socket.join(`bus_${busNo}`);
-    console.log(`Socket ${socket.id} joined bus room: bus_${busNo}`);
-  });
-
-  // Mobile tracking update from Primary Admin
-  socket.on("update-mobile-location", async (data) => {
-    const { userId, bus_no, latitude, longitude, speed, heading } = data;
-    if (bus_no && latitude != null && longitude != null) {
-      await trackingService.updateMobileLocation(userId, bus_no, {
-        latitude,
-        longitude,
-        speed,
-        heading,
-      });
-    }
-  });
-
-  socket.on("toggle-mobile-tracking", async (data) => {
-    const { bus_no, active } = data;
-    if (bus_no) {
-      await trackingService.setMobileTrackingStatus(bus_no, active);
-    }
-  });
-
-  socket.on("disconnect", () => {
-    console.log("Tracking client disconnected:", socket.id);
-  });
-});
-
-/* ---------------- LEGACY SOCKET EVENTS ---------------- */
-// NOTE: trackSocket.js initTrackingHandlers already registers io.on('connection')
-// Avoid duplicate registration to prevent double-logging and event conflicts
 
 app.use((err, req, res, next) => {
   const statusCode = err.statusCode || err.status || 500;

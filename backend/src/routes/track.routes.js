@@ -1,12 +1,16 @@
 const express = require('express');
-const { updateLocation, getLiveLocation, toggleTracking } = require('../controllers/track.controller');
-const { authenticateToken, authorizeRoles } = require('../middleware/auth');
+
+// This deployment does not support mobile phone tracking.
+// GPS provider syncing happens in src/workers/gpsSyncWorker.js.
+// Keep this file so existing imports/routes don't crash, but return 410.
 
 const router = express.Router();
 
-// Primary admin only routes for tracking
-router.put('/location', authenticateToken, authorizeRoles(['PRIMARY_ADMIN']), updateLocation);
-router.get('/location/:busNo', authenticateToken, getLiveLocation);
-router.post('/toggle-tracking', authenticateToken, authorizeRoles(['PRIMARY_ADMIN']), toggleTracking);
+router.use((req, res) => {
+  res.status(410).json({
+    error: 'Mobile tracking endpoints are disabled. GPS syncing is handled by gpsSyncWorker.',
+  });
+});
 
 module.exports = router;
+

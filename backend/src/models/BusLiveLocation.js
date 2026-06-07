@@ -16,13 +16,13 @@ const busLiveLocationSchema = new mongoose.Schema(
 
     // Current last known coordinates (keep these unchanged on provider failures)
     latitude: {
-      type: Number,
-      required: true,
-    },
-    longitude: {
-      type: Number,
-      required: true,
-    },
+  type: Number,
+  default: null,
+},
+longitude: {
+  type: Number,
+  default: null,
+},
 
     speed: {
       type: Number,

@@ -47,52 +47,92 @@ class GPSService {
       throw err;
     }
 
+    // Provider payload has shown different shapes in the wild.
+    // We normalize a few common variants so the worker can still persist locations.
     const payload = response?.data;
-    const providerStatus = payload?.status;
-    const providerData = payload?.data;
 
-    // Bug observed: { status: undefined, data: null }
-    const hasUsableData = !!providerData;
+    // Common status keys: payload.status, payload.success, payload?.data?.status
+    const providerStatus = payload?.status ?? payload?.success;
 
-    if (payload && providerStatus === 'success' && hasUsableData) {
-      const data = providerData;
-      const latitude = parseFloat(data.latitude);
-      const longitude = parseFloat(data.longitude);
-      const speed = parseFloat(data.speed) || 0;
+    // Common location containers: payload.data, payload.data.data, payload.data.locations[0]
+    let providerData = null;
 
-      // Basic sanity checks
-      if (
-        Number.isFinite(latitude) &&
-        Number.isFinite(longitude) &&
-        latitude >= -90 &&
-        latitude <= 90 &&
-        longitude >= -180 &&
-        longitude <= 180
-      ) {
-        return {
-          latitude,
-          longitude,
-          speed,
-          source: 'gps',
-          providerTimestamp: data.timestamp ? new Date(data.timestamp).toISOString() : null,
-          timestamp: Date.now(),
-        };
+// CASE 1: API returns array (YOUR CURRENT CASE)
+if (Array.isArray(payload?.data)) {
+  providerData = payload.data[0];
+}
+
+// CASE 2: API returns direct array (your log shows THIS)
+else if (Array.isArray(payload)) {
+  providerData = payload[0];
+}
+
+// CASE 3: normal object formats
+else {
+  providerData =
+    payload?.data?.data ??
+    payload?.data?.locations?.[0] ??
+    payload?.data?.location ??
+    payload?.data;
+}
+console.log("PARSED PROVIDER DATA:", providerData);
+    // Log once per failure (redact credentials)
+    const logCtx = {
+      ...requestMeta,
+      providerStatus,
+      payloadKeys: payload ? Object.keys(payload) : null,
+      providerDataType: providerData && typeof providerData,
+    };
+
+    // If provider says success, but data fields are nested, still attempt parsing.
+    const candidate = providerData;
+
+    const pick = (obj, keys) => {
+      if (!obj || typeof obj !== 'object') return undefined;
+      for (const k of keys) {
+        if (obj[k] !== undefined && obj[k] !== null && obj[k] !== '') return obj[k];
       }
+      return undefined;
+    };
 
-      console.warn('⚠️ GPS API returned success but coordinates invalid:', {
-        device_id: deviceId,
-        reg_no: regNo,
+    const latitudeRaw = pick(candidate, ['latitude', 'lat', 'Latitude', 'LAT']);
+    const longitudeRaw = pick(candidate, ['longitude', 'lng', 'lon', 'Longitude', 'LNG', 'LON']);
+    const speedRaw = pick(candidate, ['speed', 'spd', 'Speed']);
+    const timestampRaw = pick(candidate, ['timestamp', 'time', 'providerTimestamp', 'ts']);
+
+    const latitude = latitudeRaw !== undefined ? parseFloat(latitudeRaw) : NaN;
+    const longitude = longitudeRaw !== undefined ? parseFloat(longitudeRaw) : NaN;
+    const speed = speedRaw !== undefined && speedRaw !== null && speedRaw !== '' ? (parseFloat(speedRaw) || 0) : 0;
+console.log("RAW GPS RESPONSE:", response.data);
+    const validCoords =
+      Number.isFinite(latitude) &&
+      Number.isFinite(longitude) &&
+      latitude >= -90 &&
+      latitude <= 90 &&
+      longitude >= -180 &&
+      longitude <= 180;
+
+    if (validCoords) {
+      let providerTimestamp = null;
+      try {
+        if (timestampRaw) providerTimestamp = new Date(timestampRaw).toISOString();
+      } catch (_) {}
+
+      return {
         latitude,
         longitude,
-      });
-
-      return null;
+        speed,
+        source: 'gps',
+        providerTimestamp,
+        timestamp: Date.now(),
+      };
     }
 
-    console.warn('GPS API returned unusable response:', {
-      ...requestMeta,
-      status: providerStatus,
-      has_data: !!providerData,
+    console.warn('GPS API returned unusable response (no valid coords):', {
+      ...logCtx,
+      latitude,
+      longitude,
+      hasCandidate: !!candidate,
     });
 
     return null;

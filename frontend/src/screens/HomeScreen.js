@@ -13,7 +13,7 @@ import {
   Modal,
   ScrollView,
   ActivityIndicator,
-  Alert
+  Alert,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -23,11 +23,15 @@ import io from 'socket.io-client';
 import { COLORS, RADIUS, SHADOWS } from '../theme';
 import { useAuth } from '../context/AuthContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import BottomSheet, { BottomSheetView } from '@gorhom/bottom-sheet';
 
 const { height } = Dimensions.get('window');
 
 const MIN_HEIGHT = 150;
 const MAX_HEIGHT = height * 0.6;
+
+// Stable snap points for gorhom/bottom-sheet
+const SNAP_POINTS = ['25%', '50%', '75%'];
 // Live updates via socket.io + manual refresh
 
 // KIOT College coordinates
@@ -54,52 +58,58 @@ const HomeScreen = () => {
   const { error, refreshBuses, selectedPlan, setSelectedPlan, buses, getSocket } = useBus();
   const socket = getSocket ? getSocket() : null;
 
+  // If busData doesn't include currentPlan (or is missing), fallback to context selectedPlan
+  const effectiveCurrentPlan = displayBusData?.currentPlan || selectedPlan;
+
+
   const [searchQuery, setSearchQuery] = useState('');
   const [busData, setBusData] = useState(null);
   const [noBusFound, setNoBusFound] = useState(false);
+  const [isBusSearchAttempted, setIsBusSearchAttempted] = useState(false);
+
   const [selectedPreviewNumber, setSelectedPreviewNumber] = useState(null);
   const [selectedBusNo, setSelectedBusNo] = useState(null);
   const [lastGoodLocation, setLastGoodLocation] = useState(null);
+  const [isSuperadminSearched, setIsSuperadminSearched] = useState(false);
+
   const [locationStatus, setLocationStatus] = useState('idle'); // idle|loading|live|offline|error
   const [markerStatus, setMarkerStatus] = useState('moving'); // moving|waiting|stopped
 
-  const lastCoordRef = useRef(null);
-  const sameCoordinateCount = useRef(0);
+  const lastCoordinateRef = useRef(null);
+  const sameCoordinateCountRef = useRef(0);
+  const busStatusRef = useRef('moving');
+
+  // Prevent stale closure for selected bus
+  const selectedBusNoRef = useRef(selectedBusNo);
+  useEffect(() => {
+    selectedBusNoRef.current = selectedBusNo;
+  }, [selectedBusNo]);
+
   const [isSheetExpanded, setIsSheetExpanded] = useState(false);
+  const isDraggingRef = useRef(false);
+
+
   const [shouldAutoFocus, setShouldAutoFocus] = useState(false);
   const [showStopsModal, setShowStopsModal] = useState(false);
   const [routeStops, setRouteStops] = useState([]);
   const [loadingStops, setLoadingStops] = useState(false);
-  const sheetHeight = useRef(new Animated.Value(MIN_HEIGHT)).current;
+  const lastPlanRef = useRef(null);
+
+  // BottomSheet sizing is handled by @gorhom/bottom-sheet.
+  // Keep these legacy animated sizing refs removed to avoid flicker/gesture conflicts.
 
 
 
+
+
+
+  // IMPORTANT: Do not drive bottom-sheet position from live GPS updates.
+  // @gorhom/bottom-sheet already handles gesture + snapping.
+  // This screen only changes sheet *content* via state updates.
   useEffect(() => {
-    if (!selectedBusNo) {
-      setIsSheetExpanded(false);
-      Animated.spring(sheetHeight, {
-        toValue: MIN_HEIGHT,
-        useNativeDriver: false,
-        stiffness: 220,
-        damping: 22,
-        mass: 1,
-      }).start();
-      return;
-    }
+    // no-op
+  }, [selectedBusNo, busData]);
 
-    // When a bus is selected, expand the sheet
-    setIsSheetExpanded(true);
-    const hasLocation = busData && busData.latitude != null && busData.longitude != null;
-    const toValue = hasLocation ? MAX_HEIGHT * 0.6 : MAX_HEIGHT * 0.3;
-
-    Animated.spring(sheetHeight, {
-      toValue,
-      useNativeDriver: false,
-      stiffness: 220,
-      damping: 22,
-      mass: 1,
-    }).start();
-  }, [selectedBusNo]);
 
   // Persist bus data when it changes (but not during loading)
   useEffect(() => {
@@ -134,6 +144,12 @@ const HomeScreen = () => {
     }
   }, [user, isAdmin, selectedBusNo, selectedPreviewNumber]);
 
+  // Mark superadmin as NOT searched initially; it becomes true only after a successful/attempted search
+  useEffect(() => {
+    if (isAdmin) setIsSuperadminSearched(false);
+  }, [isAdmin]);
+
+
   // Join/leave socket room when selectedBusNo changes
   useEffect(() => {
     if (!socket || !selectedBusNo) return;
@@ -146,21 +162,52 @@ const HomeScreen = () => {
     };
   }, [socket, selectedBusNo]);
 
-  // Local socket listener for immediate plan updates
+  // Socket plan updates (real-time + immutable refresh)
   useEffect(() => {
     if (!socket) return;
 
     const handleBusUpdate = (data) => {
-      console.log('HomeScreen bus-update:', data);
-      if ((data.busNo === selectedBusNo || data.bus_no === selectedBusNo) && data.currentPlan) {
-        setBusData(prev => prev ? { ...prev, currentPlan: data.currentPlan } : prev);
-        Alert.alert('Plan Updated', `Bus ${selectedBusNo} now on ${data.currentPlan}`);
-      }
+      if (!data) return;
+
+      const selected = selectedBusNoRef.current;
+      if (!selected) return;
+
+      const incomingBusNo = data.busNo ?? data.bus_no ?? data.busNumber;
+      if (!incomingBusNo) return;
+
+      if (String(incomingBusNo) !== String(selected)) return;
+
+      const newPlan = data.currentPlan;
+      if (!newPlan) return;
+
+      // Prevent redundant rerenders for same plan (but still force on change)
+      if (lastPlanRef.current === newPlan) return;
+      lastPlanRef.current = newPlan;
+
+      setBusData(prev => {
+        // If busData is null/stale, still create a minimal object so the bottom sheet updates.
+        if (!prev) {
+          return {
+            busNo: selected,
+            currentPlan: newPlan,
+            _updatedAt: Date.now(),
+          };
+        }
+
+        return {
+          ...prev,
+          currentPlan: newPlan,
+          _updatedAt: Date.now(),
+        };
+      });
     };
+
+
 
     socket.on('bus-update', handleBusUpdate);
     return () => socket.off('bus-update', handleBusUpdate);
-  }, [socket, selectedBusNo]);
+  }, [socket]);
+
 
   useEffect(() => {
     refreshBuses();
@@ -196,8 +243,13 @@ const HomeScreen = () => {
   }, []);
 
 
+  // Legacy PanResponder block removed (was causing gesture conflicts / flicker).
+
+
   const normalizeBusState = (state) => {
+
     const normalized = typeof state === 'string' ? state.toLowerCase() : '';
+
     return ['moving', 'stopped'].includes(normalized) ? normalized : null;
   };
 
@@ -209,50 +261,65 @@ const HomeScreen = () => {
     return coordinateState;
   };
 
-  // Detect bus movement status based on coordinate tracking
+  // CORE MOVEMENT RULE ENGINE (Mandatory)
+  // WAITING: same coordinate repeats 3 times consecutively
+  // STOPPED: same coordinate repeats 10 times consecutively
+  // MOVING: next coordinate differs from previous (default fallback)
+  // Priority: STOPPED > WAITING > MOVING
   const detectBusStatus = (lat, lng) => {
+    if (typeof lat !== 'number' || typeof lng !== 'number' || !isFinite(lat) || !isFinite(lng)) {
+      return busStatusRef.current || 'moving';
+    }
+
     const currentCoord = `${lat.toFixed(5)},${lng.toFixed(5)}`;
+    const lastCoord = lastCoordinateRef.current;
 
-    if (lastCoordRef.current === currentCoord) {
-      sameCoordinateCount.current += 1;
+    if (lastCoord === currentCoord) {
+      sameCoordinateCountRef.current += 1;
     } else {
-      sameCoordinateCount.current = 1;
-      lastCoordRef.current = currentCoord;
+      lastCoordinateRef.current = currentCoord;
+      sameCoordinateCountRef.current = 1;
     }
 
-    if (sameCoordinateCount.current >= 3) {
-      return 'stopped';
+    const count = sameCoordinateCountRef.current;
+
+    let nextStatus;
+    if (count >= 10) {
+      nextStatus = 'stopped';
+    } else if (count >= 3) {
+      nextStatus = 'waiting';
+    } else {
+      // If coordinate changed, count is 1 => moving
+      nextStatus = 'moving';
     }
-    return 'moving';
+
+    busStatusRef.current = nextStatus;
+    return nextStatus;
   };
+
 
   // Removed polling useEffect - socket + manual refresh only
 
 
 
-  const toggleSheet = () => {
-    const newExpandedState = !isSheetExpanded;
-    setIsSheetExpanded(newExpandedState);
-
-    const targetHeight = newExpandedState ? MAX_HEIGHT : MIN_HEIGHT;
-
-    Animated.spring(sheetHeight, {
-      toValue: targetHeight,
-      useNativeDriver: false,
-      stiffness: 150,
-      damping: 20,
-      mass: 1,
-    }).start();
-  };
+  // Drag gesture: smooth following finger, then snap based on velocity/distance.
+  const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
 
 
   const handlePlanPress = async () => {
-    if (!displayBusData?.currentPlan || !displayBusData.busNo || !token) {
-      Alert.alert('Error', 'No plan data available');
-      return;
-    }
-    Alert.alert('Route Stops', 'Route stops viewing is not yet available. This feature requires a backend endpoint to be configured.');
+    if (!selectedBusNo && !selectedPreviewNumber) return;
+    if (!displayBusData?.currentPlan) return;
+
+    // This build does not yet include a backend endpoint to fetch stops by bus+plan.
+    // Once added, wire it here to populate `routeStops` and show `showStopsModal`.
+    Alert.alert(
+      'Route Stops',
+      `Stops for bus ${selectedBusNo || selectedPreviewNumber} (plan: "${displayBusData.currentPlan}") require a backend stops-by-bus+plan endpoint.`
+    );
   };
+
+
+
 
   // Refresh current bus location (immediate fetch + continue polling)
   const handleRefresh = useCallback(async () => {
@@ -272,6 +339,7 @@ const HomeScreen = () => {
         const nextBusData = { ...data, source: data.source || 'gps' };
         setBusData(nextBusData);
         setLastGoodLocation(nextBusData);
+
         setLocationStatus(data.isStale ? 'stale' : 'live');
         setNoBusFound(false);
         setShouldAutoFocus(true);
@@ -280,14 +348,13 @@ const HomeScreen = () => {
         const statusFromCoordinates = detectBusStatus(data.latitude, data.longitude);
         setMarkerStatus(chooseBusStatus(statusFromAPI, statusFromCoordinates));
       } else {
-        if (!lastGoodLocation) {
-          setLocationStatus('error');
-          setNoBusFound(true);
-        } else {
-          setBusData(lastGoodLocation);
-          setLocationStatus('offline');
-        }
+        // Strict: if refresh fails for the current selected bus, show KIOT only.
+        setBusData(null);
+        setLastGoodLocation(null);
+        setLocationStatus('error');
+        setNoBusFound(true);
       }
+
     } catch (err) {
       console.log('Refresh error:', err.message);
       if (!lastGoodLocation) {
@@ -304,11 +371,6 @@ const HomeScreen = () => {
   }, [selectedBusNo, selectedPreviewNumber, token, lastGoodLocation, refreshBuses]);
 
   const handleSearch = async () => {
-    if (!isAdmin) {
-      Alert.alert('Restricted', 'Users can only track their assigned bus. Use refresh to update location.');
-      return;
-    }
-    
     const query = searchQuery.trim();
     if (!query) return;
 
@@ -316,6 +378,14 @@ const HomeScreen = () => {
     setSearchQuery('');
     setNoBusFound(false);
     setLocationStatus('loading');
+
+    // mark search attempted so sheet can show correct empty/error state
+    setIsBusSearchAttempted(true);
+
+    // For superadmin: once they search (success or failure), keep strict focus on that outcome
+    if (isAdmin) setIsSuperadminSearched(true);
+
+
 
     if (isPreviewSearch) {
       setSelectedPreviewNumber(query);
@@ -331,8 +401,9 @@ const HomeScreen = () => {
         setSelectedBusNo(nextBusNo);
         
         // Reset coordinate tracking for new search
-        sameCoordinateCount.current = 0;
-        lastCoordRef.current = null;
+        sameCoordinateCountRef.current = 0;
+        lastCoordinateRef.current = null;
+
         
         const nextBusData = {
           ...data,
@@ -348,11 +419,15 @@ const HomeScreen = () => {
         setMarkerStatus(chooseBusStatus(statusFromAPI, statusFromCoordinates) || 'moving');
       } catch (err) {
         console.log('Preview search error:', err.message);
+        // Strict: clear any previous bus location
         setSelectedBusNo(null);
         setSelectedPreviewNumber(null);
+        setBusData(null);
+        setLastGoodLocation(null);
         setLocationStatus('error');
         setNoBusFound(true);
       }
+
     } else {
       // Bus number search - immediately fetch data
       const busNo = query.toUpperCase();
@@ -365,25 +440,27 @@ const HomeScreen = () => {
       setShouldAutoFocus(true);
       
       // Reset coordinate tracking for new search
-      sameCoordinateCount.current = 0;
-      lastCoordRef.current = null;
+      sameCoordinateCountRef.current = 0;
+      lastCoordinateRef.current = null;
       
       // If it's the same bus and we have good data, don't reset everything
       if (!isSameBus) {
         setBusData(null);
         setLastGoodLocation(null);
       }
+
       
       try {
         const data = await busApi.getBusLocation(token, busNo);
 
-        if (data && data.latitude !== null && data.longitude !== null) {
+      if (data && data.latitude !== null && data.longitude !== null) {
           const nextBusData = {
             ...data,
             source: data.source || 'gps'
           };
           setBusData(nextBusData);
           setLastGoodLocation(nextBusData);
+
           setLocationStatus(data.isStale ? 'stale' : 'live');
           
           const statusFromAPI = data.busState;
@@ -391,36 +468,37 @@ const HomeScreen = () => {
           setMarkerStatus(chooseBusStatus(statusFromAPI, statusFromCoordinates) || 'moving');
         } else {
           console.log('No valid location for bus search:', data);
-          // Only reset if it's not the same bus or if we don't have good data
-          if (!isSameBus || !lastGoodLocation) {
-            setBusData(null);
-            setLastGoodLocation(null);
-            setLocationStatus('error');
-            setNoBusFound(true);
-          } else {
-            setBusData(lastGoodLocation);
-            setLocationStatus('offline');
-          }
-        }
-      } catch (err) {
-        console.log('Bus search error:', err.message);
-        // Only reset if it's not the same bus or if we don't have good data
-        if (!isSameBus || !lastGoodLocation) {
+          // Strict: clear any previous bus location and show KIOT
           setBusData(null);
           setLastGoodLocation(null);
           setLocationStatus('error');
           setNoBusFound(true);
-        } else {
-          setBusData(lastGoodLocation);
-          setLocationStatus('offline');
         }
+      } catch (err) {
+        console.log('Bus search error:', err.message);
+        // Strict: clear any previous bus location and show KIOT
+        setBusData(null);
+        setLastGoodLocation(null);
+        setLocationStatus('error');
+        setNoBusFound(true);
       }
+
     }
   };
 
 
-  const displayBusData = busData || lastGoodLocation;
+  // Strict display rules:
+  // - Non-admin: always show only their assigned bus (never fall back to other buses).
+  // - Superadmin: if they searched at least once, show only the searched bus (or KIOT if not found).
+  // - Never reuse lastGoodLocation to “hide” not-found/bad searches.
+  const shouldShowBusMarker = (() => {
+    if (!isAdmin) return !!selectedBusNo || !!selectedPreviewNumber;
+    return isSuperadminSearched && (!!selectedBusNo || !!selectedPreviewNumber);
+  })();
+
+  const displayBusData = shouldShowBusMarker ? busData : null;
   const displayBusLabel = selectedPreviewNumber || selectedBusNo || displayBusData?.busNo;
+
 
   // Memoized bus card to prevent flicker (distance only, no ETA)
   const busCardContent = React.useMemo(() => {
@@ -460,49 +538,35 @@ const HomeScreen = () => {
 
       {/* MAP */}
       <View style={styles.mapBackground}>
-        <OSMMap busData={busData} />
+        <OSMMap busData={displayBusData} buses={[]} />
       </View>
+
       <View style={styles.topBar}>
-    {isAdmin ? (
-      <View style={styles.searchContainer}>
-        {/* LEFT ICON */}
-        <Ionicons name="search" size={18} color={COLORS.textBody} />
+    <View style={styles.searchContainer}>
+      {/* LEFT ICON */}
+      <Ionicons name="search" size={18} color={COLORS.textBody} />
 
-        {/* INPUT */}
-        <TextInput
-          placeholder={selectedBusNo ? `${selectedBusNo}` : "Search Bus"}
-          value={searchQuery}
-          onChangeText={setSearchQuery}
-          onSubmitEditing={handleSearch}
-          style={styles.searchInput}
-          placeholderTextColor={COLORS.textBody}
-        />
+      {/* INPUT */}
+      <TextInput
+        placeholder={"Search Bus"}
+        value={searchQuery}
+        onChangeText={setSearchQuery}
+        onSubmitEditing={handleSearch}
+        style={styles.searchInput}
+        placeholderTextColor={COLORS.textBody}
+      />
 
-        {/* CLEAR BUTTON - only for admin */}
-        {searchQuery ? (
-          <TouchableOpacity onPress={() => setSearchQuery('')} style={styles.clearButton}>
-            <Ionicons name="close-circle" size={18} color={COLORS.textBody} />
-          </TouchableOpacity>
-        ) : null}
-      </View>
-    ) : (
-      <View style={styles.searchContainer}>
-        <Ionicons name="bus-outline" size={18} color={COLORS.primary} />
-        <Text style={styles.userBusPlaceholder}>
-          {user?.bus_no ? `Your Bus ${user.bus_no}` : 'No bus assigned'}
-        </Text>
-      </View>
-    )}
+      {/* CLEAR BUTTON */}
+      {searchQuery ? (
+        <TouchableOpacity onPress={() => setSearchQuery('')} style={styles.clearButton}>
+          <Ionicons name="close-circle" size={18} color={COLORS.textBody} />
+        </TouchableOpacity>
+      ) : null}
+    </View>
+
     
     {/* RIGHT ICONS */}
     <View style={styles.rightIcons}>
-  <TouchableOpacity
-    style={[styles.iconButtonPrimary, styles.refreshButton]}
-    onPress={handleRefresh}
-    activeOpacity={0.7}
-  >
-    <Ionicons name="refresh-outline" size={18} color="#fff" />
-  </TouchableOpacity>
   
   {isAdmin && (
     <TouchableOpacity
@@ -525,57 +589,65 @@ const HomeScreen = () => {
   </View>
 
 
-      {/* BOTTOM SHEET */}
-      <Animated.View style={[styles.bottomSheet, { height: sheetHeight }]}>
-        <TouchableOpacity style={styles.toggleButton} onPress={toggleSheet} activeOpacity={0.7}>
-          <Ionicons
-            name={isSheetExpanded ? "chevron-down" : "chevron-up"}
-            size={15}
-            color={COLORS.textBody}
-          />
-        </TouchableOpacity>
+      {/* BOTTOM SHEET (gorhom) */}
+      <BottomSheet
+        index={isAdmin ? 0 : 0}
+        snapPoints={SNAP_POINTS}
+        enablePanDownToClose={false}
+        animateOnMount={false}
+        topInset={150}
+        handleIndicatorStyle={styles.handleIndicator}
+        backgroundStyle={styles.sheetBackground}
+        containerStyle={styles.sheetContainer}
+      >
+        <BottomSheetView style={styles.sheetContent}>
+          
 
-        <View style={styles.sheetHeader}>
-          <View>
-            <Text style={styles.sheetLabel}>Live Bus Tracking</Text>
-            <Text style={styles.sheetSubLabel}>
-              {isAdmin ? 'search for bus to view time location' : 
-               user?.bus_no ? `tracking your bus ${user.bus_no}` : 'no bus assigned'}
-            </Text>
+          <View style={styles.sheetHeader}>
+            <View>
+              <Text style={styles.sheetLabel}>Live Bus Tracking</Text>
+              <Text style={styles.sheetSubLabel}>
+                {isAdmin
+                  ? 'search for bus to view time location'
+                  : user?.bus_no
+                    ? `tracking your bus ${user.bus_no}`
+                    : 'no bus assigned'}
+              </Text>
+            </View>
           </View>
-        </View>
 
-        <View style={styles.content}>
-          {error ? (
-            <Text style={[styles.infoText, styles.errorText]}>{error}</Text>
-          ) : noBusFound && !displayBusData ? (
-            <Text style={[styles.infoText, styles.errorText]}>No bus found for this preview number</Text>
-          ) : !selectedBusNo ? (
-            <Text style={styles.infoText}>
-              {isAdmin ? 'Search any bus to track its live location.' : 
-               user?.bus_no ? `Tracking your bus ${user.bus_no}...` : 'No bus assigned'}
-            </Text>
-          ) : displayBusData ? (
-            <>
-              {busCardContent}
-              {displayBusData?.currentPlan && (
-                <TouchableOpacity style={styles.planSection} onPress={handlePlanPress} activeOpacity={0.8}>
-                  <Text style={styles.planLabel}>Active Plan</Text>
-                  <Text style={styles.planValue}>{displayBusData.currentPlan}</Text>
-                </TouchableOpacity>
-              )}
-            </>
-          ) : locationStatus === 'loading' ? (
-            <Text style={styles.infoText}>Loading live location...</Text>
-          ) : (
-            <Text style={styles.infoText}>No location data available</Text>
-          )}
-        </View>
+          <View style={styles.content}>
+            {error ? (
+              <Text style={[styles.infoText, styles.errorText]}>{error}</Text>
+            ) : noBusFound ? (
+              <Text style={[styles.infoText, styles.errorText]}>Bus not found</Text>
+            ) : isBusSearchAttempted && !displayBusData ? (
+              <Text style={[styles.infoText, styles.errorText]}>Bus not found</Text>
+            ) : !selectedBusNo && !selectedPreviewNumber ? (
+              <Text style={styles.infoText}>
+                {isAdmin
+                  ? 'Search any bus to track its live location.'
+                  : user?.bus_no
+                    ? `Tracking your bus ${user.bus_no}...`
+                    : 'No bus assigned'}
+              </Text>
+            ) : displayBusData ? (
+              <>
+                {busCardContent}
 
-        {/* BUTTONS - BOTTOM ROW INSIDE MODAL */}
-        <View style={styles.modalButtonContainer}>
-        </View>
-      </Animated.View>
+                
+
+              </>
+            ) : locationStatus === 'loading' ? (
+              <Text style={styles.infoText}>Loading live location...</Text>
+            ) : (
+              <Text style={styles.infoText}>No location data available</Text>
+            )}
+          </View>
+
+          <View style={styles.modalButtonContainer} />
+        </BottomSheetView>
+      </BottomSheet>
 
       {/* STOPS MODAL */}
       <Modal visible={showStopsModal} transparent animationType="slide">
@@ -740,23 +812,26 @@ iconButtonPrimary: {
     opacity: 0.8,
   },
 
-  bottomSheet: {
-    position: 'absolute',
-    bottom: 0,
-    width: '100%',
-    backgroundColor: COLORS.white,
+  // gorhom bottom-sheet styles
+  sheetContainer: {
     borderTopLeftRadius: 20,
     borderTopRightRadius: 20,
-    padding: 16,
-    zIndex: 10,
-    ...SHADOWS.soft,
+    overflow: 'hidden',
+  },
+  sheetBackground: {
+    backgroundColor: COLORS.white,
+  },
+  sheetContent: {
+    paddingHorizontal: 16,
+    paddingBottom: 16,
+  },
+  handleIndicator: {
+    backgroundColor: '#00000022',
+    width: 44,
+    height: 5,
+    borderRadius: 10,
   },
 
-  toggleButton: {
-    alignItems: 'center',
-    paddingVertical: 5,
-    marginBottom: 8,
-  },
 
   content: {
     marginTop: 5,

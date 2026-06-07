@@ -46,6 +46,9 @@ export default function ProfileScreen() {
             setIsLoggingOut(true);
             try {
               await logout();
+              // Root navigator swaps screens based on AuthContext token state.
+              // Avoid dispatching a RESET to a nested navigator (causes "RESET was not handled").
+              // Navigation will update automatically once token is cleared.
               navigation.dispatch(
                 CommonActions.reset({
                   index: 0,
