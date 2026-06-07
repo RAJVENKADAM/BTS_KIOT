@@ -18,7 +18,9 @@ import { excelManagementApi } from '../../api/excelManagementApi';
 import ExcelUpload from '../../components/ExcelUpload';
 import MultiExcelUpload from '../../components/MultiExcelUpload';
 import ExcelUploadCard from '../../components/ExcelUploadCard';
+import UserCard from '../../components/UserCard';
 import * as DocumentPicker from 'expo-document-picker';
+
 
 import * as Sharing from 'expo-sharing';
 
@@ -37,18 +39,47 @@ import Card from '../../components/UI/Card';
 export default function AddUsersScreen() {
   const [uploading, setUploading] = useState(false);
   const [excelUploads, setExcelUploads] = useState([]);
+  const [usersByUpload, setUsersByUpload] = useState({}); // { [uploadId]: users[] }
+  const [loadingUsersByUpload, setLoadingUsersByUpload] = useState({});
   const [refreshing, setRefreshing] = useState(false);
   const { token, loading: authLoading } = useAuth();
+
 
   useEffect(() => {
     if (token) loadExcelUploads();
   }, [token]);
 
+  const loadUsersForUpload = async (uploadId) => {
+    if (!uploadId || !token) return;
+
+    try {
+      setLoadingUsersByUpload((p) => ({ ...p, [uploadId]: true }));
+      const response = await excelManagementApi.getUsersByUpload(token, uploadId);
+      if (response.success) {
+        setUsersByUpload((p) => ({ ...p, [uploadId]: response.data || [] }));
+      } else {
+        setUsersByUpload((p) => ({ ...p, [uploadId]: [] }));
+      }
+    } catch (e) {
+      console.error('Failed to load users for upload:', uploadId, e);
+    } finally {
+      setLoadingUsersByUpload((p) => ({ ...p, [uploadId]: false }));
+    }
+  };
+
   const loadExcelUploads = async () => {
     try {
       const response = await excelManagementApi.getAllUploads(token);
       if (response.success) {
-        setExcelUploads(response.data);
+        const uploads = response.data;
+        setExcelUploads(uploads);
+
+        // Load created users for each upload (to show cards)
+        if (Array.isArray(uploads)) {
+          uploads.forEach((u) => {
+            if (u?.id) loadUsersForUpload(u.id);
+          });
+        }
       }
     } catch (error) {
       console.error('Failed to load Excel uploads:', error);
@@ -151,24 +182,67 @@ export default function AddUsersScreen() {
   };
 
   const handleDeleteUpload = async (uploadId) => {
-    Alert.alert("Delete Upload", "This will deactivate users associated with this file. Continue?", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete",
-        style: "destructive",
-        onPress: async () => {
-          setUploading(true);
-          try {
-            const response = await excelManagementApi.deleteUpload(token, uploadId);
-            if (response.success) loadExcelUploads();
-          } catch (error) {
-            Alert.alert('Error', 'Delete failed');
-          } finally {
-            setUploading(false);
-          }
-        }
+    Alert.alert(
+      'Delete Upload',
+      'This will deactivate users associated with this file. Continue?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            setUploading(true);
+            try {
+              const response = await excelManagementApi.deleteUpload(token, uploadId);
+              if (response.success) {
+                await loadExcelUploads();
+              }
+            } catch (error) {
+              Alert.alert('Error', 'Delete failed');
+            } finally {
+              setUploading(false);
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const handleDeleteUser = async (user, uploadId) => {
+    if (!user?.id || !uploadId) return;
+
+    Alert.alert(
+      'Deactivate user',
+      `Deactivate ${user?.name || user?.email || 'this user'}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Deactivate',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await excelManagementApi.deactivateUser(token, user.id);
+              await loadUsersForUpload(uploadId);
+            } catch (e) {
+              Alert.alert('Error', e?.message || 'Failed to deactivate user');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const handleEditUser = async (user, payload, uploadId) => {
+    if (!user?.id || !uploadId) return;
+
+    try {
+      const res = await excelManagementApi.updateUser(token, user.id, payload);
+      if (res?.success) {
+        await loadUsersForUpload(uploadId);
       }
-    ]);
+    } catch (e) {
+      Alert.alert('Error', e?.message || 'Failed to update user');
+    }
   };
 
   if (authLoading) {
@@ -277,6 +351,11 @@ const styles = StyleSheet.create({
   processing: { padding: 40, alignItems: 'center' },
   processingText: { marginTop: 12, color: COLORS.primary, fontWeight: '700' },
   historyHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
+  usersSection: { marginTop: 10, marginBottom: 22 },
+  usersHeaderRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
+  usersHeader: { fontSize: 16, fontWeight: '900', color: COLORS.textHeader },
+  usersLoading: { paddingVertical: 18 },
+  emptyUsersText: { color: COLORS.muted, fontWeight: '600' },
   badge: {
     backgroundColor: COLORS.primary,
     width: 24,

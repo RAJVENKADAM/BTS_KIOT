@@ -136,5 +136,46 @@ export const excelManagementApi = {
       console.error('Get users by upload error:', error);
       throw error;
     }
+  },
+
+  // Update user (superadmin)
+  updateUser: async (token, userId, payload) => {
+    const response = await fetch(`${API_BASE_URL}/api/superadmin/users/${userId}`, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const rawText = await response.text();
+    const data = rawText ? JSON.parse(rawText) : {};
+
+    if (!response.ok) {
+      throw new Error(data?.error || 'Failed to update user');
+    }
+
+    return data;
+  },
+
+  // Deactivate user (superadmin)
+  deactivateUser: async (token, userId) => {
+    const response = await fetch(`${API_BASE_URL}/api/superadmin/users/${userId}`, {
+      method: 'DELETE',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+    });
+
+    const rawText = await response.text();
+    const data = rawText ? JSON.parse(rawText) : {};
+
+    if (!response.ok) {
+      throw new Error(data?.error || 'Failed to deactivate user');
+    }
+
+    return data;
   }
 };

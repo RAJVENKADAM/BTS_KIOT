@@ -80,7 +80,7 @@ const MultiExcelUpload = ({ onUpload, disabled = false }) => {
 
   return (
     <>
-      <View style={styles.container}>
+    
         <TouchableOpacity
           style={[
             styles.button,
@@ -96,14 +96,10 @@ const MultiExcelUpload = ({ onUpload, disabled = false }) => {
             style={styles.buttonIcon}
           />
           <Text style={styles.buttonText}>
-            {loading ? 'Uploading...' : 'Add Excel Sheet'}
+            {loading ? 'Uploading...' : 'Create database'}
           </Text>
         </TouchableOpacity>
-
-        <Text style={styles.hint}>
-          Add multiple Excel sheets with custom names
-        </Text>
-      </View>
+      
 
       <Modal
         visible={showModal}
@@ -114,7 +110,7 @@ const MultiExcelUpload = ({ onUpload, disabled = false }) => {
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Add Excel Sheet</Text>
+              <Text style={styles.modalTitle}>Create database</Text>
               <TouchableOpacity onPress={cancelUpload} style={styles.closeButton}>
                 <Ionicons name="close" size={24} color={COLORS.muted} />
               </TouchableOpacity>
@@ -182,7 +178,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.primary,
     paddingHorizontal: 24,
     paddingVertical: 14,
-    borderRadius: 24,
+    borderRadius: 10,
     minWidth: 220,
     flexDirection: 'row',
     alignItems: 'center',

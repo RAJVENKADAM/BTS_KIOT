@@ -17,11 +17,21 @@ async function getAllExcelUploads(req, res) {
     }
 
     const uploads = await ExcelUpload.find({ uploaded_by: userId })
-      .sort({ createdAt: -1 });
-    
+      .sort({ createdAt: -1 })
+      .select('_id file_name custom_name uploaded_by createdAt updatedAt is_active');
+
+    // Ensure frontend receives a stable `id` field and uses `custom_name` correctly.
+    const normalized = uploads.map((u) => ({
+      ...u.toObject(),
+      id: u._id,
+      file_name: u.file_name,
+      custom_name: u.custom_name,
+      uploaded_at: u.createdAt,
+    }));
+
     res.status(200).json({
       success: true,
-      data: uploads
+      data: normalized
     });
   } catch (error) {
     console.error('Get Excel uploads error:', error);

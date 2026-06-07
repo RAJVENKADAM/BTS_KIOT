@@ -116,6 +116,7 @@ app.use("/api/excel-management", require("./routes/excelManagement.routes"));
 app.use("/api/bus", require("./routes/bus.routes"));
 app.use("/api/bus", require("./routes/busImport.routes"));
 app.use("/api/superadmin", require("./routes/superadminImport.routes"));
+app.use("/api/superadmin", require("./routes/superadminUsers.routes"));
 app.use("/api/track", require("./routes/track.routes"));
 
 
