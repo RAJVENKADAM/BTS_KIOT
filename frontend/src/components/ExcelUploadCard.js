@@ -65,17 +65,6 @@ export default function ExcelUploadCard({
         </View>
       </View>
 
-      <View style={styles.infoRow}>
-        <View style={styles.infoItem}>
-          <Ionicons name="people" size={16} color={COLORS.muted} />
-          <Body style={styles.infoText}>{upload.user_count || 0} users</Body>
-        </View>
-        <View style={styles.infoItem}>
-          <Ionicons name="person-circle" size={16} color={COLORS.muted} />
-          <Body style={styles.infoText}>by {upload.uploaded_by_name}</Body>
-        </View>
-      </View>
-
       <View style={styles.buttonRow}>
         <TouchableOpacity
           style={[styles.actionBtn, styles.editBtn]}
