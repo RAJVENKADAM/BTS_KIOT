@@ -35,13 +35,13 @@ async function startDbDependentServices() {
     console.error('❌ GPS credentials missing. GPS sync will fail (check Render env vars).');
   }
 
-  // Start GPS sync scheduler (polls GPS provider on a single loop)
-  const trackingService = require('./trackingService');
+  // Start GPS sync worker (polls GPS provider in background; HTTP handlers must remain DB-only)
   try {
-    trackingService.start();
-    console.log('✅ GPS sync scheduler started successfully');
+    const gpsSyncWorker = require('../workers/gpsSyncWorker');
+    gpsSyncWorker.start();
+    console.log('✅ gpsSyncWorker started successfully');
   } catch (error) {
-    console.error('Error starting GPS sync scheduler:', error.message);
+    console.error('Error starting gpsSyncWorker:', error.message);
   }
 }
 
