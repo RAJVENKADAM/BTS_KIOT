@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
+const ExcelUpload = require('../models/ExcelUpload');
 
 
 function isNonEmptyString(v) {
@@ -56,6 +57,24 @@ async function importUsers(req, res) {
       failedRows: 0,
       rowResults: [],
     };
+
+    // Create ExcelUpload record so the frontend can show uploaded sheets as cards.
+    const excelCustomName = payload.excelCustomName ?? null;
+    const userId = req.user?.id;
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        error: 'Unauthorized',
+      });
+    }
+
+    const excelUpload = await ExcelUpload.create({
+      file_name: 'users.xlsx',
+      custom_name: excelCustomName,
+      uploaded_by: userId,
+      is_active: true,
+    });
 
     if (!users.length) {
       return res.status(400).json({
@@ -195,6 +214,21 @@ async function importUsers(req, res) {
     }
 
     if (updates.length) {
+      // Link all touched/created users to this ExcelUpload so the cards show up.
+      const bulkExcelOps = updates.map((u) => ({
+        updateOne: {
+          filter: u.filter,
+          update: {
+            $set: { excel_upload_id: excelUpload._id },
+          },
+          upsert: false,
+        },
+      }));
+
+      if (bulkExcelOps.length) {
+        await User.bulkWrite(bulkExcelOps, { ordered: false });
+      }
+
       const ops = updates.map((u) => ({
         updateOne: {
           filter: u.filter,

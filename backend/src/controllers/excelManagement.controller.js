@@ -21,13 +21,16 @@ async function getAllExcelUploads(req, res) {
       .select('_id file_name custom_name uploaded_by createdAt updatedAt is_active');
 
     // Ensure frontend receives a stable `id` field and uses `custom_name` correctly.
-    const normalized = uploads.map((u) => ({
-      ...u.toObject(),
-      id: u._id,
-      file_name: u.file_name,
-      custom_name: u.custom_name,
-      uploaded_at: u.createdAt,
-    }));
+    const normalized = uploads.map((u) => {
+      const obj = u.toObject();
+      // Frontend expects: upload.id and upload.custom_name
+      return {
+        ...obj,
+        id: obj._id,
+        custom_name: obj.custom_name,
+        uploaded_at: obj.createdAt,
+      };
+    });
 
     res.status(200).json({
       success: true,
@@ -165,6 +168,7 @@ async function getUsersByExcelUpload(req, res) {
     // Find Excel upload
     const upload = await ExcelUpload.findById(id);
     if (!upload) {
+
       return res.status(404).json({
         success: false,
         error: 'Excel upload not found'

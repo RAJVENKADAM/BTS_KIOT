@@ -1,13 +1,13 @@
 import { API_BASE_URL } from './api';
 
-export async function importUsersExcelJson({ token, users }) {
+export async function importUsersExcelJson({ token, users, excelCustomName }) {
   const response = await fetch(`${API_BASE_URL}/api/superadmin/import-users`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ users }),
+    body: JSON.stringify({ users, excelCustomName }),
   });
 
   const rawText = await response.text();

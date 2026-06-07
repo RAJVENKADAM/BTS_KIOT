@@ -32,6 +32,7 @@ import XLSX from 'xlsx';
 import { readExcelFile, convertExcelToJson } from '../../utils/excelImport';
 import { importUsersExcelJson } from '../../api/importApi';
 
+
 import { COLORS, SPACING, RADIUS, SHADOWS } from '../../theme';
 import { Header, Body, MutedText, Subtitle } from '../../components/UI/Typography';
 import Card from '../../components/UI/Card';
@@ -115,7 +116,7 @@ export default function AddUsersScreen() {
     }
   };
 
-  const handleFileUpload = async (file) => {
+  const handleFileUpload = async (file, customName) => {
     if (!token || !file?.uri) return;
 
     console.log('DocumentPicker asset:', file);
@@ -141,6 +142,7 @@ export default function AddUsersScreen() {
           mobile_no: r.mobile_no,
           date_of_year: r.date_of_year,
         })),
+        excelCustomName: customName,
       });
 
       if (response?.success) {
