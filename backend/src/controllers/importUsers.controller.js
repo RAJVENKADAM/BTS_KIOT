@@ -1,5 +1,7 @@
 const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
 const User = require('../models/User');
+
 
 function isNonEmptyString(v) {
   return typeof v === 'string' && v.trim().length > 0;
@@ -125,6 +127,9 @@ async function importUsers(req, res) {
       const existing = existingByEmail.get(email);
 
       const computedPassword = `${row.phone.replace(/\D/g, '').substring(0, 4)}${row.dobYear}`;
+      // IMPORTANT: We're using User.bulkWrite (no Mongoose pre('save') middleware runs),
+      // so we must hash password_hash manually.
+      const hashedPassword = await bcrypt.hash(computedPassword, 12);
 
       const next = {
         name: row.name,
@@ -132,8 +137,9 @@ async function importUsers(req, res) {
         role: row.role,
         bus_no: row.bus_no,
         // password_hash required for create; for updates we only set if empty or temp behavior.
-        password_hash: computedPassword,
+        password_hash: hashedPassword,
         is_active: true,
+        temp_password: false,
       };
 
       if (!existing) {
@@ -146,8 +152,6 @@ async function importUsers(req, res) {
         continue;
       }
 
-      // Compare imported fields with existing record.
-      // NOTE: password_hash changes would force updates; we skip updating password_hash when unchanged.
       const keys = ['name', 'role', 'bus_no', 'is_active'];
       const currentProjection = {
         name: existing.name,
@@ -172,7 +176,6 @@ async function importUsers(req, res) {
         continue;
       }
 
-      // If changed: update relevant fields; optionally set password_hash if you want.
       updates.push({
         index: goodRows.indexOf(row),
         type: 'update',
@@ -183,15 +186,15 @@ async function importUsers(req, res) {
             role: next.role,
             bus_no: next.bus_no,
             is_active: true,
-            // Keep password_hash stable unless required; comment out if undesired.
-            password_hash: computedPassword,
+            password_hash: hashedPassword,
+            temp_password: false,
+
           },
         },
       });
     }
 
     if (updates.length) {
-      // Bulk upserts via bulkWrite for performance
       const ops = updates.map((u) => ({
         updateOne: {
           filter: u.filter,

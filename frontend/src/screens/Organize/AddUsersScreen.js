@@ -185,27 +185,6 @@ export default function AddUsersScreen() {
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={COLORS.primary} />}
           showsVerticalScrollIndicator={false}
         >
-          <Header style={styles.sectionLabel}>Download the Excel Template</Header>
-          <Card style={styles.templateCard}>
-            <View style={styles.excelSheetBackground} />
-            <View style={styles.cardHeader}>
-              <View style={styles.iconCircle}>
-                <MaterialCommunityIcons name="file-excel-outline" size={24} color={COLORS.primary} />
-              </View>
-              <View style={{ flex: 1, marginLeft: 16 }}>
-                <Body style={styles.cardTitle}>Excel Template</Body>
-                <MutedText>Use our standard format</MutedText>
-              </View>
-            </View>
-            <TouchableOpacity
-              style={styles.templateBtn}
-              onPress={generateExcelTemplate}
-              activeOpacity={0.8}
-            >
-              <Ionicons name="download-outline" size={20} color={COLORS.primary} />
-              <Body style={styles.templateBtnText}>Download Template</Body>
-            </TouchableOpacity>
-          </Card>
 
           <View style={styles.section}>
             <Header style={styles.sectionLabel}>Upload Users</Header>

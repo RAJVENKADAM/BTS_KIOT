@@ -77,19 +77,37 @@ app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 
 /* ---------------- ROUTES ---------------- */
 
-// DB guard: prevent mongoose buffering timeouts when Mongo is not ready
+// DB guard: wait briefly for MongoDB connection instead of rejecting immediately
+// This handles Render cold-start where the first request arrives before DB connects
 const mongoose = require('mongoose');
-app.use((req, res, next) => {
+
+function waitForDb(maxWaitMs = 10000) {
+  return new Promise((resolve) => {
+    if (mongoose.connection.readyState === 1) return resolve(true);
+
+    const start = Date.now();
+    const check = () => {
+      if (mongoose.connection.readyState === 1) return resolve(true);
+      if (Date.now() - start > maxWaitMs) return resolve(false);
+      setTimeout(check, 250);
+    };
+    setTimeout(check, 250);
+  });
+}
+
+app.use(async (req, res, next) => {
   const isApiRequest = req.path && req.path.startsWith('/api');
-  if (isApiRequest) {
-    const state = mongoose.connection.readyState; // 0=disconnected, 1=connected
-    if (state !== 1) {
-      return res.status(503).json({
-        error: 'Database not ready. Please try again in a few seconds.'
-      });
-    }
-  }
-  next();
+  if (!isApiRequest) return next();
+
+  if (mongoose.connection.readyState === 1) return next();
+
+  // DB not ready yet — wait up to 10s for connection
+  const ready = await waitForDb(10000);
+  if (ready) return next();
+
+  return res.status(503).json({
+    error: 'Database not ready. Please try again in a few seconds.'
+  });
 });
 
 app.use("/api/auth", require("./routes/auth.routes"));

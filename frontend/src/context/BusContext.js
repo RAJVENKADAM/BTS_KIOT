@@ -76,9 +76,12 @@ export const BusProvider = ({ children }) => {
       return;
     }
 
+    // socket.io path must match backend socket.io server config.
+    // Backend uses `path: "/socket.io"` (no trailing slash).
     const newSocket = io(`${API_BASE_URL}/bus-location`, { 
-      path: '/socket.io/',
+      path: '/socket.io',
       transports: ['websocket'],
+
       auth: { token },
       reconnection: true,
       reconnectionDelay: 1000,

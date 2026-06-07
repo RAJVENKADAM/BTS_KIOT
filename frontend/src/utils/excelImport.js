@@ -1,9 +1,8 @@
-import * as FileSystem from 'expo-file-system';
-
 import XLSX from 'xlsx';
 
 const EXCEL_MIME =
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
 
 function guessSheetNames(workbook) {
   if (!workbook?.SheetNames?.length) return [];
@@ -45,6 +44,10 @@ function coerceDateYear(value) {
 async function readExcelFile(fileOrDocPickerAsset, options = {}) {
   const { encoding = 'base64' } = options;
 
+  // Encoding option is kept for backward compatibility, but this implementation
+  // only supports base64 pipeline.
+
+
   if (!fileOrDocPickerAsset) {
     throw new Error('No Excel file provided');
   }
@@ -55,52 +58,37 @@ async function readExcelFile(fileOrDocPickerAsset, options = {}) {
 
   if (!uri) throw new Error('Excel file uri missing');
 
-  // Read locally -> base64
-  // DocumentPicker often returns an Expo cache URI that may be unreadable
-  // depending on platform/device. We attempt a few strategies.
-  const tryReadBase64 = async (readUri) => {
-    return await FileSystem.readAsStringAsync(readUri, {
-      encoding: FileSystem.EncodingType.Base64,
-    });
-  };
-
-  let base64;
-  try {
-    base64 = await tryReadBase64(uri);
-  } catch (e1) {
-    // Fallback: copy the unreadable cache file into a readable app cache file.
-    // This avoids FormData upload and avoids ArrayBuffer/Blob conversions.
-
-    const fsDest = FileSystem.cacheDirectory
-      ? `${FileSystem.cacheDirectory}excel_import_${Date.now()}.xlsx`
-      : `${FileSystem.documentDirectory}excel_import_${Date.now()}.xlsx`;
-
-    // readAsStringAsync on the source failed. But we can still copy by fetch -> writeAsString.
-    // We must use base64, and expo-file-system can write base64 strings.
-    const resp = await fetch(uri);
-    if (!resp.ok) throw e1;
-
-    // IMPORTANT: Your runtime rejects Blob creation from ArrayBuffer/ArrayBufferView.
-    // So we cannot use resp.blob() based conversion.
-    // Therefore, we cannot reliably convert this URI to base64 in pure JS here.
-    // Re-throw to keep the error clear.
-    throw e1;
-
-
-    // write temp file (optional, but keeps the pipeline consistent)
-    try {
-      await FileSystem.writeAsStringAsync(fsDest, base64, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
-    } catch (_) {}
+  // Production-safe strategy:
+  // - Use fetch(uri) to read file contents as base64 (no expo-file-system).
+  // - XLSX can parse base64 directly.
+  //
+  // Note: On Android, DocumentPicker URIs are usually accessible via fetch.
+  // If a device returns an unreadable scheme, this will throw clearly.
+  if (encoding !== 'base64') {
+    throw new Error('Only base64 encoding is supported by readExcelFile');
   }
 
+  const resp = await fetch(uri);
+  if (!resp.ok) {
+    throw new Error(`Failed to read excel file from uri: ${uri} (status ${resp.status})`);
+  }
 
+  // Convert response to base64.
+  // React Native lacks Buffer; implement minimal base64 conversion.
+  const arrayBuffer = await resp.arrayBuffer();
+  const bytes = new Uint8Array(arrayBuffer);
 
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
 
+  // btoa expects binary string.
+  // Some RN runtimes may not provide btoa; attempt to polyfill via global.
+  const b64 = global.btoa ? global.btoa(binary) : btoa(binary);
 
-  // XLSX can parse base64 directly
-  const workbook = XLSX.read(base64, {
+  const workbook = XLSX.read(b64, {
     type: 'base64',
   });
 
@@ -111,6 +99,7 @@ async function readExcelFile(fileOrDocPickerAsset, options = {}) {
     sourceUri: uri,
   };
 }
+
 
 function convertSheetToJson(worksheet, options = {}) {
   const {

@@ -7,16 +7,6 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
 
-    "assetBundlePatterns": [
-      "**/*"
-    ],
-
-    "splash": {
-      "image": "./assets/icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
-    },
-
     "ios": {
       "supportsTablet": true
     },
@@ -43,6 +33,15 @@
       "expo-location",
       "expo-font",
       "expo-sharing",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#ffffff"
+        }
+      ],
       [
         "expo-build-properties",
         {

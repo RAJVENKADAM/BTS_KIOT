@@ -9,7 +9,6 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { CommonActions } from '@react-navigation/native';
 import { useAuth } from '../context/AuthContext';
 import { COLORS, SPACING } from '../theme';
 import Input from '../components/UI/Input';
@@ -44,12 +43,7 @@ export default function LoginScreen({ navigation }) {
           setLoading(false);
           return;
         }
-        navigation.dispatch(
-          CommonActions.reset({
-            index: 0,
-            routes: [{ name: 'Home' }],
-          })
-        );
+        // Token saved in AuthContext → AppNavigator auto-switches to Home
       } else {
         setError(result.error || 'Invalid email or password');
       }
