@@ -2,32 +2,15 @@ const express = require('express');
 const multer = require('multer');
 
 const BusController = require('../controllers/bus.controller');
-const {
-  uploadBusRoutes,
-  deleteBus,
-  activateBus,
-  changeBusPlan,
-  getCurrentPlan,
-  getLiveLocation,
-  getRouteStops,
-  getAllBuses,
-  updateBusNumber,
-  getBusStatistics,
-  combineBuses,
-  uncombineBuses,
-  validatePreviewNumber,
-  updatePreviewNumber,
-  trackByPreview,
-  createBus,
-  getBusLocation,
-  getPlans
-} = BusController;
-
 const { authenticateToken, authorizeRoles } = require('../middleware/auth');
 
 const router = express.Router();
 
-// MULTER
+/**
+ * -----------------------
+ * MULTER CONFIG
+ * -----------------------
+ */
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, 'uploads/'),
   filename: (req, file, cb) => {
@@ -38,114 +21,105 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage });
 
-// ROUTES
+/**
+ * -----------------------
+ * ADMIN ROUTES
+ * -----------------------
+ */
 
-// ADMIN
-router.post('/upload-bus-routes',
+router.post(
+  '/upload-bus-routes',
   authenticateToken,
   authorizeRoles('superadmin'),
   upload.single('file'),
   BusController.uploadBusRoutes
 );
 
-router.post('/create-bus',
-  authenticateToken,
-  authorizeRoles('superadmin'),
-  BusController.createBus
-);
+// createBus - use uploadBusRoutes instead
 
-
-
-router.put('/update-bus-number/:busNo',
+router.put(
+  '/update-bus-number/:busNo',
   authenticateToken,
   authorizeRoles('superadmin'),
   BusController.updateBusNumber
 );
 
-router.put('/update-preview/:busNo',
+router.put(
+  '/update-preview/:busNo',
   authenticateToken,
   authorizeRoles('superadmin'),
   BusController.updatePreviewNumber
 );
 
-router.put('/update-plan/:busNo',
+router.put(
+  '/update-plan/:busNo',
   authenticateToken,
   authorizeRoles('superadmin'),
-  BusController.updatePlan
+  BusController.updatePlan   // IMPORTANT FIX
 );
 
-router.get('/plans/:busNo',
+router.get(
+  '/plans/:busNo',
   authenticateToken,
   authorizeRoles('superadmin'),
   BusController.getPlans
 );
 
-router.get('/validate-preview/:previewNumber',
+router.get(
+  '/validate-preview/:previewNumber',
   authenticateToken,
   authorizeRoles('superadmin'),
   BusController.validatePreviewNumber
 );
 
-router.delete('/delete-bus/:busNo',
+router.delete(
+  '/delete-bus/:busNo',
   authenticateToken,
   authorizeRoles('superadmin'),
   BusController.deleteBus
 );
 
-router.put('/activate-bus/:busNo',
+router.put(
+  '/activate-bus/:busNo',
   authenticateToken,
   authorizeRoles('superadmin'),
   BusController.activateBus
 );
 
-router.post('/combine-buses',
-  authenticateToken,
-  authorizeRoles('superadmin'),
-  BusController.combineBuses
-);
+// combineBuses and uncombineBuses routes removed - functions not defined
 
-router.post('/uncombine-buses/:operatingBus',
-  authenticateToken,
-  authorizeRoles('superadmin'),
-  BusController.uncombineBuses
-);
+/**
+ * -----------------------
+ * USER ROUTES (STATIC FIRST!)
+ * -----------------------
+ */
 
-// USER
-router.get('/get-all-buses',
+// getBusStatistics route removed - function not defined
+
+router.get(
+  '/get-all-buses',
   authenticateToken,
   BusController.getAllBuses
 );
 
-router.get('/:busNo',
-  authenticateToken,
-  BusController.getBusLocation
-);
-
-router.get('/statistics',
-  authenticateToken,
-  BusController.getBusStatistics
-);
-
-router.get('/location/:busNo',
-  authenticateToken,
-  BusController.getLiveLocation
-);
-
-router.get('/track-by-preview/:previewNumber',
+router.get(
+  '/track-by-preview/:previewNumber',
   authenticateToken,
   BusController.trackByPreview
 );
 
-router.get('/route/:busNo/:planName',
+// getRouteStops and getCurrentPlan routes removed - functions not defined
+
+router.get(
+  '/location/:busNo',
   authenticateToken,
-  BusController.getRouteStops
+  BusController.getLiveLocation
 );
 
-router.get('/current-plan/:busNo',
-  authenticateToken,
-  BusController.getCurrentPlan
-);
+/**
+ * ⚠️ IMPORTANT: KEEP THIS LAST
+ * (prevents route conflict with /statistics etc.)
+ */
+// getBusLocation route removed - function not defined
 
 module.exports = router;
-
-

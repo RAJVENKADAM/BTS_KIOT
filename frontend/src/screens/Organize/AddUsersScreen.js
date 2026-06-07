@@ -13,15 +13,23 @@ import {
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../../context/AuthContext';
-import { API_BASE_URL } from '../../api/api';
+
 import { excelManagementApi } from '../../api/excelManagementApi';
 import ExcelUpload from '../../components/ExcelUpload';
 import MultiExcelUpload from '../../components/MultiExcelUpload';
 import ExcelUploadCard from '../../components/ExcelUploadCard';
 import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system';
+
 import * as Sharing from 'expo-sharing';
+
+import * as FileSystem from 'expo-file-system';
+
 import XLSX from 'xlsx';
+
+
+import { readExcelFile, convertExcelToJson } from '../../utils/excelImport';
+import { importUsersExcelJson } from '../../api/importApi';
+
 import { COLORS, SPACING, RADIUS, SHADOWS } from '../../theme';
 import { Header, Body, MutedText, Subtitle } from '../../components/UI/Typography';
 import Card from '../../components/UI/Card';
@@ -76,40 +84,50 @@ export default function AddUsersScreen() {
     }
   };
 
-  const handleFileUpload = async (file, customName = null) => {
+  const handleFileUpload = async (file) => {
     if (!token || !file?.uri) return;
+
+    console.log('DocumentPicker asset:', file);
+
     setUploading(true);
+
     try {
-      const formData = new FormData();
-      formData.append('file', {
-        uri: Platform.OS === 'android' ? file.uri : file.uri.replace('file://', ''),
-        name: file.name || 'users.xlsx',
-        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      const readResult = await readExcelFile(file);
+      // Column order doesn't matter; xlsx maps by header row.
+      // Your sheet headers are: name, email, busno, role, mobile_no, date_of_year
+      const rows = convertExcelToJson(readResult, {
+        normalizeHeaders: true,
+        skipEmptyRows: true,
       });
 
-      if (customName) {
-        formData.append('customName', customName);
-      }
-
-      const response = await fetch(`${API_BASE_URL}/api/organize/upload-excel-users`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData,
+      const response = await importUsersExcelJson({
+        token,
+        users: rows.map((r) => ({
+          name: r.name,
+          email: r.email,
+          busno: r.busno ?? r.bus_no,
+          role: r.role,
+          mobile_no: r.mobile_no,
+          date_of_year: r.date_of_year,
+        })),
       });
 
-      const result = await response.json();
-      if (response.ok) {
-        Alert.alert('Success', `Imported: ${result?.results?.created || 0} users`);
-        loadExcelUploads();
-      } else {
-        throw new Error(result.error || 'Upload failed');
+      if (response?.success) {
+        Alert.alert(
+          'Import complete',
+          `totalRows: ${response.summary.totalRows}\ninserted: ${response.summary.insertedRows}\nupdated: ${response.summary.updatedRows}\nunchanged: ${response.summary.unchangedRows}\nfailed: ${response.summary.failedRows}`
+        );
       }
-    } catch (error) {
-      Alert.alert('Upload Error', error.message);
+
+      // Keep existing UI behavior; legacy Excel management list will stay as-is.
+      loadExcelUploads();
+    } catch (e) {
+      Alert.alert('Import failed', e?.message || 'Unknown error');
     } finally {
       setUploading(false);
     }
   };
+
 
   const handleEditUpload = async (uploadId) => {
     try {
@@ -270,11 +288,10 @@ const styles = StyleSheet.create({
   uploadBox: {
     backgroundColor: COLORS.white,
     borderRadius: RADIUS.card,
-    borderWidth: 1.5,
-    overflow: 'hidden',
     borderWidth: 1,
     borderColor: COLORS.border,
     borderStyle: 'solid',
+    overflow: 'hidden',
     ...SHADOWS.soft,
   },
   disabledBox: { opacity: 0.7 },

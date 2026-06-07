@@ -47,7 +47,7 @@ export default function LoginScreen({ navigation }) {
         navigation.dispatch(
           CommonActions.reset({
             index: 0,
-            routes: [{ name: 'MainApp' }],
+            routes: [{ name: 'Home' }],
           })
         );
       } else {

@@ -106,14 +106,17 @@ async function getAllBuses(req, res) {
     const buses = await Bus.find({ status: 'active' })
       .sort({ preview_number: 1, bus_no: 1 });
 
-    const enrichedBuses = [];
+    // Batch fetch all live locations at once (fixes N+1 query)
+    const busIds = buses.map(b => b._id);
+    const liveLocations = await BusLiveLocation.find({ bus_id: { $in: busIds } });
+    const locationMap = new Map(liveLocations.map(loc => [loc.bus_id.toString(), loc]));
 
-    for (const bus of buses) {
-      const liveLocation = await BusLiveLocation.findOne({ bus_id: bus._id });
-      const gpsLocation = await gpsService.getCachedLocation(bus.bus_no);
+    const enrichedBuses = buses.map(bus => {
+      const liveLocation = locationMap.get(bus._id.toString());
+      const gpsLocation = gpsService.getCachedLocation(bus.bus_no);
       const location = liveLocation || gpsLocation;
 
-      enrichedBuses.push({
+      return {
         busNo: bus.bus_no,
         previewNumber: bus.preview_number,
         status: bus.status,
@@ -124,8 +127,8 @@ async function getAllBuses(req, res) {
         longitude: location?.longitude || null,
         speed: location?.speed || 0,
         isOnline: location ? true : false
-      });
-    }
+      };
+    });
 
     res.status(200).json({
       buses: enrichedBuses,

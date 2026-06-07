@@ -12,11 +12,8 @@ async function testMongoConnection() {
     if (state === 1) return true;
 
     if (state === 0 || state === 3) {
-      // Not connected, try to connect
-      await mongoose.connect(MONGODB_URI, {
-        useNewUrlParser: true,
-        useUnifiedTopology: true,
-      });
+      // Not connected, try to connect (Mongoose v9+ no longer supports legacy options)
+      await mongoose.connect(MONGODB_URI);
       return true;
     }
     return false;

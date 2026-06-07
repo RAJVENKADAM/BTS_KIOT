@@ -57,8 +57,8 @@ class BusTrackerService {
     try {
       const response = await axios.get('https://app.gpstrack.in/api/get_current_data', {
         params: {
-          token: '1v7XQwPwhKqcNEZc8m4rarQKqNFubSMJ',
-          email: 'kiotcollege@gmail.com',
+          token: process.env.GPS_TOKEN,
+          email: process.env.GPS_EMAIL,
           device_id: deviceId,
           reg_no: regNo
         },

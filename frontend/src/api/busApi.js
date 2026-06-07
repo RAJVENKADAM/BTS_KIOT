@@ -16,7 +16,7 @@ export const busApi = {
    * Get live location for bus by busNo - new scalable endpoint
    */
   getBusLocation: async (token, busNo) => {
-    const response = await fetch(`${API_BASE_URL}/api/bus/${busNo}`, {
+    const response = await fetch(`${API_BASE_URL}/api/bus/location/${busNo}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     const data = await response.json();
@@ -48,33 +48,6 @@ export const busApi = {
     });
     return response.json();
   },
-
-  sendToBus: async (token, busNo, message, title = 'Bus Update') => {
-    const response = await fetch(`${API_BASE_URL}/api/messages/send-to-bus/${busNo}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ message, title }),
-    });
-    return response.json();
-  },
-
-  getCurrentPlan: async (token, busNo) => {
-    const response = await fetch(`${API_BASE_URL}/api/bus/current-plan/${busNo}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    return response.json();
-  },
-
-  getRouteStops: async (token, busNo, planName) => {
-    const response = await fetch(`${API_BASE_URL}/api/bus/route/${busNo}/${planName}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    return response.json();
-  },
-
 
 };
 

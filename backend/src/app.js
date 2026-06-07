@@ -76,11 +76,30 @@ app.use(
 app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 
 /* ---------------- ROUTES ---------------- */
+
+// DB guard: prevent mongoose buffering timeouts when Mongo is not ready
+const mongoose = require('mongoose');
+app.use((req, res, next) => {
+  const isApiRequest = req.path && req.path.startsWith('/api');
+  if (isApiRequest) {
+    const state = mongoose.connection.readyState; // 0=disconnected, 1=connected
+    if (state !== 1) {
+      return res.status(503).json({
+        error: 'Database not ready. Please try again in a few seconds.'
+      });
+    }
+  }
+  next();
+});
+
 app.use("/api/auth", require("./routes/auth.routes"));
 app.use("/api/organize", require("./routes/organize.routes"));
 app.use("/api/excel-management", require("./routes/excelManagement.routes"));
 app.use("/api/bus", require("./routes/bus.routes"));
+app.use("/api/bus", require("./routes/busImport.routes"));
+app.use("/api/superadmin", require("./routes/superadminImport.routes"));
 app.use("/api/track", require("./routes/track.routes"));
+
 
 app.get("/health", (req, res) => {
   res.status(200).json({
@@ -89,13 +108,40 @@ app.get("/health", (req, res) => {
   });
 });
 
+/* ---------------- GPS WEBHOOK (must be before 404 catch-all) ---------------- */
+app.post("/gps/update-location", async (req, res) => {
+  const { device_id, latitude, longitude, speed, heading, timestamp, token: gpsToken } = req.body;
+
+  // Validate GPS token for security
+  if (gpsToken !== process.env.GPS_TOKEN) {
+    return res.status(401).json({ error: "Unauthorized GPS device" });
+  }
+
+  if (!device_id || latitude === undefined || longitude === undefined) {
+    return res.status(400).json({ error: "Missing required fields" });
+  }
+
+  try {
+    await trackingService.updateGpsLocation(device_id, {
+      latitude,
+      longitude,
+      speed,
+      heading,
+      timestamp,
+    });
+    res.status(200).json({ message: "GPS location updated" });
+  } catch (error) {
+    console.error("GPS Webhook error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 app.use("*", (req, res) => {
   res.status(404).json({ error: "Route not found" });
 });
 
 /* ---------------- SOCKET EVENTS & NAMESPACES ---------------- */
 const trackingService = require("./services/trackingService");
-const { getBusIdByBusNo } = require('./services/busIdHelper');
 
 const busLocationNamespace = io.of("/bus-location");
 
@@ -103,10 +149,9 @@ busLocationNamespace.on("connection", (socket) => {
   console.log("Tracking client connected:", socket.id);
 
   socket.on("join-bus", async (busNo) => {
-    const busId = await getBusIdByBusNo(busNo);
-    if (!busId) return;
-    socket.join(`bus_${busId}`);
-    console.log(`Socket ${socket.id} joined bus room: bus_${busId}`);
+    if (!busNo) return;
+    socket.join(`bus_${busNo}`);
+    console.log(`Socket ${socket.id} joined bus room: bus_${busNo}`);
   });
 
   // Mobile tracking update from Primary Admin
@@ -134,42 +179,9 @@ busLocationNamespace.on("connection", (socket) => {
   });
 });
 
-/* ---------------- GPS WEBHOOK ---------------- */
-app.post("/gps/update-location", async (req, res) => {
-  const { device_id, latitude, longitude, speed, heading, timestamp } = req.body;
-
-  if (!device_id || latitude === undefined || longitude === undefined) {
-    return res.status(400).json({ error: "Missing required fields" });
-  }
-
-  try {
-    await trackingService.updateGpsLocation(device_id, {
-      latitude,
-      longitude,
-      speed,
-      heading,
-      timestamp,
-    });
-    res.status(200).json({ message: "GPS location updated" });
-  } catch (error) {
-    console.error("GPS Webhook error:", error);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
 /* ---------------- LEGACY SOCKET EVENTS ---------------- */
-io.on("connection", (socket) => {
-  console.log("User connected:", socket.id);
-
-  socket.on("join-room", (room) => {
-    socket.join(room);
-    console.log(`Socket ${socket.id} joined room: ${room}`);
-  });
-
-  socket.on("disconnect", () => {
-    console.log("User disconnected:", socket.id);
-  });
-});
+// NOTE: trackSocket.js initTrackingHandlers already registers io.on('connection')
+// Avoid duplicate registration to prevent double-logging and event conflicts
 
 app.use((err, req, res, next) => {
   const statusCode = err.statusCode || err.status || 500;

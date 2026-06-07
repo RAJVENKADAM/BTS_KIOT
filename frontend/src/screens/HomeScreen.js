@@ -138,7 +138,7 @@ const HomeScreen = () => {
   useEffect(() => {
     if (!socket || !selectedBusNo) return;
 
-    console.log('HomeScreen joining bus room:', `bus-${selectedBusNo}`);
+    console.log('HomeScreen joining bus room:', `bus_${selectedBusNo}`);
     socket.emit('join-bus', selectedBusNo);
 
     return () => {
@@ -251,17 +251,7 @@ const HomeScreen = () => {
       Alert.alert('Error', 'No plan data available');
       return;
     }
-    setLoadingStops(true);
-    try {
-      const data = await busApi.getRouteStops(token, displayBusData.busNo, displayBusData.currentPlan);
-      setRouteStops(data.stops || []);
-      setShowStopsModal(true);
-    } catch (error) {
-      console.error('Stops load error:', error);
-      Alert.alert('Error', 'Failed to load route stops');
-    } finally {
-      setLoadingStops(false);
-    }
+    Alert.alert('Route Stops', 'Route stops viewing is not yet available. This feature requires a backend endpoint to be configured.');
   };
 
   // Refresh current bus location (immediate fetch + continue polling)

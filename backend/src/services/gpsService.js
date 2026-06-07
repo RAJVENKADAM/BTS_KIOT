@@ -3,8 +3,8 @@ const axios = require('axios');
 class GPSService {
   constructor() {
     this.apiUrl = 'https://app.gpstrack.in/api/get_current_data';
-    this.token = '1v7XQwPwhKqcNEZc8m4rarQKqNFubSMJ';
-    this.email = 'kiotcollege@gmail.com';
+    this.token = process.env.GPS_TOKEN;
+    this.email = process.env.GPS_EMAIL;
     this.cachedLocations = new Map();
     this.cacheTTL = 30000; // 30 seconds
   }

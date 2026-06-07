@@ -15,6 +15,7 @@ export const COLORS = {
 
 export const SPACING = {
   screenPadding: 24,
+  lg: 24,
   m: 16,
   s: 8,
   xs: 4,
@@ -41,6 +42,13 @@ export const SHADOWS = {
     shadowOpacity: 0.05,
     shadowRadius: 12,
     elevation: 2,
+  },
+  heavy: {
+    shadowColor: COLORS.shadow,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.15,
+    shadowRadius: 24,
+    elevation: 8,
   },
 };
 

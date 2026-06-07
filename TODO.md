@@ -1,17 +1,20 @@
-# TODO - Map Black Screen Fix (Expo React Native)
+# Task TODO - Excel Import Redesign
 
-## Plan
-1. Fix map integration in `frontend/src/screens/HomeScreen.js` so the map is a true background layer and always has a non-zero rendered height.
-2. Replace/repair the map component to use stable OpenStreetMap rendering via `react-native-webview` + Leaflet.
-3. Ensure WebView/Leaflet container uses `flex:1` + `position:absolute` to occupy full screen and updates marker dynamically on prop changes.
-4. Fix Android rendering issues by disabling nested scrolling, forcing `pointerEvents`/`zIndex`, and forcing Leaflet `invalidateSize` on RN->WebView layout changes.
-5. Confirm bus marker updates correctly when latitude/longitude changes.
+## Plan step list
+1. Create React Native Excel import utility (`frontend/src/utils/excelImport.js`) to read xlsx locally (no FormData, no uploadAsync, no Blob).
+2. Add new backend bulk import endpoints:
+   - `POST /api/superadmin/import-users`
+   - `POST /api/bus/import-routes`
+3. Implement backend import logic with:
+   - validation
+   - upsert-based create/update (intelligent)
+   - bulk insert/update using `insertMany()` and/or `bulkWrite()`
+   - import summary: totalRows, insertedRows, updatedRows, unchangedRows, failedRows
+4. Add/adjust Mongoose models/indexes as needed for uniqueness (users: email; buses: bus_no; routes: bus_no+plan_name+stop_order).
+5. Refactor `AddUsersScreen.js` to use local Excel reading -> JSON -> `/import-users`.
+6. Refactor `AddBusesScreen.js` to use local Excel reading -> JSON -> `/import-routes` (no FormData).
+7. Verify front-end payload mapping to backend unique keys and handle import summary UI.
 
-## Steps tracking
-- [ ] Step 0: Gather evidence (already partially done)
-- [ ] Step 1: Implement new stable `OSMMap` component (Leaflet in WebView)
-- [ ] Step 2: Integrate `OSMMap` into `HomeScreen` (map as background, overlay UI above)
-- [ ] Step 3: Add layout fixes for zIndex/flex/absolute positioning
-- [ ] Step 4: Verify dynamic marker updates logic (postMessage bridge)
-- [ ] Step 5: Run app build/test command(s) to verify map renders
+7. Remove/ignore old FormData-based upload paths in those screens.
+8. Run backend/frontend lint/build checks and do a quick runtime sanity test.
 

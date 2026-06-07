@@ -13,6 +13,10 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 
+import { readExcelFile, convertExcelToJson, convertColumnsToPlans } from '../../utils/excelImport';
+import { importBusRoutesExcelJson } from '../../api/importApi';
+
+
 import { useAuth } from '../../context/AuthContext';
 import { API_BASE_URL } from '../../api/api';
 import { COLORS, SHADOWS } from '../../theme';
@@ -30,6 +34,9 @@ export default function AddBusesScreen() {
   const [selectedBus, setSelectedBus] = useState(null);
   const [plans, setPlans] = useState(['PLAN A', 'PLAN B', 'PLAN C']); // Default plans
   const [selectedPlan, setSelectedPlan] = useState('PLAN A');
+
+  const [importingRoutes, setImportingRoutes] = useState(false);
+
 
   const [busNo, setBusNo] = useState('');
   const [previewNumber, setPreviewNumber] = useState('');
@@ -102,6 +109,7 @@ export default function AddBusesScreen() {
         type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       });
 
+      if (res.canceled) return;
       if (res.assets && res.assets.length > 0) {
         setFile(res.assets[0]);
       }
@@ -110,58 +118,63 @@ export default function AddBusesScreen() {
     }
   };
 
+
   // ================= ADD BUS =================
   const handleAddBus = async () => {
     if (!busNo.trim() || !deviceId.trim()) {
       return Alert.alert('Bus No and Device ID required');
     }
 
+    if (!file?.uri) {
+      return Alert.alert('Excel file required');
+    }
+
     try {
-      const formData = new FormData();
-      formData.append('busNo', busNo.trim().toUpperCase());
-      formData.append('previewNumber', previewNumber.trim());
-      formData.append('deviceId', deviceId.trim());
+      setImportingRoutes(true);
 
-      console.log('FormData sending:', {
+      const readResult = await readExcelFile(file);
+
+      // Column-based plan format:
+      // Single sheet where each COLUMN HEADER is a plan name (Plan A, Plan B, etc.)
+      // and each row below contains stop names for that plan.
+      // Row position determines stop_order (1, 2, 3...).
+      const rows = convertExcelToJson(readResult, {
+        normalizeHeaders: false, // preserve original plan name casing
+        skipEmptyRows: true,
+      });
+
+      const routesByPlan = convertColumnsToPlans(rows);
+
+      const payload = {
         busNo: busNo.trim().toUpperCase(),
-        previewNumber: previewNumber.trim(),
-        deviceId: deviceId.trim()
-      });
+        previewNumber: previewNumber.trim() || null,
+        deviceId: deviceId.trim(),
+        regNo: null,
+        routesByPlan,
+      };
 
-      if (file) {
-        formData.append('file', {
-          uri: file.uri,
-          name: file.name || 'routes.xlsx',
-          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        });
-      }
+      const data = await importBusRoutesExcelJson({ token, busPayload: payload });
 
+      if (data?.success) {
+        Alert.alert(
+          'Import complete',
+          `totalRows: ${data.summary.totalRows}\ninserted: ${data.summary.insertedRows}\nupdated: ${data.summary.updatedRows}\nunchanged: ${data.summary.unchangedRows}\nfailed: ${data.summary.failedRows}`
+        );
 
-      const res = await fetch(`${API_BASE_URL}/api/bus/upload-bus-routes`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-        body: formData,
-      });
-
-
-      const data = await res.json();
-
-      if (res.ok) {
         setShowAddModal(false);
         setBusNo('');
         setPreviewNumber('');
         setDeviceId('');
         setFile(null);
         loadBuses();
-      } else {
-        Alert.alert('Error', data?.error || 'Failed');
       }
     } catch (e) {
-      Alert.alert('Network Error');
+      Alert.alert('Import failed', e?.message || 'Unknown error');
+    } finally {
+      setImportingRoutes(false);
     }
   };
+
 
 
 

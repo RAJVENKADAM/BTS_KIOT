@@ -4,7 +4,18 @@ const User = require('../models/User');
 // Get all Excel uploads for current user
 async function getAllExcelUploads(req, res) {
   try {
-    const userId = req.user.id;
+    const userId = req.user?.id;
+
+    // Defensive: uploaded_by is stored as ObjectId.
+    // If req.user.id is numeric (e.g. 2) from an invalid JWT payload, cast will fail.
+    // Avoid throwing and return empty list instead.
+    if (!userId || typeof userId !== 'string' || userId.length < 10) {
+      return res.status(200).json({
+        success: true,
+        data: []
+      });
+    }
+
     const uploads = await ExcelUpload.find({ uploaded_by: userId })
       .sort({ createdAt: -1 });
     
@@ -51,7 +62,7 @@ async function getExcelUpload(req, res) {
 async function reuploadExcel(req, res) {
   try {
     const { id } = req.params;
-    const userId = req.user.id;
+    const userId = req.user?.id;
     
     if (!req.file || !req.file.buffer) {
       return res.status(400).json({

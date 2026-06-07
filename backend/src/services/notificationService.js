@@ -17,7 +17,7 @@ class NotificationService {
       const io = getIO();
       if (io) {
         for (const busNo of busNumbers) {
-          const room = `bus-${busNo}`;
+          const room = `bus_${busNo}`;
           io.to(room).emit('bus-update', {
             actionType,
             busNo,

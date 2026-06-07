@@ -1,5 +1,7 @@
-export const API_BASE_URL = "https://bts-bus-tracking-system-2.onrender.com";
+const DEV_URL = "http://10.248.73.77:5000"; 
+const PROD_URL = "https://bts-bus-tracking-system-2.onrender.com";
 
+export const API_BASE_URL = __DEV__ ? DEV_URL : PROD_URL;
 export const healthCheck = async () => {
   console.log("Attempting health check to:", `${API_BASE_URL}/health`);
   try {

@@ -1,6 +1,25 @@
 const mongoose = require('mongoose');
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://rajvenkadam_db_user:...';
+/**
+ * Build MongoDB URI with database name.
+ * If MONGODB_URI doesn't include a database name (e.g. ends with /?options),
+ * inject DB_NAME (default: bts_db) before the query string.
+ */
+function buildMongoURI() {
+  const uri = process.env.MONGODB_URI || 'mongodb+srv://rajvenkadam_db_user:...';
+  const dbName = process.env.DB_NAME || 'bts_db';
+
+  // Check if URI already has a database name (path between host and ?)
+  // Pattern: hosts/DBNAME? or hosts/DBNAME (no query)
+  const hasDbName = /\/[^/?]+(\?|$)/.test(uri.replace(/^.*@/, ''));
+
+  if (hasDbName) return uri;
+
+  // Inject database name before query parameters
+  return uri.replace('/?', `/${dbName}?`);
+}
+
+const MONGODB_URI = buildMongoURI();
 let isConnected = false;
 
 const connectDB = async () => {
@@ -10,10 +29,7 @@ const connectDB = async () => {
   }
 
   try {
-    await mongoose.connect(MONGODB_URI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
+    await mongoose.connect(MONGODB_URI);
     isConnected = true;
     console.log('✅ MongoDB connected successfully');
   } catch (error) {
