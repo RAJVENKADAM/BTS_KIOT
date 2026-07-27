@@ -81,9 +81,9 @@ export const BusProvider = ({ children }) => {
       return;
     }
 
-    // socket.io path must match backend socket.io server config.
+    // Connect to the root namespace — backend socket.io serves only "/".
     // Backend uses `path: "/socket.io"` (no trailing slash).
-    const newSocket = io(`${API_BASE_URL}/bus-location`, { 
+    const newSocket = io(`${API_BASE_URL}`, { 
       path: '/socket.io',
       transports: ['websocket'],
 

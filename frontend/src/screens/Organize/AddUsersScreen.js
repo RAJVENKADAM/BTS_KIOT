@@ -18,6 +18,7 @@ import { excelManagementApi } from '../../api/excelManagementApi';
 import MultiExcelUpload from '../../components/MultiExcelUpload';
 import ExcelUploadCard from '../../components/ExcelUploadCard';
 import UserCard from '../../components/UserCard';
+import Card from '../../components/UI/Card';
 import * as DocumentPicker from 'expo-document-picker';
 
 import { readExcelFile, convertExcelToJson } from '../../utils/excelImport';
@@ -248,12 +249,13 @@ export default function AddUsersScreen() {
                 <Header style={styles.sectionLabel}>Manage Users</Header></View>
 
               {excelUploads.map((upload) => (
-                <ExcelUploadCard
-                  key={upload.id}
-                  upload={upload}
-                  onEdit={handleEditUpload}
-                  onDelete={handleDeleteUpload}
-                />
+                <View key={upload.id}>
+                  <ExcelUploadCard
+                    upload={upload}
+                    onEdit={handleEditUpload}
+                    onDelete={handleDeleteUpload}
+                  />
+                </View>
               ))}
             </View>
           )}
@@ -282,5 +284,23 @@ const styles = StyleSheet.create({
   processing: { padding: 40, alignItems: 'center' },
   processingText: { marginTop: 12, color: COLORS.primary, fontWeight: '700' },
   historyHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
+  usersSection: {
+    paddingLeft: 16,
+    marginBottom: 16,
+  },
+  usersCount: {
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 8,
+    marginTop: 4,
+  },
+  noUsers: {
+    textAlign: 'center',
+    fontSize: 13,
+    marginVertical: 8,
+    paddingLeft: 16,
+  },
 });
 

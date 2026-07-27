@@ -73,13 +73,8 @@ export const AuthProvider = ({ children }) => {
   // LOAD FROM STORAGE — validates token with backend before restoring session
   const loadAuthData = async () => {
     try {
-      console.log('Loading auth data...');
-
       const storedToken = await AsyncStorage.getItem('token');
       const storedUser = await AsyncStorage.getItem('user');
-
-      console.log('Stored Token:', storedToken ? 'EXISTS' : 'NULL');
-      console.log('Stored User:', storedUser ? 'EXISTS' : 'NULL');
 
       if (storedToken && storedUser) {
         try {
@@ -92,14 +87,12 @@ export const AuthProvider = ({ children }) => {
           const verifyData = await verifyRes.json();
 
           if (verifyData.deactivated === true || verifyData.valid === false) {
-            console.log('Stored token invalid — clearing session');
             await AsyncStorage.multiRemove(['token', 'user']);
             return;
           }
 
           setToken(storedToken);
           setUser(parsedUser);
-          console.log('Auth restored successfully');
         } catch (verifyError) {
           // Network error on startup verify — restore cached session anyway,
           // periodic check will handle it if account gets deactivated later
@@ -123,9 +116,6 @@ export const AuthProvider = ({ children }) => {
   // LOGIN
   const login = async (email, password) => {
     try {
-      console.log('Attempting login...');
-      console.log('API URL:', `${API_BASE_URL}/api/auth/login`);
-
       const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
         method: 'POST',
         headers: {
@@ -138,23 +128,16 @@ export const AuthProvider = ({ children }) => {
       });
 
       const rawText = await response.text();
-
-      console.log('RAW LOGIN RESPONSE:', rawText);
-
       let data = {};
 
       try {
         data = rawText ? JSON.parse(rawText) : {};
       } catch (jsonError) {
-        console.log('JSON Parse Error:', jsonError);
-
         return {
           success: false,
           error: 'Invalid server response',
         };
       }
-
-      console.log('PARSED LOGIN DATA:', data);
 
       if (response.ok) {
         if (!data.token || !data.user) {
@@ -170,8 +153,6 @@ export const AuthProvider = ({ children }) => {
         setToken(data.token);
         setUser(data.user);
 
-        console.log('Login success');
-
         return {
           success: true,
           data,
@@ -183,8 +164,6 @@ export const AuthProvider = ({ children }) => {
         error: data.error || data.message || 'Login failed',
       };
     } catch (error) {
-      console.log('LOGIN NETWORK ERROR:', error);
-
       return {
         success: false,
         error: `Network error: ${error.message}`,
@@ -195,15 +174,12 @@ export const AuthProvider = ({ children }) => {
   // LOGOUT
   const logout = async () => {
     if (isLoggingOut.current) {
-      console.log('Logout already running');
       return;
     }
 
     isLoggingOut.current = true;
 
     try {
-      console.log('Logging out...');
-
       if (token) {
         try {
           await fetch(`${API_BASE_URL}/api/auth/logout`, {
@@ -214,7 +190,7 @@ export const AuthProvider = ({ children }) => {
             },
           });
         } catch (apiError) {
-          console.log('Logout API failed:', apiError.message);
+          // Best-effort logout
         }
       }
 
@@ -222,11 +198,7 @@ export const AuthProvider = ({ children }) => {
 
       setToken(null);
       setUser(null);
-
-      console.log('Logout completed');
     } catch (error) {
-      console.log('Logout error:', error);
-
       try {
         await AsyncStorage.multiRemove(['token', 'user']);
       } catch {}

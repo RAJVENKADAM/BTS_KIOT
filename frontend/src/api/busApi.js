@@ -14,15 +14,36 @@ export const busApi = {
 
   /**
    * Get live location for bus by busNo - new scalable endpoint
+   * 
+   * ⚠️ VALIDATION: Verifies the returned busNo matches the requested busNo.
+   * If the backend returns data for a different bus, it's treated as "Bus Not Found"
+   * to prevent displaying another bus's location.
    */
   getBusLocation: async (token, busNo) => {
     const response = await fetch(`${API_BASE_URL}/api/bus/location/${busNo}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     const data = await response.json();
+    
+    // Validate that the response belongs to the requested bus
+    const returnedBusNo = data.busNo ?? data.bus_no ?? data.busNumber;
+    const normalizedRequested = busNo.toUpperCase().trim();
+    const normalizedReturned = returnedBusNo ? String(returnedBusNo).toUpperCase().trim() : null;
+    
+    if (normalizedReturned && normalizedReturned !== normalizedRequested) {
+      console.warn(
+        `busApi.getBusLocation: Mismatch! Requested ${normalizedRequested}, got ${normalizedReturned}. Treating as not found.`
+      );
+      const err = new Error('Bus not found');
+      err.code = 'BUS_MISMATCH';
+      throw err;
+    }
+    
     if (!data.success) {
-      const msg = data.message || `No live data (${data.status || data.source || 'unknown'})`;
-      throw new Error(msg);
+      const msg = data.error || data.message || `No live data (${data.status || data.source || 'unknown'})`;
+      const err = new Error(msg);
+      err.code = data.error === 'Bus not found' ? 'BUS_NOT_FOUND' : 'NO_DATA';
+      throw err;
     }
     return data;
   },

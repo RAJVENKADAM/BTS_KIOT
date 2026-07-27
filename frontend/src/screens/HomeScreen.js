@@ -101,6 +101,10 @@ const lastCoordinateRef = useRef(null);
     selectedBusNoRef.current = selectedBusNo;
   }, [selectedBusNo]);
   const lastPlanRef = useRef(null);
+  // ⚠️ FIX: Search counter to prevent stale state.
+  // Incremented on each new search. After async API call completes,
+  // we check if this is still the latest search — if not, ignore the result.
+  const searchCounterRef = useRef(0);
 
   useEffect(() => {
     const persistBusData = async () => {
@@ -301,23 +305,34 @@ if (staleGps) {
     if (!query) return;
     const isPreviewSearch = /^\d{3,7}$/.test(query);
     setSearchQuery('');
+
+    // ⚠️ FIX: Reset ALL state atomically before each new search.
+    // Prevent stale data from previous search appearing while loading.
+    const currentSearch = ++searchCounterRef.current;
     setNoBusFound(false);
     setLocationStatus('loading');
     setIsBusSearchAttempted(true);
     setIsOffline(false);
+    setBusData(null);
+    setLastGoodLocation(null);
+    sameCoordinateCountRef.current = 0;
+    lastCoordinateRef.current = null;
     if (isAdmin) setIsSuperadminSearched(true);
 
     if (isPreviewSearch) {
       setSelectedPreviewNumber(query);
+      setSelectedBusNo(null);
       try {
         const data = await busApi.trackByPreview(token, query);
+        
+        // ⚠️ FIX: Ignore stale response from previous search
+        if (currentSearch !== searchCounterRef.current) return;
+        
         if (!data || data.error || data.latitude == null || data.longitude == null) {
           throw new Error(data?.error || 'No live data for this preview number');
         }
         const nextBusNo = data.busNo || data.bus_no || null;
         setSelectedBusNo(nextBusNo);
-        sameCoordinateCountRef.current = 0;
-        lastCoordinateRef.current = null;
 
         // Check GPS staleness
         if (isGpsStale(data)) {
@@ -337,6 +352,8 @@ if (staleGps) {
         }
       } catch (err) {
         console.log('Preview search error:', err.message);
+        // ⚠️ FIX: Ignore stale response from previous search
+        if (currentSearch !== searchCounterRef.current) return;
         setSelectedBusNo(null);
         setSelectedPreviewNumber(null);
         setBusData(null);
@@ -346,18 +363,22 @@ if (staleGps) {
       }
     } else {
       const busNo = query.toUpperCase();
-      const isSameBus = selectedBusNo === busNo;
       setSelectedPreviewNumber(null);
       setSelectedBusNo(busNo);
-      sameCoordinateCountRef.current = 0;
-      lastCoordinateRef.current = null;
-      if (!isSameBus) {
-        setBusData(null);
-        setLastGoodLocation(null);
-      }
+
       try {
         const data = await busApi.getBusLocation(token, busNo);
-        if (data && data.latitude !== null && data.longitude !== null) {
+        
+        // ⚠️ FIX: Ignore stale response from previous search
+        if (currentSearch !== searchCounterRef.current) return;
+
+        // ⚠️ FIX: busApi.getBusLocation now validates busNo match internally
+        // and throws if mismatch. If we reach here, the response is valid.
+
+        if (data && data.latitude != null && data.longitude != null
+          && Number.isFinite(Number(data.latitude)) && Number.isFinite(Number(data.longitude))
+          && data.latitude !== 'NaN' && data.longitude !== 'NaN') {
+          
           // Check GPS staleness
           if (isGpsStale(data)) {
             setBusData({ ...data, source: data.source || 'gps' });
@@ -383,6 +404,8 @@ if (staleGps) {
         }
       } catch (err) {
         console.log('Bus search error:', err.message);
+        // ⚠️ FIX: Ignore stale response from previous search
+        if (currentSearch !== searchCounterRef.current) return;
         setBusData(null);
         setLastGoodLocation(null);
         setLocationStatus('error');
@@ -404,6 +427,9 @@ if (staleGps) {
     const distance = calculateDistance(displayBusData.latitude, displayBusData.longitude, KIOT_LAT, KIOT_LNG);
     return (
       <View style={styles.busCard}>
+        {isOffline && (
+          <Text style={styles.offlineNote}>⚠ Last known location — GPS is offline</Text>
+        )}
         <View style={styles.cardHeader}>
           <Text style={styles.busNumber}>Bus {displayBusLabel}</Text>
           <View style={[styles.statusBadge,
@@ -515,9 +541,15 @@ if (staleGps) {
             {error ? (
               <Text style={[styles.infoText, styles.errorText]}>{error}</Text>
             ) : noBusFound ? (
-              <Text style={[styles.infoText, styles.errorText]}>Bus not found</Text>
+              <View>
+                <Text style={[styles.infoText, styles.errorText]}>Bus Not Found</Text>
+                <Text style={[styles.infoText, styles.subInfoText]}>Showing KIOT campus location.</Text>
+              </View>
             ) : isBusSearchAttempted && !displayBusData ? (
-              <Text style={[styles.infoText, styles.errorText]}>Bus not found</Text>
+              <View>
+                <Text style={[styles.infoText, styles.errorText]}>Bus Not Found</Text>
+                <Text style={[styles.infoText, styles.subInfoText]}>Showing KIOT campus location.</Text>
+              </View>
             ) : !selectedBusNo && !selectedPreviewNumber ? (
               <Text style={styles.infoText}>
                 {isAdmin
@@ -649,6 +681,20 @@ iconButtonPrimary: {
     textAlign: 'center',
     color: COLORS.textBody,
     fontSize: 14,
+  },
+  subInfoText: {
+    textAlign: 'center',
+    color: COLORS.textBody,
+    fontSize: 12,
+    marginTop: 4,
+    opacity: 0.8,
+  },
+  offlineNote: {
+    textAlign: 'center',
+    color: '#dc2626',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 8,
   },
   clearButton: {
     padding: 4,
