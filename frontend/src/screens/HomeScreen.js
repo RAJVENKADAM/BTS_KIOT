@@ -1,3 +1,42 @@
+/**
+ * HomeScreen — Primary screen for live bus tracking.
+ *
+ * Architecture & Data Flow:
+ * ─────────────────────────
+ * 1. UI renders an OpenStreetMap (Leaflet via WebView) as fullscreen background.
+ * 2. Top bar overlay provides search input (bus number or preview number) +
+ *    "Organize" (admin only) + Profile nav icons.
+ * 3. @gorhom/bottom-sheet houses status info: bus card with distance-to-college,
+ *    marker status (moving/waiting/stopped), error/loading states.
+ *
+ * State Management:
+ * ─────────────────
+ * - AuthContext provides { token, user } for API auth.
+ * - BusContext provides { error, refreshBuses, getSocket } for bus list + socket.
+ * - Local state tracks search query, busData (latest GPS), location status,
+ *   marker movement state, and display logic.
+ *
+ * Socket Integration:
+ * ───────────────────
+ * - Joins/leaves socket room "bus_{busNo}" when selectedBusNo changes.
+ * - Listens for "bus-update" events to update currentPlan in real time.
+ * - No polling — live updates are socket-driven; manual refresh via handleRefresh.
+ *
+ * Search & Marker Rules:
+ * ───────────────────────
+ * - Non-admin users auto-load bus_no from user profile; can only see their bus.
+ * - Superadmin searches explicitly; "not found" clears all previous markers.
+ * - Marker only shows when shouldShowBusMarker evaluates to true — never falls
+ *   back to stale lastGoodLocation for a failed search.
+ *
+ * Bus Status Detection:
+ * ──────────────────────
+ * - detectBusStatus tracks coordinate repetition via refs.
+ *   - Same coord 3x → "waiting"
+ *   - Same coord 10x → "stopped"
+ *   - Different coord → "moving"
+ * - chooseBusStatus prioritises API's "stopped" state over coordinate detection.
+ */
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import OSMMap from '../components/Map/OSMMap';
 import {
@@ -8,39 +47,23 @@ import {
   StatusBar,
   Platform,
   TouchableOpacity,
-  Animated,
-  Dimensions,
-  Modal,
-  ScrollView,
-  ActivityIndicator,
-  Alert,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useBus } from '../context/BusContext';
 import busApi from '../api/busApi';
-import io from 'socket.io-client';
-import { COLORS, RADIUS, SHADOWS } from '../theme';
+import { COLORS, SHADOWS } from '../theme';
 import { useAuth } from '../context/AuthContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import BottomSheet, { BottomSheetView } from '@gorhom/bottom-sheet';
 
-const { height } = Dimensions.get('window');
-
-const MIN_HEIGHT = 150;
-const MAX_HEIGHT = height * 0.6;
-
-// Stable snap points for gorhom/bottom-sheet
 const SNAP_POINTS = ['25%', '50%', '75%'];
-// Live updates via socket.io + manual refresh
 
-// KIOT College coordinates
 const KIOT_LAT = 11.554528;
 const KIOT_LNG = 78.019759;
 
-// Utility functions
 const calculateDistance = (lat1, lng1, lat2, lng2) => {
-  const R = 6371; // Earth's radius in km
+  const R = 6371;
   const dLat = (lat2 - lat1) * Math.PI / 180;
   const dLng = (lng2 - lng1) * Math.PI / 180;
   const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
@@ -55,67 +78,33 @@ const HomeScreen = () => {
   const navigation = useNavigation();
   const role = (user?.role || 'student').toLowerCase();
   const isAdmin = role === 'superadmin';
-  const { error, refreshBuses, selectedPlan, setSelectedPlan, buses, getSocket } = useBus();
+  const { error, refreshBuses, getSocket } = useBus();
   const socket = getSocket ? getSocket() : null;
-
-  // If busData doesn't include currentPlan (or is missing), fallback to context selectedPlan
-  const effectiveCurrentPlan = displayBusData?.currentPlan || selectedPlan;
-
 
   const [searchQuery, setSearchQuery] = useState('');
   const [busData, setBusData] = useState(null);
   const [noBusFound, setNoBusFound] = useState(false);
   const [isBusSearchAttempted, setIsBusSearchAttempted] = useState(false);
-
   const [selectedPreviewNumber, setSelectedPreviewNumber] = useState(null);
   const [selectedBusNo, setSelectedBusNo] = useState(null);
   const [lastGoodLocation, setLastGoodLocation] = useState(null);
   const [isSuperadminSearched, setIsSuperadminSearched] = useState(false);
+  const [locationStatus, setLocationStatus] = useState('idle');
+  const [markerStatus, setMarkerStatus] = useState('moving');
+  const [isOffline, setIsOffline] = useState(false);
 
-  const [locationStatus, setLocationStatus] = useState('idle'); // idle|loading|live|offline|error
-  const [markerStatus, setMarkerStatus] = useState('moving'); // moving|waiting|stopped
-
-  const lastCoordinateRef = useRef(null);
+const lastCoordinateRef = useRef(null);
   const sameCoordinateCountRef = useRef(0);
   const busStatusRef = useRef('moving');
-
-  // Prevent stale closure for selected bus
   const selectedBusNoRef = useRef(selectedBusNo);
   useEffect(() => {
     selectedBusNoRef.current = selectedBusNo;
   }, [selectedBusNo]);
-
-  const [isSheetExpanded, setIsSheetExpanded] = useState(false);
-  const isDraggingRef = useRef(false);
-
-
-  const [shouldAutoFocus, setShouldAutoFocus] = useState(false);
-  const [showStopsModal, setShowStopsModal] = useState(false);
-  const [routeStops, setRouteStops] = useState([]);
-  const [loadingStops, setLoadingStops] = useState(false);
   const lastPlanRef = useRef(null);
 
-  // BottomSheet sizing is handled by @gorhom/bottom-sheet.
-  // Keep these legacy animated sizing refs removed to avoid flicker/gesture conflicts.
-
-
-
-
-
-
-  // IMPORTANT: Do not drive bottom-sheet position from live GPS updates.
-  // @gorhom/bottom-sheet already handles gesture + snapping.
-  // This screen only changes sheet *content* via state updates.
-  useEffect(() => {
-    // no-op
-  }, [selectedBusNo, busData]);
-
-
-  // Persist bus data when it changes (but not during loading)
   useEffect(() => {
     const persistBusData = async () => {
-      if (locationStatus === 'loading') return; // Don't persist while loading
-      
+      if (locationStatus === 'loading') return;
       try {
         if (selectedBusNo) {
           await AsyncStorage.setItem('selectedBusNo', selectedBusNo);
@@ -130,101 +119,56 @@ const HomeScreen = () => {
         console.log('Error persisting bus data:', err);
       }
     };
-
     persistBusData();
   }, [selectedBusNo, selectedPreviewNumber, busData, locationStatus]);
 
-
-
-  // Auto-load user assigned bus for non-admin users
   useEffect(() => {
     if (user?.bus_no && !isAdmin && !selectedBusNo && !selectedPreviewNumber) {
       setSelectedBusNo(user.bus_no);
       setLocationStatus('loading');
+      setIsOffline(false);
     }
   }, [user, isAdmin, selectedBusNo, selectedPreviewNumber]);
 
-  // Mark superadmin as NOT searched initially; it becomes true only after a successful/attempted search
   useEffect(() => {
     if (isAdmin) setIsSuperadminSearched(false);
   }, [isAdmin]);
 
-
-  // Join/leave socket room when selectedBusNo changes
   useEffect(() => {
     if (!socket || !selectedBusNo) return;
-
-    console.log('HomeScreen joining bus room:', `bus_${selectedBusNo}`);
     socket.emit('join-bus', selectedBusNo);
-
-    return () => {
-      socket.emit('leave-bus', selectedBusNo);
-    };
+    return () => { socket.emit('leave-bus', selectedBusNo); };
   }, [socket, selectedBusNo]);
 
-  // Socket plan updates (real-time + immutable refresh)
   useEffect(() => {
     if (!socket) return;
-
     const handleBusUpdate = (data) => {
       if (!data) return;
-
       const selected = selectedBusNoRef.current;
       if (!selected) return;
-
       const incomingBusNo = data.busNo ?? data.bus_no ?? data.busNumber;
-      if (!incomingBusNo) return;
-
-      if (String(incomingBusNo) !== String(selected)) return;
-
+      if (!incomingBusNo || String(incomingBusNo) !== String(selected)) return;
       const newPlan = data.currentPlan;
-      if (!newPlan) return;
-
-      // Prevent redundant rerenders for same plan (but still force on change)
-      if (lastPlanRef.current === newPlan) return;
+      if (!newPlan || lastPlanRef.current === newPlan) return;
       lastPlanRef.current = newPlan;
-
       setBusData(prev => {
-        // If busData is null/stale, still create a minimal object so the bottom sheet updates.
-        if (!prev) {
-          return {
-            busNo: selected,
-            currentPlan: newPlan,
-            _updatedAt: Date.now(),
-          };
-        }
-
-        return {
-          ...prev,
-          currentPlan: newPlan,
-          _updatedAt: Date.now(),
-        };
+        if (!prev) return { busNo: selected, currentPlan: newPlan, _updatedAt: Date.now() };
+        return { ...prev, currentPlan: newPlan, _updatedAt: Date.now() };
       });
     };
-
-
-
     socket.on('bus-update', handleBusUpdate);
     return () => socket.off('bus-update', handleBusUpdate);
   }, [socket]);
 
-
   useEffect(() => {
     refreshBuses();
-    
-    // Load persisted bus data on app start
     const loadPersistedBusData = async () => {
       try {
         const savedBusNo = await AsyncStorage.getItem('selectedBusNo');
         const savedPreviewNumber = await AsyncStorage.getItem('selectedPreviewNumber');
         const savedBusData = await AsyncStorage.getItem('savedBusData');
-        
-        if (savedBusNo) {
-          setSelectedBusNo(savedBusNo);
-        }
-        if (savedPreviewNumber) {
-          setSelectedPreviewNumber(savedPreviewNumber);
-        }
+        if (savedBusNo) setSelectedBusNo(savedBusNo);
+        if (savedPreviewNumber) setSelectedPreviewNumber(savedPreviewNumber);
         if (savedBusData) {
           const parsedData = JSON.parse(savedBusData);
           setBusData(parsedData);
@@ -234,99 +178,60 @@ const HomeScreen = () => {
         console.log('Error loading persisted bus data:', err);
       }
     };
-
     loadPersistedBusData();
-
-    return () => {
-      // No polling to clear
-    };
   }, []);
 
-
-  // Legacy PanResponder block removed (was causing gesture conflicts / flicker).
-
-
   const normalizeBusState = (state) => {
-
     const normalized = typeof state === 'string' ? state.toLowerCase() : '';
-
     return ['moving', 'stopped'].includes(normalized) ? normalized : null;
   };
 
   const chooseBusStatus = (apiState, coordinateState) => {
     const normalizedApi = normalizeBusState(apiState);
-    if (normalizedApi === 'stopped') {
-      return normalizedApi;
-    }
+    if (normalizedApi === 'stopped') return normalizedApi;
     return coordinateState;
   };
 
-  // CORE MOVEMENT RULE ENGINE (Mandatory)
-  // WAITING: same coordinate repeats 3 times consecutively
-  // STOPPED: same coordinate repeats 10 times consecutively
-  // MOVING: next coordinate differs from previous (default fallback)
-  // Priority: STOPPED > WAITING > MOVING
   const detectBusStatus = (lat, lng) => {
     if (typeof lat !== 'number' || typeof lng !== 'number' || !isFinite(lat) || !isFinite(lng)) {
       return busStatusRef.current || 'moving';
     }
-
     const currentCoord = `${lat.toFixed(5)},${lng.toFixed(5)}`;
     const lastCoord = lastCoordinateRef.current;
-
     if (lastCoord === currentCoord) {
       sameCoordinateCountRef.current += 1;
     } else {
       lastCoordinateRef.current = currentCoord;
       sameCoordinateCountRef.current = 1;
     }
-
     const count = sameCoordinateCountRef.current;
-
     let nextStatus;
-    if (count >= 10) {
-      nextStatus = 'stopped';
-    } else if (count >= 3) {
-      nextStatus = 'waiting';
-    } else {
-      // If coordinate changed, count is 1 => moving
-      nextStatus = 'moving';
-    }
-
+    if (count >= 10) nextStatus = 'stopped';
+    else if (count >= 3) nextStatus = 'waiting';
+    else nextStatus = 'moving';
     busStatusRef.current = nextStatus;
     return nextStatus;
   };
 
-
-  // Removed polling useEffect - socket + manual refresh only
-
-
-
-  // Drag gesture: smooth following finger, then snap based on velocity/distance.
-  const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
-
-
-  const handlePlanPress = async () => {
-    if (!selectedBusNo && !selectedPreviewNumber) return;
-    if (!displayBusData?.currentPlan) return;
-
-    // This build does not yet include a backend endpoint to fetch stops by bus+plan.
-    // Once added, wire it here to populate `routeStops` and show `showStopsModal`.
-    Alert.alert(
-      'Route Stops',
-      `Stops for bus ${selectedBusNo || selectedPreviewNumber} (plan: "${displayBusData.currentPlan}") require a backend stops-by-bus+plan endpoint.`
-    );
+  /**
+   * Determines if GPS data is stale based on lastSuccessfulGpsUpdate timestamp.
+   * Backend GPS worker retains old coordinates even when GPS provider fails.
+   * The real indicator of freshness is lastSuccessfulGpsUpdate: if null or >3min old → offline.
+   */
+  const isGpsStale = (data) => {
+    if (!data) return true;
+    // If backend reports status as offline, trust it
+    if (data.status === 'offline') return true;
+    // Check lastSuccessfulGpsUpdate timestamp
+    const lastGps = data.lastSuccessfulGpsUpdate;
+    if (!lastGps) return true; // never had a successful GPS fix → offline
+    const ageMs = Date.now() - new Date(lastGps).getTime();
+    return ageMs > 3 * 60 * 1000; // older than 3 min → stale/offline
   };
 
-
-
-
-  // Refresh current bus location (immediate fetch + continue polling)
   const handleRefresh = useCallback(async () => {
     if (!selectedBusNo && !selectedPreviewNumber) return;
-    
     setLocationStatus('loading');
-    
     try {
       let data;
       if (selectedPreviewNumber) {
@@ -334,92 +239,104 @@ const HomeScreen = () => {
       } else {
         data = await busApi.getBusLocation(token, selectedBusNo);
       }
-      
-      if (data && data.latitude !== null && data.longitude !== null) {
+
+      const hasValidCoords = data && data.latitude != null && data.longitude != null
+        && Number.isFinite(Number(data.latitude)) && Number.isFinite(Number(data.longitude))
+        && data.latitude !== 'NaN' && data.longitude !== 'NaN';
+
+      // 1. Check GPS timestamp staleness FIRST (most reliable)
+      const staleGps = isGpsStale(data);
+
+if (staleGps) {
+        // GPS is stale → mark offline immediately
+        setIsOffline(true);
+        setLocationStatus('offline');
+        if (hasValidCoords) {
+          // Show the coordinates but marked offline
+          setBusData({ ...data, source: data.source || 'gps' });
+          setLastGoodLocation({ ...data, source: data.source || 'gps' });
+          setNoBusFound(false);
+        } else if (lastGoodLocation) {
+          setBusData(lastGoodLocation);
+          setNoBusFound(false);
+        } else {
+          setBusData(null);
+          setNoBusFound(true);
+        }
+      } else if (hasValidCoords) {
+        // Fresh GPS with valid coords → live
         const nextBusData = { ...data, source: data.source || 'gps' };
         setBusData(nextBusData);
         setLastGoodLocation(nextBusData);
-
-        setLocationStatus(data.isStale ? 'stale' : 'live');
+        setLocationStatus('live');
+        setIsOffline(false);
         setNoBusFound(false);
-        setShouldAutoFocus(true);
-        
         const statusFromAPI = data.busState;
         const statusFromCoordinates = detectBusStatus(data.latitude, data.longitude);
         setMarkerStatus(chooseBusStatus(statusFromAPI, statusFromCoordinates));
       } else {
-        // Strict: if refresh fails for the current selected bus, show KIOT only.
+        // No valid coords and no lastKnownLocation
         setBusData(null);
         setLastGoodLocation(null);
         setLocationStatus('error');
         setNoBusFound(true);
+        setIsOffline(false);
       }
-
     } catch (err) {
       console.log('Refresh error:', err.message);
-      if (!lastGoodLocation) {
-        setLocationStatus('error');
-        setNoBusFound(true);
-      } else {
+      if (lastGoodLocation) {
         setBusData(lastGoodLocation);
         setLocationStatus('offline');
+        setIsOffline(true);
+      } else {
+        setLocationStatus('error');
+        setNoBusFound(true);
       }
     }
-    
-    // Refresh bus list in context (for admin list)
     await refreshBuses();
   }, [selectedBusNo, selectedPreviewNumber, token, lastGoodLocation, refreshBuses]);
 
   const handleSearch = async () => {
     const query = searchQuery.trim();
     if (!query) return;
-
     const isPreviewSearch = /^\d{3,7}$/.test(query);
     setSearchQuery('');
     setNoBusFound(false);
     setLocationStatus('loading');
-
-    // mark search attempted so sheet can show correct empty/error state
     setIsBusSearchAttempted(true);
-
-    // For superadmin: once they search (success or failure), keep strict focus on that outcome
+    setIsOffline(false);
     if (isAdmin) setIsSuperadminSearched(true);
-
-
 
     if (isPreviewSearch) {
       setSelectedPreviewNumber(query);
-      setShouldAutoFocus(true);
       try {
         const data = await busApi.trackByPreview(token, query);
-
         if (!data || data.error || data.latitude == null || data.longitude == null) {
           throw new Error(data?.error || 'No live data for this preview number');
         }
-
         const nextBusNo = data.busNo || data.bus_no || null;
         setSelectedBusNo(nextBusNo);
-        
-        // Reset coordinate tracking for new search
         sameCoordinateCountRef.current = 0;
         lastCoordinateRef.current = null;
 
-        
-        const nextBusData = {
-          ...data,
-          previewNumber: query,
-          busNo: nextBusNo,
-        };
-        setBusData(nextBusData);
-        setLastGoodLocation(nextBusData);
-        setLocationStatus('live');
-        
-        const statusFromAPI = data.busState;
-        const statusFromCoordinates = detectBusStatus(data.latitude, data.longitude);
-        setMarkerStatus(chooseBusStatus(statusFromAPI, statusFromCoordinates) || 'moving');
+        // Check GPS staleness
+        if (isGpsStale(data)) {
+          setBusData({ ...data, previewNumber: query, busNo: nextBusNo });
+          setLastGoodLocation({ ...data, previewNumber: query, busNo: nextBusNo });
+          setLocationStatus('offline');
+          setIsOffline(true);
+        } else {
+          const nextBusData = { ...data, previewNumber: query, busNo: nextBusNo };
+          setBusData(nextBusData);
+          setLastGoodLocation(nextBusData);
+          setLocationStatus('live');
+          setIsOffline(false);
+          const statusFromAPI = data.busState;
+          const statusFromCoordinates = detectBusStatus(data.latitude, data.longitude);
+          setMarkerStatus(chooseBusStatus(statusFromAPI, statusFromCoordinates) || 'moving');
+        }
       } catch (err) {
         console.log('Preview search error:', err.message);
-        // Strict: clear any previous bus location
         setSelectedBusNo(null);
         setSelectedPreviewNumber(null);
         setBusData(null);
@@ -427,48 +344,38 @@ const HomeScreen = () => {
         setLocationStatus('error');
         setNoBusFound(true);
       }
-
     } else {
-      // Bus number search - immediately fetch data
       const busNo = query.toUpperCase();
-      
-      // Check if we're searching for the same bus
       const isSameBus = selectedBusNo === busNo;
-      
       setSelectedPreviewNumber(null);
       setSelectedBusNo(busNo);
-      setShouldAutoFocus(true);
-      
-      // Reset coordinate tracking for new search
       sameCoordinateCountRef.current = 0;
       lastCoordinateRef.current = null;
-      
-      // If it's the same bus and we have good data, don't reset everything
       if (!isSameBus) {
         setBusData(null);
         setLastGoodLocation(null);
       }
-
-      
       try {
         const data = await busApi.getBusLocation(token, busNo);
-
-      if (data && data.latitude !== null && data.longitude !== null) {
-          const nextBusData = {
-            ...data,
-            source: data.source || 'gps'
-          };
-          setBusData(nextBusData);
-          setLastGoodLocation(nextBusData);
-
-          setLocationStatus(data.isStale ? 'stale' : 'live');
-          
-          const statusFromAPI = data.busState;
-          const statusFromCoordinates = detectBusStatus(data.latitude, data.longitude);
-          setMarkerStatus(chooseBusStatus(statusFromAPI, statusFromCoordinates) || 'moving');
+        if (data && data.latitude !== null && data.longitude !== null) {
+          // Check GPS staleness
+          if (isGpsStale(data)) {
+            setBusData({ ...data, source: data.source || 'gps' });
+            setLastGoodLocation({ ...data, source: data.source || 'gps' });
+            setLocationStatus('offline');
+            setIsOffline(true);
+          } else {
+            const nextBusData = { ...data, source: data.source || 'gps' };
+            setBusData(nextBusData);
+            setLastGoodLocation(nextBusData);
+            setLocationStatus('live');
+            setIsOffline(false);
+            const statusFromAPI = data.busState;
+            const statusFromCoordinates = detectBusStatus(data.latitude, data.longitude);
+            setMarkerStatus(chooseBusStatus(statusFromAPI, statusFromCoordinates) || 'moving');
+          }
         } else {
           console.log('No valid location for bus search:', data);
-          // Strict: clear any previous bus location and show KIOT
           setBusData(null);
           setLastGoodLocation(null);
           setLocationStatus('error');
@@ -476,21 +383,14 @@ const HomeScreen = () => {
         }
       } catch (err) {
         console.log('Bus search error:', err.message);
-        // Strict: clear any previous bus location and show KIOT
         setBusData(null);
         setLastGoodLocation(null);
         setLocationStatus('error');
         setNoBusFound(true);
       }
-
     }
   };
 
-
-  // Strict display rules:
-  // - Non-admin: always show only their assigned bus (never fall back to other buses).
-  // - Superadmin: if they searched at least once, show only the searched bus (or KIOT if not found).
-  // - Never reuse lastGoodLocation to “hide” not-found/bad searches.
   const shouldShowBusMarker = (() => {
     if (!isAdmin) return !!selectedBusNo || !!selectedPreviewNumber;
     return isSuperadminSearched && (!!selectedBusNo || !!selectedPreviewNumber);
@@ -499,25 +399,21 @@ const HomeScreen = () => {
   const displayBusData = shouldShowBusMarker ? busData : null;
   const displayBusLabel = selectedPreviewNumber || selectedBusNo || displayBusData?.busNo;
 
-
-  // Memoized bus card to prevent flicker (distance only, no ETA)
   const busCardContent = React.useMemo(() => {
     if (!displayBusData) return null;
-
     const distance = calculateDistance(displayBusData.latitude, displayBusData.longitude, KIOT_LAT, KIOT_LNG);
-
     return (
       <View style={styles.busCard}>
         <View style={styles.cardHeader}>
           <Text style={styles.busNumber}>Bus {displayBusLabel}</Text>
-          <View style={[styles.statusBadge, 
-            markerStatus === 'moving' && styles.movingBadge,
-            markerStatus === 'stopped' && styles.stoppedBadge
+          <View style={[styles.statusBadge,
+            isOffline && styles.offlineBadge,
+            !isOffline && markerStatus === 'moving' && styles.movingBadge,
+            !isOffline && markerStatus === 'stopped' && styles.stoppedBadge
           ]}>
-            <Text style={styles.badgeText}>{markerStatus.toUpperCase()}</Text>
+            <Text style={styles.badgeText}>{isOffline ? 'OFFLINE' : markerStatus.toUpperCase()}</Text>
           </View>
         </View>
-        
         <View style={styles.etaContainer}>
           <Text style={styles.etaLabel}>Distance to College</Text>
           <View style={styles.etaRow}>
@@ -527,10 +423,9 @@ const HomeScreen = () => {
             </View>
           </View>
         </View>
-        
       </View>
     );
-  }, [displayBusData, displayBusLabel, markerStatus]);
+  }, [displayBusData, displayBusLabel, markerStatus, isOffline]);
 
   return (
     <View style={styles.container}>
@@ -538,7 +433,7 @@ const HomeScreen = () => {
 
       {/* MAP */}
       <View style={styles.mapBackground}>
-        <OSMMap busData={displayBusData} buses={[]} />
+        <OSMMap busData={displayBusData ? { ...displayBusData, _isOffline: isOffline } : null} buses={[]} />
       </View>
 
       <View style={styles.topBar}>
@@ -595,7 +490,7 @@ const HomeScreen = () => {
         snapPoints={SNAP_POINTS}
         enablePanDownToClose={false}
         animateOnMount={false}
-        topInset={150}
+        topInset={350}
         handleIndicatorStyle={styles.handleIndicator}
         backgroundStyle={styles.sheetBackground}
         containerStyle={styles.sheetContainer}
@@ -632,55 +527,15 @@ const HomeScreen = () => {
                     : 'No bus assigned'}
               </Text>
             ) : displayBusData ? (
-              <>
-                {busCardContent}
-
-                
-
-              </>
+              busCardContent
             ) : locationStatus === 'loading' ? (
               <Text style={styles.infoText}>Loading live location...</Text>
             ) : (
               <Text style={styles.infoText}>No location data available</Text>
             )}
           </View>
-
-          <View style={styles.modalButtonContainer} />
         </BottomSheetView>
       </BottomSheet>
-
-      {/* STOPS MODAL */}
-      <Modal visible={showStopsModal} transparent animationType="slide">
-        <TouchableOpacity 
-          style={styles.modalOverlay} 
-          activeOpacity={1}
-          onPress={() => setShowStopsModal(false)}
-        >
-          <View style={styles.stopsModal}>
-            <Text style={styles.stopsTitle}>{displayBusData?.currentPlan || 'Route'} Stops ({routeStops.length})</Text>
-            {loadingStops ? (
-              <ActivityIndicator size="large" color={COLORS.primary} style={{ marginTop: 20 }} />
-            ) : routeStops.length === 0 ? (
-              <Text style={styles.noStopsText}>No stops available</Text>
-            ) : (
-              <ScrollView style={styles.stopsList} showsVerticalScrollIndicator={false}>
-                {routeStops.map((stop, index) => (
-                  <View key={index} style={styles.stopItem}>
-                    <Text style={styles.stopNumber}>{index + 1}.</Text>
-                    <Text style={styles.stopName}>{stop}</Text>
-                  </View>
-                ))}
-              </ScrollView>
-            )}
-            <TouchableOpacity 
-              style={styles.closeStopsButton}
-              onPress={() => setShowStopsModal(false)}
-            >
-              <Text style={styles.closeStopsText}>Close</Text>
-            </TouchableOpacity>
-          </View>
-        </TouchableOpacity>
-      </Modal>
 
     </View>
   );
@@ -761,55 +616,8 @@ iconButtonPrimary: {
   color: COLORS.textHeader,
 },
 
-  planContainer: {
-    position: 'absolute',
-    top: Platform.OS === 'ios' ? 70 : 60,
-    left: 15,
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.93)',
-    borderRadius: 50,
-    paddingHorizontal: 12,
-    height: 40,
-    ...SHADOWS.soft,
-  },
-
-  planLabel: {
-    fontSize: 12,
-    color: COLORS.textBody,
-    marginRight: 8,
-  },
-
-  planButton: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 15,
-    marginHorizontal: 2,
-  },
-
-  activePlan: {
-    backgroundColor: COLORS.primary,
-  },
-
-  planText: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: '#555',
-  },
-
-  activePlanText: {
-    color: COLORS.white,
-  },
-
   errorText: {
     color: '#e74c3c',
-  },
-  warningText: {
-    color: '#f39c12',
-  },
-  textSmall: {
-    fontSize: 12,
-    opacity: 0.8,
   },
 
   // gorhom bottom-sheet styles
@@ -842,25 +650,8 @@ iconButtonPrimary: {
     color: COLORS.textBody,
     fontSize: 14,
   },
-  userBusPlaceholder: {
-    flex: 1,
-    marginLeft: 8,
-    fontSize: 14,
-    color: COLORS.textHeader,
-    fontWeight: '500',
-  },
   clearButton: {
     padding: 4,
-  },
-  refreshButton: {
-    backgroundColor: COLORS.success,
-  },
-
-  title: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: COLORS.textHeader,
-    marginBottom: 6,
   },
 
   sheetHeader: {
@@ -880,50 +671,6 @@ iconButtonPrimary: {
     fontSize: 12,
     color: COLORS.textBody,
     marginTop: 4,
-  },
-
-  statusGroup: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'flex-end',
-  },
-
-  statusPill: {
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderWidth: 1,
-    borderColor: 'transparent',
-    backgroundColor: '#f0f0f0',
-    marginLeft: 6,
-  },
-
-  activePill: {
-    borderColor: '#00000010',
-    elevation: 1,
-  },
-
-  statusText: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: '#555',
-    textTransform: 'uppercase',
-  },
-
-  activePillText: {
-    color: COLORS.white,
-  },
-
-  movingPill: {
-    backgroundColor: '#2ecc71',
-  },
-
-  waitingPill: {
-    backgroundColor: '#f1c40f',
-  },
-
-  stoppedPill: {
-    backgroundColor: '#e74c3c',
   },
 
   busCard: {
@@ -960,6 +707,10 @@ iconButtonPrimary: {
 
   stoppedBadge: {
     backgroundColor: '#e74c3c',
+  },
+
+  offlineBadge: {
+    backgroundColor: '#dc2626',
   },
 
   badgeText: {
@@ -1001,129 +752,5 @@ iconButtonPrimary: {
   etaSubtext: {
     fontSize: 12,
     color: COLORS.textBody,
-  },
-
-  /* etaDivider removed */
-
-  planSection: {
-    marginTop: 16,
-    paddingTop: 16,
-    borderTopWidth: 1,
-    borderTopColor: '#e0e0e0',
-    alignItems: 'center',
-  },
-
-  planLabel: {
-    fontSize: 12,
-    color: COLORS.textBody,
-    marginBottom: 8,
-    textTransform: 'uppercase',
-    fontWeight: '600',
-    letterSpacing: 0.5,
-  },
-
-  planValue: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: COLORS.primary,
-    textTransform: 'uppercase',
-  },
-
-  text: {
-    fontSize: 14,
-    color: COLORS.textBody,
-  },
-
-  modalButtonContainer: {
-    flexDirection: 'row',
-    justifyContent: 'flex-start',
-    gap: 10,
-    marginTop: 16,
-    paddingTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: '#e0e0e0',
-  },
-
-  modalTextButton: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 8,
-    backgroundColor: COLORS.primary,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-
-  modalButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: COLORS.white,
-    textTransform: 'capitalize',
-  },
-
-  // Stops Modal Styles
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.12)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20,
-  },
-  stopsModal: {
-    backgroundColor: 'white',
-    borderRadius: 20,
-    padding: 24,
-    maxHeight: '80%',
-    width: '90%',
-    maxWidth: 400,
-    ...SHADOWS.heavy,
-  },
-  stopsTitle: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: COLORS.textHeader,
-    textAlign: 'center',
-    marginBottom: 20,
-  },
-  noStopsText: {
-    textAlign: 'center',
-    color: COLORS.textBody,
-    fontSize: 16,
-    marginTop: 20,
-  },
-  stopsList: {
-    maxHeight: 400,
-    marginBottom: 20,
-  },
-  stopItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
-  },
-  stopNumber: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: COLORS.primary,
-    width: 30,
-    marginRight: 12,
-  },
-  stopName: {
-    fontSize: 16,
-    color: COLORS.textHeader,
-    flex: 1,
-  },
-  closeStopsButton: {
-    backgroundColor: COLORS.primary,
-    paddingVertical: 14,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginTop: 10,
-  },
-  closeStopsText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: '600',
   },
 });

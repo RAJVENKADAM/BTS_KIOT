@@ -10,32 +10,21 @@ import {
   RefreshControl,
   ActivityIndicator,
 } from 'react-native';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../../context/AuthContext';
 
 import { excelManagementApi } from '../../api/excelManagementApi';
-import ExcelUpload from '../../components/ExcelUpload';
 import MultiExcelUpload from '../../components/MultiExcelUpload';
 import ExcelUploadCard from '../../components/ExcelUploadCard';
 import UserCard from '../../components/UserCard';
 import * as DocumentPicker from 'expo-document-picker';
 
-
-import * as Sharing from 'expo-sharing';
-
-import * as FileSystem from 'expo-file-system';
-
-import XLSX from 'xlsx';
-
-
 import { readExcelFile, convertExcelToJson } from '../../utils/excelImport';
 import { importUsersExcelJson } from '../../api/importApi';
 
-
 import { COLORS, SPACING, RADIUS, SHADOWS } from '../../theme';
-import { Header, Body, MutedText, Subtitle } from '../../components/UI/Typography';
-import Card from '../../components/UI/Card';
+import { Header, Body, MutedText } from '../../components/UI/Typography';
 
 export default function AddUsersScreen() {
   const [uploading, setUploading] = useState(false);
@@ -91,29 +80,6 @@ export default function AddUsersScreen() {
     setRefreshing(true);
     await loadExcelUploads();
     setRefreshing(false);
-  };
-
-  const generateExcelTemplate = async () => {
-    try {
-      const sampleData = [
-        { name: 'John Doe', email: 'john.doe@example.com', busno: 'BUS001', role: 'student', mobile_no: '9876543210', date_of_year: '1990' },
-        { name: 'Jane Smith', email: 'jane.smith@example.com', busno: 'BUS002', role: 'primary_admin', mobile_no: '9876543211', date_of_year: '1985' }
-      ];
-
-      const ws = XLSX.utils.json_to_sheet(sampleData);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Users');
-      const wbout = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
-      const fileUri = FileSystem.cacheDirectory + 'user_template.xlsx';
-
-      await FileSystem.writeAsStringAsync(fileUri, wbout, { encoding: FileSystem.EncodingType.Base64 });
-
-      if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(fileUri);
-      }
-    } catch (error) {
-      Alert.alert('Error', 'Failed to generate template');
-    }
   };
 
   const handleFileUpload = async (file, customName) => {
@@ -301,43 +267,6 @@ const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: COLORS.background },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   scrollContainer: { padding: SPACING.screenPadding, paddingBottom: 40 },
-  templateCard: {
-    padding: 20,
-    marginBottom: 24,
-    position: 'relative',
-    overflow: 'visible',
-  },
-  excelSheetBackground: {
-    position: 'absolute',
-    top: -10,
-    left: -10,
-    right: -10,
-    bottom: -10,
-    backgroundColor: COLORS.primary + '08', // Very low opacity primary tint for sheet paper
-    borderRadius: RADIUS.card + 8,
-    zIndex: -1,
-  },
-  cardHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 20 },
-  iconCircle: {
-    width: 48,
-    height: 48,
-    borderRadius: 14,
-    backgroundColor: COLORS.primary + '1A', // Low opacity primary for sheet effect
-    justifyContent: 'center',
-    alignItems: 'center'
-  },
-  cardTitle: { fontSize: 17, fontWeight: '700' },
-  templateBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 14,
-    borderRadius: RADIUS.button,
-    backgroundColor: 'transparent',
-    borderWidth: 1,
-    borderColor: COLORS.primary,
-  },
-  templateBtnText: { color: COLORS.primary, fontWeight: '700', marginLeft: 8 },
   section: { marginBottom: 28 },
   sectionLabel: { fontSize: 18, marginBottom: 12 },
   uploadBox: {
@@ -353,23 +282,5 @@ const styles = StyleSheet.create({
   processing: { padding: 40, alignItems: 'center' },
   processingText: { marginTop: 12, color: COLORS.primary, fontWeight: '700' },
   historyHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
-  usersSection: { marginTop: 10, marginBottom: 22 },
-  usersHeaderRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
-  usersHeader: { fontSize: 16, fontWeight: '900', color: COLORS.textHeader },
-  usersLoading: { paddingVertical: 18 },
-  emptyUsersText: { color: COLORS.muted, fontWeight: '600' },
-  badge: {
-    backgroundColor: COLORS.primary,
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginLeft: 10,
-    marginBottom: 10,
-  },
-  badgeText: { fontSize: 12, color: COLORS.white, fontWeight: '800' },
-  emptyState: { alignItems: 'center', paddingVertical: 40 },
-  emptyTitle: { fontSize: 20, marginTop: 16, marginBottom: 4 },
 });
 

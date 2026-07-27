@@ -1,3 +1,7 @@
+/**
+ * TrackMeScreen — Placeholder for driver/student tracking dashboard.
+ * Currently a stub; wire with actual tracking logic when backend is ready.
+ */
 import React from 'react';
 import { View, Text, StyleSheet, ScrollView } from 'react-native';
 

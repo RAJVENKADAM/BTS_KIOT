@@ -1,3 +1,7 @@
+/**
+ * SplashScreen — Animated loading screen shown while auth state resolves.
+ * Displays app logo, name, and loading indicator.
+ */
 import React, { useEffect, useRef } from 'react';
 import { View, StyleSheet, Image, Animated, StatusBar } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';

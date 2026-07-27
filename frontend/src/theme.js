@@ -1,3 +1,8 @@
+/**
+ * theme.js — Design tokens for the entire app.
+ * Colors, spacing, border radius, font sizes, and shadows.
+ * Import { COLORS, SPACING, RADIUS, SIZES, SHADOWS } from '../theme';
+ */
 export const COLORS = {
   primary: '#1f78d1',
   background: '#F8FAFC',
@@ -7,6 +12,7 @@ export const COLORS = {
   textBody: '#64748B',
   error: '#EF4444',
   success: '#10B981',
+  warning: '#F59E0B',
   inputBg: '#F1F5F9',
   shadow: '#0F172A',
   white: '#FFFFFF',

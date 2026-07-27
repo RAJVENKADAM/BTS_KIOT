@@ -51,16 +51,8 @@ const io = socketIo(server, {
 
 setIO(io);
 
-// Tracking sockets disabled for this deployment (no mobile/primary/secondary admins).
-// GPS sync is handled exclusively by gpsSyncWorker.
-
-try {
-  const { initTrackingHandlers } = require("./socket/trackSocket");
-  initTrackingHandlers(io);
-  console.log("✅ Track socket handlers initialized (legacy disabled endpoints)." );
-} catch (err) {
-  console.warn("Track socket handlers not available:", err.message);
-}
+// Socket.IO handlers for bus room events.
+// Mobile tracking feature removed - GPS sync is handled exclusively by gpsSyncWorker.
 
 // Start GPS worker only after MongoDB is ready
 try {
@@ -70,7 +62,8 @@ try {
   console.error('Failed to initialize startServices:', e.message);
 }
 
-require("./services/notificationService");
+// Notification service has been removed.
+// Real-time bus updates are handled via Socket.IO directly.
 
 /* ---------------- BODY PARSING ---------------- */
 app.use(
@@ -79,6 +72,10 @@ app.use(
     verify: (req, res, buf) => {
       req.rawBody = buf;
     },
+    // Silently ignore empty bodies (null bytes, empty strings) to prevent
+    // JSON parse errors on endpoints like logout that don't send a body
+    // but still include Content-Type: application/json header.
+    strict: false,
   })
 );
 app.use(express.urlencoded({ extended: true, limit: "25mb" }));
@@ -122,18 +119,11 @@ app.use("/api/bus", require("./routes/bus.routes"));
 app.use("/api/bus", require("./routes/busImport.routes"));
 app.use("/api/superadmin", require("./routes/superadminImport.routes"));
 app.use("/api/superadmin", require("./routes/superadminUsers.routes"));
-app.use("/api/track", require("./routes/track.routes"));
 
 app.get("/health", (req, res) => {
   res.status(200).json({
     status: "OK",
     message: "BTS Backend is running",
-  });
-});
-
-app.post("/gps/update-location", async (req, res) => {
-  return res.status(410).json({
-    error: 'GPS webhook is deprecated. Live GPS updates are handled by the backend worker.',
   });
 });
 

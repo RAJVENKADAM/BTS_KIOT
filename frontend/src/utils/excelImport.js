@@ -33,7 +33,7 @@ function coerceDateYear(value) {
   if (!s) return null;
 
   // If it looks like a full date, try extracting year.
-  const yearMatch = s.match(/(19|20)\\d{2}/);
+  const yearMatch = s.match(/(19|20)\d{2}/);
   if (yearMatch) return parseInt(yearMatch[0], 10);
 
   const n = Number(s);

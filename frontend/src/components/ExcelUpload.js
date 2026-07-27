@@ -1,3 +1,7 @@
+/**
+ * ExcelUpload — Simple file picker for uploading Excel files.
+ * Used by legacy Excel upload flows.
+ */
 import React, { useState } from 'react';
 import {
   View,

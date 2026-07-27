@@ -1,3 +1,8 @@
+/**
+ * AuthContext — Global authentication state management.
+ * Provides login, logout, token persistence via AsyncStorage,
+ * and exposes user, token, loading, isAuthenticated to the app tree.
+ */
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_BASE_URL } from '../api/api';
@@ -21,13 +26,51 @@ export const AuthProvider = ({ children }) => {
   const [loading, setLoading] = useState(true);
 
   const isLoggingOut = useRef(false);
+  const verifyIntervalRef = useRef(null);
 
   // LOAD AUTH DATA
   useEffect(() => {
     loadAuthData();
   }, []);
 
-  // LOAD FROM STORAGE
+  // PERIODIC TOKEN VERIFICATION — force logout if account is deactivated
+  useEffect(() => {
+    if (!token) {
+      if (verifyIntervalRef.current) {
+        clearInterval(verifyIntervalRef.current);
+        verifyIntervalRef.current = null;
+      }
+      return;
+    }
+
+    const verifySession = async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/auth/verify`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const data = await response.json();
+        if (data.deactivated === true || data.valid === false) {
+          console.log('Session invalid — account deactivated. Logging out.');
+          await AsyncStorage.multiRemove(['token', 'user']);
+          setToken(null);
+          setUser(null);
+        }
+      } catch (err) {
+        console.log('Token verify network error:', err.message);
+      }
+    };
+
+    verifyIntervalRef.current = setInterval(verifySession, 30000);
+
+    return () => {
+      if (verifyIntervalRef.current) {
+        clearInterval(verifyIntervalRef.current);
+        verifyIntervalRef.current = null;
+      }
+    };
+  }, [token]);
+
+  // LOAD FROM STORAGE — validates token with backend before restoring session
   const loadAuthData = async () => {
     try {
       console.log('Loading auth data...');
@@ -38,27 +81,35 @@ export const AuthProvider = ({ children }) => {
       console.log('Stored Token:', storedToken ? 'EXISTS' : 'NULL');
       console.log('Stored User:', storedUser ? 'EXISTS' : 'NULL');
 
-      // TEMP FIX:
-      // DO NOT VALIDATE TOKEN NOW
-      // Your verify endpoint is probably deleting valid tokens
-
       if (storedToken && storedUser) {
         try {
           const parsedUser = JSON.parse(storedUser);
 
+          // Verify token with backend before restoring session
+          const verifyRes = await fetch(`${API_BASE_URL}/api/auth/verify`, {
+            headers: { Authorization: `Bearer ${storedToken}` },
+          });
+          const verifyData = await verifyRes.json();
+
+          if (verifyData.deactivated === true || verifyData.valid === false) {
+            console.log('Stored token invalid — clearing session');
+            await AsyncStorage.multiRemove(['token', 'user']);
+            return;
+          }
+
           setToken(storedToken);
           setUser(parsedUser);
-
           console.log('Auth restored successfully');
-        } catch (parseError) {
-          console.log('User parse error:', parseError);
-
-          await AsyncStorage.multiRemove(['token', 'user']);
+        } catch (verifyError) {
+          // Network error on startup verify — restore cached session anyway,
+          // periodic check will handle it if account gets deactivated later
+          console.log('Token verify failed on startup (network), restoring cached session');
+          setToken(storedToken);
+          setUser(JSON.parse(storedUser));
         }
       }
     } catch (error) {
       console.log('Load auth error:', error);
-
       try {
         await AsyncStorage.multiRemove(['token', 'user']);
       } catch (clearError) {
@@ -106,7 +157,6 @@ export const AuthProvider = ({ children }) => {
       console.log('PARSED LOGIN DATA:', data);
 
       if (response.ok) {
-        // IMPORTANT CHECK - validate both token and user before saving
         if (!data.token || !data.user) {
           return {
             success: false,
@@ -114,16 +164,13 @@ export const AuthProvider = ({ children }) => {
           };
         }
 
-        // SAVE TO STORAGE
         await AsyncStorage.setItem('token', data.token);
         await AsyncStorage.setItem('user', JSON.stringify(data.user));
 
-        // UPDATE STATE
         setToken(data.token);
         setUser(data.user);
 
         console.log('Login success');
-        console.log('Token saved successfully');
 
         return {
           success: true,
@@ -157,7 +204,6 @@ export const AuthProvider = ({ children }) => {
     try {
       console.log('Logging out...');
 
-      // CALL BACKEND LOGOUT
       if (token) {
         try {
           await fetch(`${API_BASE_URL}/api/auth/logout`, {
@@ -172,10 +218,8 @@ export const AuthProvider = ({ children }) => {
         }
       }
 
-      // CLEAR STORAGE
       await AsyncStorage.multiRemove(['token', 'user']);
 
-      // CLEAR STATE
       setToken(null);
       setUser(null);
 
@@ -198,7 +242,6 @@ export const AuthProvider = ({ children }) => {
   const updateUserData = async (userData) => {
     try {
       await AsyncStorage.setItem('user', JSON.stringify(userData));
-
       setUser(userData);
     } catch (error) {
       console.log('Update user error:', error);
@@ -231,7 +274,6 @@ export const AuthProvider = ({ children }) => {
 
       if (response.ok) {
         await AsyncStorage.multiRemove(['token', 'user']);
-
         setToken(null);
         setUser(null);
 
@@ -264,8 +306,6 @@ export const AuthProvider = ({ children }) => {
     isAuthenticated: !!token && !!user,
   };
 
-  // ALWAYS return JSX from provider - never return null
-  // Loading state is handled by the app navigator
   return (
     <AuthContext.Provider value={value}>
       {children}

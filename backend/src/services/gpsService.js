@@ -16,12 +16,6 @@ class GPSService {
       throw new Error('GPS credentials missing (GPS_TOKEN/GPS_EMAIL).');
     }
 
-    const requestMeta = {
-      apiUrl: this.apiUrl,
-      device_id: deviceId,
-      reg_no: regNo,
-    };
-
     let response;
     try {
       response = await axios.get(this.apiUrl, {
@@ -34,25 +28,13 @@ class GPSService {
         timeout: timeoutMs,
       });
     } catch (err) {
-      const status = err?.response?.status;
-      const data = err?.response?.data;
-      console.error('❌ GPS API request failed:', {
-        device_id: deviceId,
-        reg_no: regNo,
-        apiUrl: this.apiUrl,
-        status,
-        errorMessage: err?.message,
-        responseData: data ? String(data).slice(0, 500) : null,
-      });
+      console.error('GPS API request failed for bus:', regNo || deviceId);
       throw err;
     }
 
     // Provider payload has shown different shapes in the wild.
     // We normalize a few common variants so the worker can still persist locations.
     const payload = response?.data;
-
-    // Common status keys: payload.status, payload.success, payload?.data?.status
-    const providerStatus = payload?.status ?? payload?.success;
 
     // Common location containers: payload.data, payload.data.data, payload.data.locations[0]
     let providerData = null;
@@ -75,16 +57,6 @@ else {
     payload?.data?.location ??
     payload?.data;
 }
-console.log("PARSED PROVIDER DATA:", providerData);
-    // Log once per failure (redact credentials)
-    const logCtx = {
-      ...requestMeta,
-      providerStatus,
-      payloadKeys: payload ? Object.keys(payload) : null,
-      providerDataType: providerData && typeof providerData,
-    };
-
-    // If provider says success, but data fields are nested, still attempt parsing.
     const candidate = providerData;
 
     const pick = (obj, keys) => {
@@ -103,7 +75,6 @@ console.log("PARSED PROVIDER DATA:", providerData);
     const latitude = latitudeRaw !== undefined ? parseFloat(latitudeRaw) : NaN;
     const longitude = longitudeRaw !== undefined ? parseFloat(longitudeRaw) : NaN;
     const speed = speedRaw !== undefined && speedRaw !== null && speedRaw !== '' ? (parseFloat(speedRaw) || 0) : 0;
-console.log("RAW GPS RESPONSE:", response.data);
     const validCoords =
       Number.isFinite(latitude) &&
       Number.isFinite(longitude) &&
@@ -128,12 +99,7 @@ console.log("RAW GPS RESPONSE:", response.data);
       };
     }
 
-    console.warn('GPS API returned unusable response (no valid coords):', {
-      ...logCtx,
-      latitude,
-      longitude,
-      hasCandidate: !!candidate,
-    });
+    console.warn('GPS API returned unusable response (no valid coords)');
 
     return null;
   }

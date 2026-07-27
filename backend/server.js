@@ -1,5 +1,4 @@
 const { app, server } = require('./src/app');
-const { startDbDependentServices } = require('./src/services/startServices');
 
 const PORT = process.env.PORT || 5000;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -18,12 +17,5 @@ server.listen(PORT, HOST, () => {
   console.log(`Mobile access: http://${HOST}:${PORT} (ensure same WiFi network)`);
   console.log(`Health check: curl http://${HOST}:${PORT}/health`);
 
-  // Start DB-dependent background services safely after boot
-  startDbDependentServices()
-    .then(() => {
-      console.log('✅ DB-dependent services started successfully');
-    })
-    .catch((err) => {
-      console.error('❌ Failed to start DB-dependent services:', err);
-    });
+  // DB-dependent services are started by app.js
 });

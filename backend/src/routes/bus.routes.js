@@ -86,6 +86,13 @@ router.put(
   BusController.activateBus
 );
 
+router.put(
+  '/deactivate-bus/:busNo',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  BusController.deactivateBus
+);
+
 // combineBuses and uncombineBuses routes removed - functions not defined
 
 /**

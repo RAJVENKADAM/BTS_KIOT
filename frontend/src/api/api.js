@@ -1,24 +1,19 @@
 
 
+/**
+ * API configuration and health check utility.
+ * Defines the base URL for all backend API calls.
+ */
 export const API_BASE_URL = "https://bts-bus-tracking-system-2.onrender.com";
+//export const API_BASE_URL = "http://10.131.193.77:5000";
 
 export const healthCheck = async () => {
-  console.log("Attempting health check to:", `${API_BASE_URL}/health`);
   try {
     const res = await fetch(`${API_BASE_URL}/health`);
-    console.log("Health check response status:", res.status);
-
-    // SAFELY handle response
     const rawText = await res.text();
-    console.log("RAW HEALTH RESPONSE:", rawText);
-
-    const data = rawText ? JSON.parse(rawText) : {};
-    console.log("Health check response data:", data);
-    return data;
+    return rawText ? JSON.parse(rawText) : {};
   } catch (err) {
-    console.log("API BASE URL:", API_BASE_URL);
     console.error("Health check failed:", err.message);
-    console.error("Full error object:", err);
     throw err;
   }
 };

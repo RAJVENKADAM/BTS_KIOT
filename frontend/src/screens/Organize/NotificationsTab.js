@@ -8,13 +8,12 @@ import {
   ScrollView,
   RefreshControl,
   ActivityIndicator,
-  Modal,
-  TextInput,
 } from 'react-native';
-import { MaterialIcons, Ionicons } from '@expo/vector-icons';
+import { MaterialIcons } from '@expo/vector-icons';
 
 import { useAuth } from '../../context/AuthContext';
 import { API_BASE_URL } from '../../api/api';
+
 import { COLORS } from '../../theme';
 
 export default function NotificationsTab() {
@@ -95,8 +94,8 @@ export default function NotificationsTab() {
     try {
       await Promise.all(
         selectedBuses.map((bus) =>
-          fetch(`${API_BASE_URL}/api/bus/delete-bus/${bus}`, {
-            method: 'DELETE',
+          fetch(`${API_BASE_URL}/api/bus/deactivate-bus/${bus}`, {
+            method: 'PUT',
             headers: { Authorization: `Bearer ${token}` },
           })
         )

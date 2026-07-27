@@ -1,7 +1,6 @@
 const Bus = require('../models/Bus');
 const BusRoute = require('../models/BusRoute');
 const BusLiveLocation = require('../models/BusLiveLocation');
-const NotificationService = require('../services/notificationService');
 
 // ================= UPLOAD BUS ROUTES =================
 async function uploadBusRoutes(req, res) {
@@ -179,6 +178,23 @@ async function activateBus(req, res) {
   }
 }
 
+// ================= DEACTIVATE BUS =================
+async function deactivateBus(req, res) {
+  try {
+    const { busNo } = req.params;
+
+    await Bus.updateOne(
+      { bus_no: busNo.toUpperCase() },
+      { status: 'inactive' }
+    );
+
+    res.json({ message: 'Bus deactivated' });
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+}
+
 // ================= VALIDATE PREVIEW NUMBER =================
 async function validatePreviewNumber(req, res) {
   try {
@@ -220,15 +236,6 @@ async function updatePlan(req, res) {
       { current_plan: plan }
     );
 
-    await NotificationService.notifyBusUpdate({
-      actorId: req.user.id,
-      actionType: 'PLAN_CHANGED',
-      busNumbers: [busNo],
-      title: `Route Plan Updated`,
-      body: `Bus plan is now ${plan}`,
-      currentPlan: plan
-    });
-
     res.json({ 
       success: true, 
       message: 'Plan updated successfully',
@@ -267,18 +274,18 @@ async function getPlans(req, res) {
 async function getLiveLocation(req, res) {
   try {
     const { busNo } = req.params;
+    const normalizedBusNo = busNo.toUpperCase();
 
-    const bus = await Bus.findOne({
-      $or: [
-        { bus_no: busNo.toUpperCase() },
-        { preview_number: busNo }
-      ]
-    });
+    // ⚠️ FIX: Search ONLY by bus_no — never by preview_number.
+    // Using $or with preview_number could return a different bus
+    // if the searched busNo coincidentally matches another bus's preview_number.
+    const bus = await Bus.findOne({ bus_no: normalizedBusNo });
 
     if (!bus) {
       return res.status(404).json({
         success: false,
-        busNo,
+        busNo: normalizedBusNo,
+        error: 'Bus not found',
         latitude: null,
         longitude: null,
         speed: null,
@@ -288,9 +295,11 @@ async function getLiveLocation(req, res) {
 
     const location = await BusLiveLocation.findOne({ bus_id: bus._id });
 
-    res.status(location ? 200 : 404).json({
+    // Always return the bus_no that was requested for frontend validation
+    const responseData = {
       success: !!location,
       busNo: bus.bus_no,
+      bus_no: bus.bus_no,
       latitude: location?.latitude ?? null,
       longitude: location?.longitude ?? null,
       speed: location?.speed ?? 0,
@@ -298,7 +307,19 @@ async function getLiveLocation(req, res) {
       source: location?.source || 'offline',
       lastSuccessfulGpsUpdate: location?.lastSuccessfulGpsUpdate ?? null,
       lastUpdated: location?.lastSuccessfulGpsUpdate ?? location?.updatedAt ?? null
-    });
+    };
+
+    if (location) {
+      res.status(200).json(responseData);
+    } else {
+      // Bus exists in DB but has no live location document yet → treat as offline
+      res.status(200).json({
+        ...responseData,
+        success: true,
+        status: 'offline',
+        source: 'offline'
+      });
+    }
 
   } catch (error) {
     console.error('getLiveLocation error:', error);
@@ -349,6 +370,7 @@ module.exports = {
   getAllBuses,
   deleteBus,
   activateBus,
+  deactivateBus,
   validatePreviewNumber,
   updatePreviewNumber,
   updatePlan,

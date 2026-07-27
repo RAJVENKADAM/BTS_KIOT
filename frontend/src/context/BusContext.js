@@ -1,3 +1,8 @@
+/**
+ * BusContext — Global bus state management with socket.io real-time updates.
+ * Provides buses list, selected bus, live location, ETA, plan selection,
+ * and socket connection for live tracking updates.
+ */
 import React, { createContext, useContext, useReducer, useEffect, useState } from 'react';
 import io from 'socket.io-client';
 import { API_BASE_URL } from '../api/api';

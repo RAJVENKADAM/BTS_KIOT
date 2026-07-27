@@ -155,11 +155,31 @@ const deleteUserAccount = async (req, res) => {
 };
 
 const verifyToken = async (req, res) => {
-  // If we reach here, token is valid (middleware passed)
-  res.status(200).json({
-    valid: true,
-    user: req.user
-  });
+  try {
+    // If we reach here, token is valid (middleware passed)
+    // But we MUST also check if the user account is still active
+    // This catches deactivated users who still have valid tokens
+    const user = await User.findById(req.user.id).select('is_active deleted_by_user');
+
+    if (!user || !user.is_active || user.deleted_by_user) {
+      return res.status(403).json({
+        valid: false,
+        message: 'Account has been deactivated. Please contact admin.',
+        deactivated: true
+      });
+    }
+
+    res.status(200).json({
+      valid: true,
+      user: req.user
+    });
+  } catch (error) {
+    console.error('verifyToken error:', error);
+    res.status(500).json({
+      valid: false,
+      error: 'Internal server error'
+    });
+  }
 };
 
 module.exports = {

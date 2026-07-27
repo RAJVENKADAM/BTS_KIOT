@@ -1,3 +1,7 @@
+/**
+ * LoginScreen — User authentication screen.
+ * Handles email/password login via AuthContext, validates account status.
+ */
 import React, { useState } from 'react';
 import {
   View,
@@ -15,7 +19,7 @@ import Input from '../components/UI/Input';
 import Button from '../components/UI/Button';
 import { Header, Subtitle } from '../components/UI/Typography';
 
-export default function LoginScreen({ navigation }) {
+export default function LoginScreen() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isPasswordVisible, setIsPasswordVisible] = useState(false);

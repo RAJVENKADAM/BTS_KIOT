@@ -1,3 +1,7 @@
+/**
+ * excelManagementApi — CRUD operations for Excel uploads and user management.
+ * Used by AddUsersScreen for importing/managing users via Excel.
+ */
 import { API_BASE_URL } from './api';
 
 export const excelManagementApi = {

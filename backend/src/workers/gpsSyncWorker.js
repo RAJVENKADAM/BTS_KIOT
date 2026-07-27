@@ -85,81 +85,94 @@ class GpsSyncWorker {
       );
 
       console.log(
-        `⏱️ Cycle started at ${cycleStart.toISOString()} - buses=${buses.length}`
+        `GPS Sync Started - buses=${buses.length}`
       );
 
-      for (const bus of buses) {
-        const busId = bus._id;
+      // Fetch all buses concurrently using Promise.allSettled
+      const results = await Promise.allSettled(
+        buses.map(async (bus) => {
+          const busId = bus._id;
+          const regNo = bus.reg_no || busId;
 
-        let location = null;
+          let location = null;
 
-        try {
-          // 🔴 SINGLE API CALL ONLY (NO RETRY)
-          location = await gpsService.getLocationForBus(
-            bus.gps_device_id,
-            bus.reg_no,
-            {
-              timeoutMs: this.timeoutPerAttemptMs,
-            }
-          );
-        } catch (err) {
-          console.error(
-            `❌ GPS fetch failed for bus ${bus.reg_no || busId}:`,
-            err?.message || err
-          );
-        }
+          try {
+            location = await gpsService.getLocationForBus(
+              bus.gps_device_id,
+              bus.reg_no,
+              { timeoutMs: this.timeoutPerAttemptMs }
+            );
+          } catch (err) {
+            console.error(
+              `Bus ${regNo} Failed: ${err?.message || err}`
+            );
+            return { busId, regNo, location: null };
+          }
 
-        const now = new Date();
+          const now = new Date();
 
-        if (location) {
-          await BusLiveLocation.updateOne(
-            { bus_id: busId },
-            {
-              $set: {
-                latitude: location.latitude,
-                longitude: location.longitude,
-                speed: location.speed,
-
-                is_online: true,
-
-                lastSuccessfulGpsUpdate: now,
-                lastUpdated: now,
+          if (location) {
+            await BusLiveLocation.updateOne(
+              { bus_id: busId },
+              {
+                $set: {
+                  latitude: location.latitude,
+                  longitude: location.longitude,
+                  speed: location.speed,
+                  is_online: true,
+                  lastSuccessfulGpsUpdate: now,
+                  lastUpdated: now,
+                },
               },
-            },
-            { upsert: true }
-          );
+              { upsert: true }
+            );
+            console.log(`Bus ${regNo} Updated`);
+          } else {
+            // ❗ DO NOT mark offline on failure
+            await BusLiveLocation.updateOne(
+              { bus_id: busId },
+              {
+                $set: {
+                  lastUpdated: now,
+                },
+              },
+              { upsert: true }
+            );
+          }
+
+          // 🔵 time-based offline logic (safe)
+          try {
+            await updateOnlineStateBasedOnStaleness({
+              busId,
+              staleThresholdMs: this.staleThresholdMs,
+            });
+          } catch (e) {
+            console.error(
+              `staleness update failed for ${regNo}: ${e?.message || e}`
+            );
+          }
+
+          return { busId, regNo, location };
+        })
+      );
+
+      // Log failed buses individually
+      let successCount = 0;
+      let failCount = 0;
+      for (const result of results) {
+        if (result.status === 'fulfilled') {
+          successCount++;
         } else {
-          // ❗ DO NOT mark offline on failure
-          await BusLiveLocation.updateOne(
-            { bus_id: busId },
-            {
-              $set: {
-                lastUpdated: now,
-              },
-            },
-            { upsert: true }
-          );
+          failCount++;
+          console.error(`Bus ${result.reason?.regNo || 'unknown'} Failed: ${result.reason?.message || result.reason}`);
         }
-
-        // 🔵 time-based offline logic (safe)
-        try {
-          await updateOnlineStateBasedOnStaleness({
-            busId,
-            staleThresholdMs: this.staleThresholdMs,
-          });
-        } catch (e) {
-          console.error(
-            `staleness update failed for ${busId}:`,
-            e?.message || e
-          );
-        }
-
-        // optional tiny delay (prevents burst traffic)
-        await sleep(300);
       }
 
       console.log(
-        `🏁 gpsSyncWorker cycle finished at ${new Date().toISOString()}`
+        `GPS Sync Completed - success=${successCount}, failed=${failCount}`
+      );
+      console.log(
+        `Polling Time: ${new Date() - cycleStart}ms`
       );
     } finally {
       this.syncLock = false;

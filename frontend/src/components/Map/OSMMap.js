@@ -1,3 +1,8 @@
+/**
+ * OSMMap — OpenStreetMap Leaflet component rendered via WebView.
+ * Handles single bus marker display with pulsing animation,
+ * college marker, and real-time coordinate updates via postMessage.
+ */
 import React, { useRef, useEffect } from "react";
 import { WebView } from "react-native-webview";
 
@@ -24,6 +29,7 @@ export default function OSMMap({ busData, buses = [] }) {
         previewNumber: busData.previewNumber ?? busData.preview_number,
         latitude: busData.latitude,
         longitude: busData.longitude,
+        isOffline: busData._isOffline === true,
       };
       webRef.current.postMessage(JSON.stringify(singlePayload));
     }
@@ -43,7 +49,7 @@ export default function OSMMap({ busData, buses = [] }) {
     #map { width: 100%; height: 100%; }
     .leaflet-container { background: transparent; }
 
-    /* Pulsing ring for live buses */
+    /* Pulsing ring for live buses (green) */
     .bus-pulse {
       position: relative;
       width: 16px;
@@ -84,6 +90,29 @@ export default function OSMMap({ busData, buses = [] }) {
       transform: translate(-50%, -50%);
       box-shadow: 0 0 12px rgba(0, 200, 100, 0.55);
     }
+
+    /* OFFLINE marker (red) — no pulse, solid red dot */
+    .bus-offline {
+      position: relative;
+      width: 16px;
+      height: 16px;
+      border-radius: 999px;
+      background: rgba(220, 38, 38, 0.15);
+      border: 2px solid rgba(220, 38, 38, 0.85);
+      transform: translate(-50%, -50%);
+      box-sizing: border-box;
+    }
+
+    .bus-offline-dot {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: rgba(220, 38, 38, 0.95);
+      transform: translate(-50%, -50%);
+    }
   </style>
 </head>
 <body>
@@ -121,27 +150,40 @@ export default function OSMMap({ busData, buses = [] }) {
         return typeof x === 'number' && isFinite(x);
       }
 
-      function busIconHtml() {
+      function busIconHtml(offline) {
+        if (offline) {
+          return '<div class="bus-offline"><div class="bus-offline-dot"></div></div>';
+        }
         return '<div class="bus-pulse"><div class="bus-dot"></div></div>';
       }
 
-      function createBusMarker() {
+      function createBusMarker(offline) {
         var icon = L.divIcon({
           className: '',
-          html: busIconHtml(),
+          html: busIconHtml(offline),
           iconSize: [16, 16],
           iconAnchor: [8, 8],
         });
 
         var m = L.marker([initialLat, initialLng], { icon: icon, interactive: false });
         m.addTo(map);
+        m._isOffline = !!offline;
         return m;
       }
 
-      function upsertBusMarker(key, lat, lng) {
+      function upsertBusMarker(key, lat, lng, offline) {
         if (!isFiniteNumber(lat) || !isFiniteNumber(lng)) return;
-        if (!busMarkers[key]) busMarkers[key] = createBusMarker();
-        busMarkers[key].setLatLng([lat, lng]);
+        var marker = busMarkers[key];
+        if (!marker) {
+          busMarkers[key] = createBusMarker(offline);
+          marker = busMarkers[key];
+        } else if (!!marker._isOffline !== !!offline) {
+          // Offline state changed — recreate marker with correct icon
+          map.removeLayer(marker);
+          busMarkers[key] = createBusMarker(offline);
+          marker = busMarkers[key];
+        }
+        marker.setLatLng([lat, lng]);
       }
 
       function handleMessage(raw) {
@@ -163,7 +205,7 @@ export default function OSMMap({ busData, buses = [] }) {
           // Single bus payload
           if (data.type === 'BUS_LOCATION') {
             var keySingle = (data.busNo || data.bus_no || data.previewNumber || data.preview_number || 'single').toString();
-            upsertBusMarker(keySingle, data.latitude, data.longitude);
+            upsertBusMarker(keySingle, data.latitude, data.longitude, data.isOffline);
             // Focus strictly on the bus location
             focusMap(data.latitude, data.longitude);
             return;

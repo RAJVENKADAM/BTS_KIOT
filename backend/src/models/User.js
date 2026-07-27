@@ -45,6 +45,10 @@ const userSchema = new mongoose.Schema(
       ref: 'ExcelUpload',
       default: null
     },
+    is_temporary: {
+      type: Boolean,
+      default: false
+    },
     push_token: {
       type: String,
       default: null

@@ -30,7 +30,7 @@ function coerceYear(value) {
   const s = String(value).trim();
   if (!s) return null;
 
-  const match = s.match(/(19|20)\\d{2}/);
+  const match = s.match(/(19|20)\d{2}/);
   if (match) return parseInt(match[0], 10);
 
   const n = Number(s);
@@ -97,10 +97,19 @@ async function importUsers(req, res) {
         if (!isNonEmptyString(name)) throw new Error('Invalid name');
         if (!isNonEmptyString(email) || !isValidEmail(email)) throw new Error('Invalid email');
         if (!role) throw new Error('Invalid role');
-        if (!isNonEmptyString(mobile_no)) throw new Error('Invalid mobile_no');
-        if (!date_of_year) throw new Error('Invalid date_of_year');
 
-        // busno can be null for some roles? requirement says include; we'll allow empty => null
+        // mobile_no and date_of_year are now OPTIONAL for validation.
+        // If missing, we use defaults: phone="0000", dobYear=2000.
+        // The password becomes "00002000" which user must change on first login.
+        // This prevents ALL rows from failing due to missing optional fields.
+        if (!isNonEmptyString(mobile_no)) {
+          console.warn(`Row ${idx}: mobile_no missing for ${email}, using default`);
+        }
+        if (!date_of_year) {
+          console.warn(`Row ${idx}: date_of_year missing/invalid for ${email}, using default 2000`);
+        }
+
+        // busno can be null for some roles; we'll allow empty => null
         const bus_no = busno ? busno : null;
 
         return {
@@ -124,11 +133,14 @@ async function importUsers(req, res) {
       if (!r.ok) {
         summary.failedRows += 1;
         summary.rowResults.push({ index: r.idx, status: 'failed', reason: r.error });
+        console.error(`Row ${r.idx} validation failed:`, r.error, JSON.stringify(users[r.idx]));
       }
     }
 
     const goodRows = normalizedRows.filter((r) => r.ok).map((r) => r.value);
     if (!goodRows.length) {
+      console.error('All rows failed validation. First raw row sample:', JSON.stringify(users[0] || 'no rows'));
+      console.error('Validation results:', JSON.stringify(summary.rowResults));
       return res.status(400).json({ success: false, summary, error: 'All rows failed validation' });
     }
 
@@ -145,7 +157,9 @@ async function importUsers(req, res) {
       const email = row.email;
       const existing = existingByEmail.get(email);
 
-      const computedPassword = `${row.phone.replace(/\D/g, '').substring(0, 4)}${row.dobYear}`;
+      const phoneDigits = (row.phone || '').replace(/\D/g, '').substring(0, 4) || '0000';
+      const yearStr = row.dobYear ? String(row.dobYear) : '2000';
+      const computedPassword = `${phoneDigits}${yearStr}`;
       // IMPORTANT: We're using User.bulkWrite (no Mongoose pre('save') middleware runs),
       // so we must hash password_hash manually.
       const hashedPassword = await bcrypt.hash(computedPassword, 12);
@@ -155,10 +169,10 @@ async function importUsers(req, res) {
         email,
         role: row.role,
         bus_no: row.bus_no,
-        // password_hash required for create; for updates we only set if empty or temp behavior.
         password_hash: hashedPassword,
         is_active: true,
-        temp_password: false,
+        temp_password: true,
+        deleted_by_user: false,
       };
 
       if (!existing) {
@@ -206,33 +220,25 @@ async function importUsers(req, res) {
             bus_no: next.bus_no,
             is_active: true,
             password_hash: hashedPassword,
-            temp_password: false,
-
+            temp_password: true,
+            deleted_by_user: false,
           },
         },
       });
     }
 
     if (updates.length) {
-      // Link all touched/created users to this ExcelUpload so the cards show up.
-      const bulkExcelOps = updates.map((u) => ({
-        updateOne: {
-          filter: u.filter,
-          update: {
-            $set: { excel_upload_id: excelUpload._id },
-          },
-          upsert: false,
-        },
-      }));
-
-      if (bulkExcelOps.length) {
-        await User.bulkWrite(bulkExcelOps, { ordered: false });
-      }
-
+      // Combine field updates with excel_upload_id and is_temporary in a SINGLE bulkWrite
       const ops = updates.map((u) => ({
         updateOne: {
           filter: u.filter,
-          update: u.update,
+          update: {
+            $set: {
+              ...u.update.$set,
+              excel_upload_id: excelUpload._id,
+              is_temporary: true,
+            },
+          },
           upsert: true,
         },
       }));
@@ -242,6 +248,46 @@ async function importUsers(req, res) {
       // bulkWrite doesn't give unchanged counts; we already counted unchanged.
       summary.insertedRows = (result.upsertedCount || 0);
       summary.updatedRows = (result.modifiedCount || 0);
+    }
+
+    // FIX 1: Ensure "unchanged" users also get excel_upload_id set.
+    // Without this, when the ExcelUpload is deleted, these users would NOT be
+    // found by `User.deleteMany({ excel_upload_id: id })` and would survive deletion
+    // — creating inconsistent state.
+    const unchangedEmails = goodRows
+      .filter((row) => {
+        const existing = existingByEmail.get(row.email);
+        if (!existing) return false; // will be created, not unchanged
+        const keys = ['name', 'role', 'bus_no', 'is_active'];
+        const currentProjection = {
+          name: existing.name,
+          role: existing.role,
+          bus_no: existing.bus_no,
+          is_active: existing.is_active,
+        };
+        const desiredProjection = {
+          name: row.name,
+          role: row.role,
+          bus_no: row.bus_no,
+          is_active: true,
+        };
+        return shallowEqualA(currentProjection, desiredProjection, keys);
+      })
+      .map((row) => row.email);
+
+    if (unchangedEmails.length > 0) {
+      await User.updateMany(
+        { email: { $in: unchangedEmails } },
+        {
+          $set: {
+            excel_upload_id: excelUpload._id,
+            is_temporary: true,
+            is_active: true,
+            temp_password: true,
+            deleted_by_user: false,
+          },
+        }
+      );
     }
 
     // Failed rows count (from bulkWrite errors) isn't granular; attempt to detect duplicate key etc.

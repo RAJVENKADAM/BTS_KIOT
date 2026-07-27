@@ -1,3 +1,6 @@
+/**
+ * ExcelUploadCard — Displays an uploaded Excel file with edit/delete actions.
+ */
 import React from 'react';
 import {
   View,
@@ -6,8 +9,8 @@ import {
   StyleSheet,
   Alert,
 } from 'react-native';
-import { MaterialIcons, Ionicons } from '@expo/vector-icons';
-import { COLORS, SPACING, RADIUS, SHADOWS } from '../theme';
+import { MaterialIcons } from '@expo/vector-icons';
+import { COLORS } from '../theme';
 import { Body, MutedText } from './UI/Typography';
 import Card from './UI/Card';
 

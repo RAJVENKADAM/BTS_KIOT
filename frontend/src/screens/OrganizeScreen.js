@@ -1,3 +1,7 @@
+/**
+ * OrganizeScreen — Tab-based admin panel for managing Users and Buses.
+ * Contains tabs for AddUsersScreen and AddBusesScreen.
+ */
 import React, { useState } from 'react';
 import {
   View,
@@ -11,9 +15,7 @@ import { MaterialIcons } from '@expo/vector-icons';
 
 import AddUsersScreen from './Organize/AddUsersScreen';
 import AddBusesScreen from './Organize/AddBusesScreen';
-import NotificationsTab from './Organize/NotificationsTab';
-import { COLORS, SPACING, SHADOWS } from '../theme';
-import { Header, Subtitle } from '../components/UI/Typography';
+import { COLORS, SHADOWS } from '../theme';
 
 export default function OrganizeScreen() {
   const [activeTab, setActiveTab] = useState('users');

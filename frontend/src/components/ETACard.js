@@ -1,5 +1,9 @@
+/**
+ * ETACard — Displays estimated time and distance to a destination (college or user).
+ * Shows ETA badge, destination label, and moving indicator.
+ */
 import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, SPACING, RADIUS, SHADOWS } from '../theme';
 import { Body, MutedText } from './UI/Typography';

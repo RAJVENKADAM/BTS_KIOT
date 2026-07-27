@@ -22,15 +22,10 @@ async function startDbDependentServices() {
 
   console.log('✅ MongoDB connected. Starting GPS sync scheduler...');
 
-  // Non-secret env presence logs for GPS provider credentials
+  // Check GPS credentials exist (log yes/no only, never actual values)
   const hasToken = !!process.env.GPS_TOKEN;
   const hasEmail = !!process.env.GPS_EMAIL;
-  console.log('🔐 GPS env check:', {
-    GPS_TOKEN_set: hasToken,
-    GPS_EMAIL_set: hasEmail,
-    GPS_TOKEN_length: hasToken ? String(process.env.GPS_TOKEN).length : 0,
-    GPS_EMAIL_value_present: hasEmail,
-  });
+  console.log('🔐 GPS credentials configured:', hasToken && hasEmail);
   if (!hasToken || !hasEmail) {
     console.error('❌ GPS credentials missing. GPS sync will fail (check Render env vars).');
   }
@@ -48,4 +43,3 @@ async function startDbDependentServices() {
 module.exports = {
   startDbDependentServices,
 };
-

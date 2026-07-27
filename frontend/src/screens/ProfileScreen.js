@@ -1,3 +1,7 @@
+/**
+ * ProfileScreen — User profile view with account details and logout.
+ * Displays user info in cards: name, email, role, bus number.
+ */
 import React, { useState } from 'react';
 import {
   View,
@@ -10,8 +14,6 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { useNavigation } from '@react-navigation/native';
-import { CommonActions } from '@react-navigation/native';
 import { useAuth } from '../context/AuthContext';
 import { COLORS, SPACING, RADIUS, SHADOWS } from '../theme';
 import { Header, Subtitle, Body, MutedText } from '../components/UI/Typography';
@@ -19,7 +21,6 @@ import Card from '../components/UI/Card';
 
 export default function ProfileScreen() {
   const { user, logout, loading } = useAuth();
-  const navigation = useNavigation();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
 
   if (loading) {
@@ -46,15 +47,9 @@ export default function ProfileScreen() {
             setIsLoggingOut(true);
             try {
               await logout();
-              // Root navigator swaps screens based on AuthContext token state.
-              // Avoid dispatching a RESET to a nested navigator (causes "RESET was not handled").
-              // Navigation will update automatically once token is cleared.
-              navigation.dispatch(
-                CommonActions.reset({
-                  index: 0,
-                  routes: [{ name: 'Login' }],
-                })
-              );
+              // Navigation auto-switches to Login once token is cleared in AuthContext.
+              // No manual reset needed — dispatching RESET here causes 
+              // "The action 'RESET' was not handled by any navigator" error.
             } catch (error) {
               Alert.alert('Error', 'Failed to logout. Please try again.');
             } finally {

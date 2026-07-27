@@ -1,3 +1,8 @@
+/**
+ * BottomNavigator — Root navigation wrapper.
+ * Replaces the legacy bottom tab navigator with a simple HomeScreen pass-through
+ * to maintain navigation route compatiblity.
+ */
 import React from 'react';
 
 import HomeScreen from '../screens/HomeScreen';

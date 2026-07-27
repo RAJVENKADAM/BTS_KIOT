@@ -1,3 +1,7 @@
+/**
+ * importApi — Functions for importing users and bus routes via Excel JSON payloads.
+ * Used by AddUsersScreen and AddBusesScreen.
+ */
 import { API_BASE_URL } from './api';
 
 export async function importUsersExcelJson({ token, users, excelCustomName }) {
