@@ -12,3 +12,4 @@ web-build/
 *.mobileprovision
 template-files/*
 .expo/
+android/app/build/

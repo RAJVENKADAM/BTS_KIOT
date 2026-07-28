@@ -6,11 +6,9 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-
     "ios": {
       "supportsTablet": true
     },
-
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/icon.png",
@@ -21,14 +19,14 @@
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
         "ACCESS_BACKGROUND_LOCATION",
-        "FOREGROUND_SERVICE"
+        "FOREGROUND_SERVICE",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
       ]
     },
-
     "web": {
       "bundler": "metro"
     },
-
     "plugins": [
       "expo-location",
       "expo-font",
@@ -53,13 +51,11 @@
         }
       ]
     ],
-
     "extra": {
       "eas": {
-        "projectId": "b7982c40-9455-4bca-b42b-3a54dfa31dd7"
+        "projectId": "d2b0e413-8d33-4486-b0ca-4bbc2a04a5c4"
       }
     },
-
-    "owner": "rajvenkadams"
+    "owner": "rajvenkadam"
   }
 }
