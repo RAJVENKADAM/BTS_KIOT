@@ -40,6 +40,7 @@ async function importBusRoutes(req, res) {
       routesByPlan = null,
       // optional: allow flat routes too
       routes = null,
+      replaceRoutes = false,
     } = payload;
 
     if (!isNonEmptyString(busNo)) {
@@ -130,8 +131,26 @@ async function importBusRoutes(req, res) {
     }
 
     const good = normalizedStops.filter((r) => r.ok).map((r) => r.value);
-    if (!good.length) {
+
+    // Allow creating a bus with zero routes (no Excel uploaded yet).
+    // Only reject if routes were provided but ALL rows failed validation.
+    if (allStops.length > 0 && good.length === 0) {
       return res.status(400).json({ success: false, summary, error: 'All route rows failed validation' });
+    }
+
+    // If replaceRoutes is set, remove existing routes so edits fully replace old data.
+    if (replaceRoutes) {
+      await BusRoute.deleteMany({ bus_id: bus._id });
+    }
+
+    // Bus created/updated with no routes → success (routes can be added later).
+    if (!good.length) {
+      return res.status(200).json({
+        success: true,
+        busNo: normalizedBusNoValue,
+        previewNumber: bus.preview_number,
+        summary,
+      });
     }
 
     // Existing routes for upsert comparison

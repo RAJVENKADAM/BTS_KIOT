@@ -1,6 +1,7 @@
 const Bus = require('../models/Bus');
 const BusRoute = require('../models/BusRoute');
 const BusLiveLocation = require('../models/BusLiveLocation');
+const { getIO } = require('../socket');
 
 // ================= UPLOAD BUS ROUTES =================
 async function uploadBusRoutes(req, res) {
@@ -236,6 +237,17 @@ async function updatePlan(req, res) {
       { current_plan: plan }
     );
 
+    // Emit real-time plan change to all clients in the bus room
+    const io = getIO();
+    if (io) {
+      io.to(`bus_${busNo.toUpperCase()}`).emit('bus-update', {
+        busNo: busNo.toUpperCase(),
+        currentPlan: plan,
+        actionType: 'PLAN_CHANGED',
+        timestamp: new Date().toISOString(),
+      });
+    }
+
     res.json({ 
       success: true, 
       message: 'Plan updated successfully',
@@ -246,6 +258,98 @@ async function updatePlan(req, res) {
   } catch (error) {
     console.error('Update plan error:', error);
     res.status(500).json({ error: error.message });
+  }
+}
+
+// ================= GET BUS ROUTES (PLANS + STOPS) =================
+async function getBusRoutes(req, res) {
+  try {
+    const { busNo } = req.params;
+
+    const bus = await Bus.findOne({ bus_no: busNo.toUpperCase() });
+    if (!bus) {
+      return res.status(404).json({ success: false, error: `Bus ${busNo} not found` });
+    }
+
+    const routes = await BusRoute.find({ bus_id: bus._id })
+      .sort({ plan_name: 1, stop_order: 1 })
+      .lean();
+
+    const plansMap = {};
+    for (const r of routes) {
+      if (!plansMap[r.plan_name]) plansMap[r.plan_name] = [];
+      plansMap[r.plan_name].push({
+        stop_name: r.stop_name,
+        stop_order: r.stop_order,
+      });
+    }
+
+    res.json({
+      success: true,
+      busNo: bus.bus_no,
+      previewNumber: bus.preview_number,
+      currentPlan: bus.current_plan,
+      planNames: Object.keys(plansMap),
+      plans: plansMap,
+    });
+
+  } catch (error) {
+    console.error('getBusRoutes error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+}
+
+// ================= UPDATE BUS DETAILS =================
+async function updateBusDetails(req, res) {
+  try {
+    const { busNo } = req.params;
+    const { previewNumber, gpsDeviceId, regNo } = req.body;
+
+    const bus = await Bus.findOne({ bus_no: busNo.toUpperCase() });
+    if (!bus) {
+      return res.status(404).json({ success: false, error: `Bus ${busNo} not found` });
+    }
+
+    if (previewNumber !== undefined && previewNumber !== null) {
+      const exists = await Bus.findOne({
+        preview_number: previewNumber,
+        bus_no: { $ne: bus.bus_no },
+      });
+      if (exists) {
+        return res.status(400).json({ success: false, error: 'Preview number already in use' });
+      }
+      bus.preview_number = previewNumber;
+    }
+
+    if (gpsDeviceId !== undefined && gpsDeviceId !== null && gpsDeviceId !== '') {
+      const exists = await Bus.findOne({
+        gps_device_id: gpsDeviceId,
+        bus_no: { $ne: bus.bus_no },
+      });
+      if (exists) {
+        return res.status(400).json({ success: false, error: 'GPS device ID already in use' });
+      }
+      bus.gps_device_id = gpsDeviceId;
+    }
+
+    if (regNo !== undefined) bus.reg_no = regNo || null;
+
+    await bus.save();
+
+    res.json({
+      success: true,
+      message: 'Bus details updated successfully',
+      bus: {
+        busNo: bus.bus_no,
+        previewNumber: bus.preview_number,
+        gpsDeviceId: bus.gps_device_id,
+        regNo: bus.reg_no,
+      },
+    });
+
+  } catch (error) {
+    console.error('updateBusDetails error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 }
 
@@ -300,6 +404,8 @@ async function getLiveLocation(req, res) {
       success: !!location,
       busNo: bus.bus_no,
       bus_no: bus.bus_no,
+      currentPlan: bus.current_plan,
+      previewNumber: bus.preview_number,
       latitude: location?.latitude ?? null,
       longitude: location?.longitude ?? null,
       speed: location?.speed ?? 0,
@@ -346,10 +452,13 @@ async function trackByPreview(req, res) {
 
     const location = await BusLiveLocation.findOne({ bus_id: bus._id });
 
-    res.status(location ? 200 : 404).json({
-      success: !!location,
+    // Bus found → always return 200 with offline status if no location doc,
+    // so the frontend can show the bus's plan even when GPS is offline.
+    res.status(200).json({
+      success: true,
       busNo: bus.bus_no,
       previewNumber: bus.preview_number,
+      currentPlan: bus.current_plan,
       latitude: location?.latitude ?? null,
       longitude: location?.longitude ?? null,
       speed: location?.speed ?? 0,
@@ -374,6 +483,8 @@ module.exports = {
   validatePreviewNumber,
   updatePreviewNumber,
   updatePlan,
+  updateBusDetails,
+  getBusRoutes,
   getPlans,
   getLiveLocation,
   trackByPreview

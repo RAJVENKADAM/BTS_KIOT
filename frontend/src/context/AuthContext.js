@@ -48,9 +48,20 @@ export const AuthProvider = ({ children }) => {
         const response = await fetch(`${API_BASE_URL}/api/auth/verify`, {
           headers: { Authorization: `Bearer ${token}` },
         });
+
+        // Any non-OK status (401/403) means the token is invalid or expired.
+        // Force logout so the user can sign in again and get a fresh token.
+        if (!response.ok) {
+          console.log('Session invalid — token rejected by server. Logging out.');
+          await AsyncStorage.multiRemove(['token', 'user']);
+          setToken(null);
+          setUser(null);
+          return;
+        }
+
         const data = await response.json();
         if (data.deactivated === true || data.valid === false) {
-          console.log('Session invalid — account deactivated. Logging out.');
+          console.log('Session invalid — account deactivated or token expired. Logging out.');
           await AsyncStorage.multiRemove(['token', 'user']);
           setToken(null);
           setUser(null);
@@ -84,6 +95,15 @@ export const AuthProvider = ({ children }) => {
           const verifyRes = await fetch(`${API_BASE_URL}/api/auth/verify`, {
             headers: { Authorization: `Bearer ${storedToken}` },
           });
+
+          // Non-OK response (401/403) means the stored token is invalid/expired.
+          // Clear the session and send the user to the login screen.
+          if (!verifyRes.ok) {
+            console.log('Stored token rejected on startup — clearing session.');
+            await AsyncStorage.multiRemove(['token', 'user']);
+            return;
+          }
+
           const verifyData = await verifyRes.json();
 
           if (verifyData.deactivated === true || verifyData.valid === false) {

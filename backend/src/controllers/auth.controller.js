@@ -182,10 +182,67 @@ const verifyToken = async (req, res) => {
   }
 };
 
+/**
+ * Public token verification — never throws a bare 403.
+ * Used by the frontend's periodic session check so it can distinguish:
+ *   - invalid/expired token  → 200 { valid: false }
+ *   - deactivated account    → 200 { valid: false, deactivated: true }
+ *   - valid session          → 200 { valid: true }
+ * This prevents the "403 loop" where the app can't detect an invalid token
+ * because the raw middleware error doesn't include a parseable `valid` field.
+ */
+const verifyTokenPublic = async (req, res) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (!token) {
+      return res.status(200).json({ valid: false });
+    }
+
+    let payload;
+    try {
+      payload = jwt.verify(token, process.env.JWT_SECRET);
+    } catch (err) {
+      // Invalid or expired token — graceful, parseable response
+      return res.status(200).json({ valid: false });
+    }
+
+    // Normalize IDs from the JWT payload
+    const normalized = { ...payload };
+    if (normalized && normalized.id != null) {
+      normalized.id = String(normalized.id);
+    }
+
+    // Check that the account is still active
+    const user = await User.findById(normalized.id).select('is_active deleted_by_user');
+
+    if (!user || !user.is_active || user.deleted_by_user) {
+      return res.status(200).json({
+        valid: false,
+        message: 'Account has been deactivated. Please contact admin.',
+        deactivated: true
+      });
+    }
+
+    res.status(200).json({
+      valid: true,
+      user: normalized
+    });
+  } catch (error) {
+    console.error('verifyTokenPublic error:', error);
+    res.status(500).json({
+      valid: false,
+      error: 'Internal server error'
+    });
+  }
+};
+
 module.exports = {
   login,
   getProfile,
   logout,
   deleteUserAccount,
-  verifyToken
+  verifyToken,
+  verifyTokenPublic
 };

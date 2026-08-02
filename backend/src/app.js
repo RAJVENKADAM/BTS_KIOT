@@ -52,7 +52,8 @@ const io = socketIo(server, {
 setIO(io);
 
 // Socket.IO handlers for bus room events.
-// Mobile tracking feature removed - GPS sync is handled exclusively by gpsSyncWorker.
+const { registerTrackSocketHandlers } = require('./socket/trackSocket');
+registerTrackSocketHandlers();
 
 // Start GPS worker only after MongoDB is ready
 try {

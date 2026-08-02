@@ -70,6 +70,52 @@ export const busApi = {
     return response.json();
   },
 
+  // Get plans + stops for a bus (current plan, plan names, all stops)
+  getBusRoutes: async (token, busNo) => {
+    const response = await fetch(`${API_BASE_URL}/api/bus/routes/${busNo}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+      throw new Error(data.error || 'Failed to load routes');
+    }
+    return data;
+  },
+
+  // Change the current plan (superadmin)
+  updatePlan: async (token, busNo, plan) => {
+    const response = await fetch(`${API_BASE_URL}/api/bus/update-plan/${busNo}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ plan }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+      throw new Error(data.error || 'Failed to update plan');
+    }
+    return data;
+  },
+
+  // Update bus details (preview number, GPS device id, reg no)
+  updateBusDetails: async (token, busNo, payload) => {
+    const response = await fetch(`${API_BASE_URL}/api/bus/update-bus-details/${busNo}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+      throw new Error(data.error || 'Failed to update bus');
+    }
+    return data;
+  },
+
 };
 
 // Export for convenience

@@ -47,6 +47,10 @@ import {
   StatusBar,
   Platform,
   TouchableOpacity,
+  Modal,
+  ScrollView,
+  ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -92,6 +96,14 @@ const HomeScreen = () => {
   const [locationStatus, setLocationStatus] = useState('idle');
   const [markerStatus, setMarkerStatus] = useState('moving');
   const [isOffline, setIsOffline] = useState(false);
+
+  // Plan / routes modal state
+  const [routesData, setRoutesData] = useState(null);
+  const [showStopsModal, setShowStopsModal] = useState(false);
+  const [activePlanTab, setActivePlanTab] = useState('PLAN A');
+  const [loadingRoutes, setLoadingRoutes] = useState(false);
+  // True once the searched/selected bus is confirmed to exist (even offline / no GPS)
+  const [isBusFound, setIsBusFound] = useState(false);
 
 const lastCoordinateRef = useRef(null);
   const sameCoordinateCountRef = useRef(0);
@@ -144,6 +156,32 @@ const lastCoordinateRef = useRef(null);
     return () => { socket.emit('leave-bus', selectedBusNo); };
   }, [socket, selectedBusNo]);
 
+  // Load plans + stops for the selected bus (for the bottom sheet plan chip + modal)
+  useEffect(() => {
+    if (!selectedBusNo || !token) return;
+    let cancelled = false;
+    setLoadingRoutes(true);
+    busApi
+      .getBusRoutes(token, selectedBusNo)
+      .then((data) => {
+        if (cancelled) return;
+        setRoutesData(data);
+        setIsBusFound(true);
+        setActivePlanTab(data.currentPlan || data.planNames?.[0] || 'PLAN A');
+        // Ensure busData reflects the latest currentPlan
+        setBusData((prev) => {
+          if (!prev) return { busNo: selectedBusNo, currentPlan: data.currentPlan };
+          if (prev.currentPlan && prev.currentPlan !== data.currentPlan) return prev;
+          return { ...prev, currentPlan: data.currentPlan };
+        });
+      })
+      .catch((e) => console.log('Failed to load routes:', e.message))
+      .finally(() => {
+        if (!cancelled) setLoadingRoutes(false);
+      });
+    return () => { cancelled = true; };
+  }, [selectedBusNo, token]);
+
   useEffect(() => {
     if (!socket) return;
     const handleBusUpdate = (data) => {
@@ -159,6 +197,9 @@ const lastCoordinateRef = useRef(null);
         if (!prev) return { busNo: selected, currentPlan: newPlan, _updatedAt: Date.now() };
         return { ...prev, currentPlan: newPlan, _updatedAt: Date.now() };
       });
+      // Keep plan modal state in sync with live plan changes
+      setRoutesData((prevRoutes) => prevRoutes ? { ...prevRoutes, currentPlan: newPlan } : prevRoutes);
+      setActivePlanTab(newPlan);
     };
     socket.on('bus-update', handleBusUpdate);
     return () => socket.off('bus-update', handleBusUpdate);
@@ -248,6 +289,9 @@ const lastCoordinateRef = useRef(null);
         && Number.isFinite(Number(data.latitude)) && Number.isFinite(Number(data.longitude))
         && data.latitude !== 'NaN' && data.longitude !== 'NaN';
 
+      // Bus is "found" if backend returned a bus identifier (even when offline/no GPS)
+      const foundInBackend = !!(data && (data.busNo || data.bus_no || data.busNumber));
+
       // 1. Check GPS timestamp staleness FIRST (most reliable)
       const staleGps = isGpsStale(data);
 
@@ -260,12 +304,15 @@ if (staleGps) {
           setBusData({ ...data, source: data.source || 'gps' });
           setLastGoodLocation({ ...data, source: data.source || 'gps' });
           setNoBusFound(false);
+          setIsBusFound(true);
         } else if (lastGoodLocation) {
           setBusData(lastGoodLocation);
           setNoBusFound(false);
+          setIsBusFound(true);
         } else {
           setBusData(null);
-          setNoBusFound(true);
+          setNoBusFound(!foundInBackend);
+          setIsBusFound(foundInBackend);
         }
       } else if (hasValidCoords) {
         // Fresh GPS with valid coords → live
@@ -275,16 +322,18 @@ if (staleGps) {
         setLocationStatus('live');
         setIsOffline(false);
         setNoBusFound(false);
+        setIsBusFound(true);
         const statusFromAPI = data.busState;
         const statusFromCoordinates = detectBusStatus(data.latitude, data.longitude);
         setMarkerStatus(chooseBusStatus(statusFromAPI, statusFromCoordinates));
       } else {
-        // No valid coords and no lastKnownLocation
+        // No valid coords — bus may still exist (offline) → keep plan visible
         setBusData(null);
         setLastGoodLocation(null);
-        setLocationStatus('error');
-        setNoBusFound(true);
-        setIsOffline(false);
+        setLocationStatus('offline');
+        setIsOffline(true);
+        setNoBusFound(!foundInBackend);
+        setIsBusFound(foundInBackend);
       }
     } catch (err) {
       console.log('Refresh error:', err.message);
@@ -292,6 +341,7 @@ if (staleGps) {
         setBusData(lastGoodLocation);
         setLocationStatus('offline');
         setIsOffline(true);
+        setIsBusFound(true);
       } else {
         setLocationStatus('error');
         setNoBusFound(true);
@@ -315,6 +365,8 @@ if (staleGps) {
     setIsOffline(false);
     setBusData(null);
     setLastGoodLocation(null);
+    setIsBusFound(false);
+    setRoutesData(null);
     sameCoordinateCountRef.current = 0;
     lastCoordinateRef.current = null;
     if (isAdmin) setIsSuperadminSearched(true);
@@ -327,15 +379,20 @@ if (staleGps) {
         
         // ⚠️ FIX: Ignore stale response from previous search
         if (currentSearch !== searchCounterRef.current) return;
-        
-        if (!data || data.error || data.latitude == null || data.longitude == null) {
-          throw new Error(data?.error || 'No live data for this preview number');
+
+        if (!data || data.error || !(data.busNo || data.bus_no)) {
+          throw new Error(data?.error || 'No bus found for this preview number');
         }
         const nextBusNo = data.busNo || data.bus_no || null;
         setSelectedBusNo(nextBusNo);
+        setIsBusFound(true);
+
+        // Bus found — always show plan. GPS may be offline/missing.
+        const hasPreviewCoords = data.latitude != null && data.longitude != null
+          && Number.isFinite(Number(data.latitude)) && Number.isFinite(Number(data.longitude));
 
         // Check GPS staleness
-        if (isGpsStale(data)) {
+        if (isGpsStale(data) || !hasPreviewCoords) {
           setBusData({ ...data, previewNumber: query, busNo: nextBusNo });
           setLastGoodLocation({ ...data, previewNumber: query, busNo: nextBusNo });
           setLocationStatus('offline');
@@ -358,6 +415,8 @@ if (staleGps) {
         setSelectedPreviewNumber(null);
         setBusData(null);
         setLastGoodLocation(null);
+        setIsBusFound(false);
+        setRoutesData(null);
         setLocationStatus('error');
         setNoBusFound(true);
       }
@@ -365,6 +424,7 @@ if (staleGps) {
       const busNo = query.toUpperCase();
       setSelectedPreviewNumber(null);
       setSelectedBusNo(busNo);
+      setIsBusFound(true); // Optimistic — will be confirmed by API
 
       try {
         const data = await busApi.getBusLocation(token, busNo);
@@ -396,11 +456,16 @@ if (staleGps) {
             setMarkerStatus(chooseBusStatus(statusFromAPI, statusFromCoordinates) || 'moving');
           }
         } else {
+          // Bus found but no valid live coords → show offline + plan.
+          // (getBusLocation throws only when bus doesn't exist, so reaching
+          // here means the bus exists but GPS is offline/missing.)
           console.log('No valid location for bus search:', data);
           setBusData(null);
           setLastGoodLocation(null);
-          setLocationStatus('error');
-          setNoBusFound(true);
+          setLocationStatus('offline');
+          setIsOffline(true);
+          setIsBusFound(true);
+          setNoBusFound(false);
         }
       } catch (err) {
         console.log('Bus search error:', err.message);
@@ -408,6 +473,8 @@ if (staleGps) {
         if (currentSearch !== searchCounterRef.current) return;
         setBusData(null);
         setLastGoodLocation(null);
+        setIsBusFound(false);
+        setRoutesData(null);
         setLocationStatus('error');
         setNoBusFound(true);
       }
@@ -452,6 +519,43 @@ if (staleGps) {
       </View>
     );
   }, [displayBusData, displayBusLabel, markerStatus, isOffline]);
+
+  // Standalone Plan card — always visible once a bus is found, even if offline / no GPS coords.
+  const planCardContent = React.useMemo(() => {
+    if (!isBusFound && !routesData) return null;
+    const currentPlan = displayBusData?.currentPlan || routesData?.currentPlan || 'PLAN A';
+    const hasPlanStops = !!routesData?.planNames?.length;
+    const isOfflineMode = isOffline || !displayBusData;
+    return (
+      <View style={styles.planCard}>
+        {isOfflineMode && (
+          <View style={styles.lastPlanNote}>
+            <Ionicons name="information-circle-outline" size={16} color={COLORS.textBody} />
+            <Text style={styles.lastPlanNoteText}>
+              {routesData && !hasPlanStops
+                ? 'No stops uploaded for this bus yet.'
+                : `The bus's last plan is ${currentPlan}`}
+            </Text>
+          </View>
+        )}
+        <TouchableOpacity
+          style={styles.planChip}
+          onPress={() => setShowStopsModal(true)}
+          activeOpacity={0.7}
+        >
+          <Ionicons name="map-outline" size={16} color={COLORS.primary} />
+          <Text style={styles.planChipLabel}>Current Plan</Text>
+          <Text style={styles.planChipValue}>{currentPlan}</Text>
+          <Ionicons name="chevron-forward" size={16} color={COLORS.primary} />
+        </TouchableOpacity>
+        {!hasPlanStops && isAdmin && (
+          <Text style={styles.planEmptyHint}>
+            Go to Organize → Buses → Edit Routes to upload a routes Excel.
+          </Text>
+        )}
+      </View>
+    );
+  }, [isBusFound, routesData, displayBusData, isOffline, isAdmin]);
 
   return (
     <View style={styles.container}>
@@ -545,7 +649,7 @@ if (staleGps) {
                 <Text style={[styles.infoText, styles.errorText]}>Bus Not Found</Text>
                 <Text style={[styles.infoText, styles.subInfoText]}>Showing KIOT campus location.</Text>
               </View>
-            ) : isBusSearchAttempted && !displayBusData ? (
+            ) : isBusSearchAttempted && !displayBusData && !isBusFound && !routesData ? (
               <View>
                 <Text style={[styles.infoText, styles.errorText]}>Bus Not Found</Text>
                 <Text style={[styles.infoText, styles.subInfoText]}>Showing KIOT campus location.</Text>
@@ -558,17 +662,129 @@ if (staleGps) {
                     ? `Tracking your bus ${user.bus_no}...`
                     : 'No bus assigned'}
               </Text>
-            ) : displayBusData ? (
-              busCardContent
-            ) : locationStatus === 'loading' ? (
+            ) : locationStatus === 'loading' && !routesData ? (
               <Text style={styles.infoText}>Loading live location...</Text>
+            ) : displayBusData ? (
+              <>
+                {busCardContent}
+                {planCardContent}
+              </>
             ) : (
-              <Text style={styles.infoText}>No location data available</Text>
+              <>
+                {planCardContent}
+                {!displayBusData && isBusFound && (
+                  <Text style={[styles.infoText, styles.offlineNote, { marginTop: 12 }]}>
+                    Bus is offline or no live GPS available right now.
+                  </Text>
+                )}
+              </>
             )}
           </View>
         </BottomSheetView>
       </BottomSheet>
 
+      {/* ============ PLANS / STOPS MODAL ============ */}
+      <Modal
+        visible={showStopsModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowStopsModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <View>
+                <Text style={styles.modalTitle}>Bus {displayBusLabel}</Text>
+                <Text style={styles.modalSubtitle}>Plans & Stops</Text>
+              </View>
+              <TouchableOpacity
+                onPress={() => setShowStopsModal(false)}
+                style={styles.modalCloseBtn}
+              >
+                <Ionicons name="close" size={24} color={COLORS.textBody} />
+              </TouchableOpacity>
+            </View>
+
+            {loadingRoutes ? (
+              <ActivityIndicator color={COLORS.primary} style={{ marginVertical: 30 }} />
+            ) : !routesData || !routesData.planNames?.length ? (
+              <View style={styles.noPlansBox}>
+                <Text style={styles.noPlansText}>
+                  No plans uploaded for this bus yet.
+                </Text>
+                {isAdmin && (
+                  <Text style={styles.noPlansHint}>
+                    Go to Organize → Buses → Edit Routes to upload a routes Excel.
+                  </Text>
+                )}
+              </View>
+            ) : (
+              <>
+                {/* Plan selector tabs */}
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  style={styles.planTabs}
+                  contentContainerStyle={styles.planTabsContent}
+                >
+                  {routesData.planNames.map((plan) => {
+                    const isActive = plan === activePlanTab;
+                    const isCurrent = plan === (routesData.currentPlan || displayBusData?.currentPlan);
+                    return (
+                      <TouchableOpacity
+                        key={plan}
+                        style={[styles.planTab, isActive && styles.planTabActive]}
+                        onPress={() => setActivePlanTab(plan)}
+                      >
+                        <Text style={[styles.planTabText, isActive && styles.planTabTextActive]}>
+                          {plan}
+                        </Text>
+                        {isCurrent && (
+                          <View style={styles.currentDot} />
+                        )}
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+
+                {/* Admin: change current plan */}
+                {isAdmin && routesData.planNames.length > 1 && (
+                  <TouchableOpacity
+                    style={styles.changePlanBtn}
+                    onPress={async () => {
+                      if (activePlanTab === (routesData.currentPlan || displayBusData?.currentPlan)) return;
+                      try {
+                        await busApi.updatePlan(token, selectedBusNo, activePlanTab);
+                        setRoutesData((prev) => ({ ...prev, currentPlan: activePlanTab }));
+                        setBusData((prev) => ({ ...prev, currentPlan: activePlanTab }));
+                      } catch (e) {
+                        Alert.alert('Failed', e.message);
+                      }
+                    }}
+                  >
+                    <Ionicons name="swap-horizontal" size={16} color="#fff" />
+                    <Text style={styles.changePlanBtnText}>
+                      Set "{activePlanTab}" as Current Plan
+                    </Text>
+                  </TouchableOpacity>
+                )}
+
+                {/* Stops for active plan */}
+                <ScrollView style={styles.stopsList}>
+                  {(routesData.plans[activePlanTab] || []).map((stop, idx) => (
+                    <View key={`${activePlanTab}-${idx}`} style={styles.stopRow}>
+                      <View style={styles.stopIndex}>
+                        <Text style={styles.stopIndexText}>{idx + 1}</Text>
+                      </View>
+                      <Text style={styles.stopName}>{stop.stop_name}</Text>
+                    </View>
+                  ))}
+                </ScrollView>
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 };
@@ -798,5 +1014,190 @@ iconButtonPrimary: {
   etaSubtext: {
     fontSize: 12,
     color: COLORS.textBody,
+  },
+
+  // plan chip
+  planCard: {
+    backgroundColor: COLORS.white,
+    borderRadius: 12,
+    padding: 12,
+    marginTop: 10,
+    ...SHADOWS.soft,
+  },
+  lastPlanNote: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 8,
+  },
+  lastPlanNoteText: {
+    flex: 1,
+    fontSize: 12,
+    color: COLORS.textBody,
+    fontWeight: '500',
+  },
+  planEmptyHint: {
+    fontSize: 11,
+    color: COLORS.textBody,
+    marginTop: 8,
+    textAlign: 'center',
+    opacity: 0.8,
+  },
+  planChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EEF2FF',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 8,
+  },
+  planChipLabel: {
+    fontSize: 13,
+    color: COLORS.textBody,
+    fontWeight: '500',
+  },
+  planChipValue: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '700',
+    color: COLORS.primary,
+    textTransform: 'uppercase',
+  },
+
+  // stops modal
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'flex-end',
+  },
+  modalContent: {
+    backgroundColor: COLORS.white,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 30,
+    maxHeight: '75%',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: COLORS.textHeader,
+  },
+  modalSubtitle: {
+    fontSize: 13,
+    color: COLORS.textBody,
+    marginTop: 2,
+  },
+  modalCloseBtn: {
+    padding: 6,
+  },
+  planTabs: {
+    flexGrow: 0,
+    marginBottom: 12,
+  },
+  planTabsContent: {
+    gap: 8,
+    paddingVertical: 4,
+  },
+  planTab: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: COLORS.inputBg,
+    borderWidth: 1,
+    borderColor: 'transparent',
+    gap: 6,
+  },
+  planTabActive: {
+    backgroundColor: '#EEF2FF',
+    borderColor: COLORS.primary,
+  },
+  planTabText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.textBody,
+    textTransform: 'uppercase',
+  },
+  planTabTextActive: {
+    color: COLORS.primary,
+  },
+  currentDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: COLORS.success,
+  },
+  changePlanBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.primary,
+    borderRadius: 10,
+    paddingVertical: 10,
+    gap: 8,
+    marginBottom: 12,
+  },
+  changePlanBtnText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  stopsList: {
+    flexGrow: 0,
+  },
+  stopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  stopIndex: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#EEF2FF',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  stopIndexText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.primary,
+  },
+  stopName: {
+    fontSize: 15,
+    fontWeight: '500',
+    color: COLORS.textHeader,
+    flex: 1,
+  },
+  noPlansBox: {
+    alignItems: 'center',
+    paddingVertical: 30,
+    paddingHorizontal: 20,
+  },
+  noPlansText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: COLORS.textBody,
+    textAlign: 'center',
+  },
+  noPlansHint: {
+    fontSize: 13,
+    color: COLORS.textBody,
+    textAlign: 'center',
+    marginTop: 8,
+    opacity: 0.8,
   },
 });

@@ -15,7 +15,7 @@
     "@react-navigation/bottom-tabs": "6",
     "@react-navigation/native": "6",
     "@react-navigation/stack": "6",
-    "expo": "~56.0.17",
+    "expo": "~56.0.18",
     "expo-build-properties": "~56.0.24",
     "expo-dev-client": "~56.0.24",
     "expo-document-picker": "~56.0.4",

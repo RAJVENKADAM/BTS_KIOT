@@ -58,6 +58,20 @@ router.put(
   BusController.updatePlan   // IMPORTANT FIX
 );
 
+router.put(
+  '/update-bus-details/:busNo',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  BusController.updateBusDetails
+);
+
+// Any authenticated user can fetch plans + stops for a bus (Home screen)
+router.get(
+  '/routes/:busNo',
+  authenticateToken,
+  BusController.getBusRoutes
+);
+
 router.get(
   '/plans/:busNo',
   authenticateToken,
