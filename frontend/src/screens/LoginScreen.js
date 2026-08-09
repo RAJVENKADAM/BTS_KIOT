@@ -2,7 +2,7 @@
  * LoginScreen — User authentication screen.
  * Handles email/password login via AuthContext, validates account status.
  */
-import React, { useState } from 'react';
+import React, { useState } from "react";
 import {
   View,
   StyleSheet,
@@ -10,49 +10,52 @@ import {
   KeyboardAvoidingView,
   Platform,
   StatusBar,
-} from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { Ionicons } from '@expo/vector-icons';
-import { useAuth } from '../context/AuthContext';
-import { COLORS, SPACING } from '../theme';
-import Input from '../components/UI/Input';
-import Button from '../components/UI/Button';
-import { Header, Subtitle } from '../components/UI/Typography';
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { Ionicons } from "@expo/vector-icons";
+import { useAuth } from "../context/AuthContext";
+import { COLORS, SPACING } from "../theme";
+import Input from "../components/UI/Input";
+import Button from "../components/UI/Button";
+import { Header, Subtitle } from "../components/UI/Typography";
 
 export default function LoginScreen() {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [isPasswordVisible, setIsPasswordVisible] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState("");
 
   const { login } = useAuth();
 
   const handleLogin = async () => {
     if (!email.trim() || !password.trim()) {
-      setError('Please fill in all fields');
+      setError("Please fill in all fields");
       return;
     }
 
     setLoading(true);
-    setError('');
+    setError("");
 
     try {
       const result = await login(email.trim(), password);
 
       if (result.success) {
         const userData = result.data.user;
-        if (userData.role.toLowerCase() !== 'superadmin' && !userData.is_active) {
-          setError('Account inactive. Contact support.');
+        if (
+          userData.role.toLowerCase() !== "superadmin" &&
+          !userData.is_active
+        ) {
+          setError("Account inactive. Contact support.");
           setLoading(false);
           return;
         }
         // Token saved in AuthContext → AppNavigator auto-switches to Home
       } else {
-        setError(result.error || 'Invalid email or password');
+        setError(result.error || "Invalid email or password");
       }
     } catch (err) {
-      setError('Unable to connect. Please check your internet.');
+      setError("Unable to connect. Please check your internet.");
     } finally {
       setLoading(false);
     }
@@ -62,7 +65,7 @@ export default function LoginScreen() {
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="dark-content" />
       <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
         style={{ flex: 1 }}
       >
         <ScrollView
@@ -70,9 +73,6 @@ export default function LoginScreen() {
           showsVerticalScrollIndicator={false}
         >
           <View style={styles.header}>
-            <View style={styles.logoPlaceholder}>
-              <Ionicons name="flash" size={40} color={COLORS.primary} />
-            </View>
             <Header>Welcome To BTS</Header>
             <Subtitle>Sign in to continue your progress</Subtitle>
           </View>
@@ -104,14 +104,16 @@ export default function LoginScreen() {
               onChangeText={setPassword}
               secureTextEntry={!isPasswordVisible}
               editable={!loading}
-              rightIcon={password.length > 0 ? (
-                <Ionicons
-                  name={isPasswordVisible ? "eye-off-outline" : "eye-outline"}
-                  size={20}
-                  color={COLORS.textBody}
-                  onPress={() => setIsPasswordVisible(!isPasswordVisible)}
-                />
-              ) : null}
+              rightIcon={
+                password.length > 0 ? (
+                  <Ionicons
+                    name={isPasswordVisible ? "eye-off-outline" : "eye-outline"}
+                    size={20}
+                    color={COLORS.textBody}
+                    onPress={() => setIsPasswordVisible(!isPasswordVisible)}
+                  />
+                ) : null
+              }
             />
 
             <Button
@@ -136,40 +138,39 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     paddingHorizontal: SPACING.screenPadding,
     paddingBottom: 40,
-    justifyContent: 'center',
+    justifyContent: "center",
   },
   header: {
-    alignItems: 'center',
+    alignItems: "center",
     marginBottom: 40,
   },
   logoPlaceholder: {
     width: 80,
     height: 80,
     borderRadius: 20,
-    backgroundColor: '#EEF2FF',
-    justifyContent: 'center',
-    alignItems: 'center',
+    backgroundColor: "#EEF2FF",
+    justifyContent: "center",
+    alignItems: "center",
     marginBottom: 20,
   },
   form: {
-    width: '100%',
+    width: "100%",
   },
   errorBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#FEF2FF',
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#FEF2FF",
     padding: 12,
     borderRadius: 12,
     marginBottom: 20,
     borderWidth: 1,
-    borderColor: '#FEE2E2',
+    borderColor: "#FEE2E2",
   },
   errorText: {
     color: COLORS.error,
     fontSize: 14,
     marginLeft: 8,
     marginBottom: 0,
-    fontWeight: '500',
+    fontWeight: "500",
   },
 });
-

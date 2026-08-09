@@ -35,7 +35,6 @@ export default function OSMMap({ busData, buses = [] }) {
     }
   }, [busData]);
 
-
   const html = `
 <!DOCTYPE html>
 <html>
@@ -128,9 +127,12 @@ export default function OSMMap({ busData, buses = [] }) {
       // Enable manual rotation (Leaflet rotate plugin)
       // Note: in many builds rotate is supported only with a plugin; keeping rotate:true for best-effort.
 
+// Focus on the given coordinates WITHOUT changing zoom level.
+      // Uses panTo so the current user zoom is preserved (no re-zooming on
+      // every location update / refresh).
       function focusMap(lat, lng) {
         if (typeof lat !== 'number' || typeof lng !== 'number' || !isFinite(lat) || !isFinite(lng)) return;
-        map.setView([lat, lng], 16);
+        map.panTo([lat, lng]);
       }
 
 
@@ -252,4 +254,3 @@ export default function OSMMap({ busData, buses = [] }) {
     />
   );
 }
-

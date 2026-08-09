@@ -1,0 +1,12 @@
+{
+  "expo": {
+    "extra": {
+      "eas": {
+        "projectId": "7bdcbf36-68e3-44bc-8060-fc6e4e889648"
+      }
+    },
+    "android": {
+      "package": "com.rajvenkadam.bts"
+    }
+  }
+}

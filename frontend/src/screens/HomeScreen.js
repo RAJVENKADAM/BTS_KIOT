@@ -121,36 +121,199 @@ const HomeScreen = () => {
   // we check if this is still the latest search — if not, ignore the result.
   const searchCounterRef = useRef(0);
 
+  /**
+   * Scope persisted bus keys by user id so one user's saved bus data never
+   * leaks into another user's session. Returns null for keys that should not
+   * be persisted (non-admins ALWAYS derive their bus from their profile).
+   */
+  const busStorageKey = useCallback(
+    (key) => {
+      if (!isAdmin) return null; // students/primary admins derive from user.bus_no
+      const uid = user?.id || user?._id || "anon";
+      return `bus_${uid}_${key}`;
+    },
+    [isAdmin, user?.id, user?._id],
+  );
+
   useEffect(() => {
     const persistBusData = async () => {
       if (locationStatus === "loading") return;
       try {
+        // Persistence is admin-only and user-scoped. Non-admins always derive
+        // their bus from the profile — never persist (avoids cross-user leaks).
         if (selectedBusNo) {
-          await AsyncStorage.setItem("selectedBusNo", selectedBusNo);
+          const key = busStorageKey("selectedBusNo");
+          if (key) await AsyncStorage.setItem(key, selectedBusNo);
         }
         if (selectedPreviewNumber) {
-          await AsyncStorage.setItem(
-            "selectedPreviewNumber",
-            selectedPreviewNumber,
-          );
+          const key = busStorageKey("selectedPreviewNumber");
+          if (key) await AsyncStorage.setItem(key, selectedPreviewNumber);
         }
         if (busData && locationStatus !== "error") {
-          await AsyncStorage.setItem("savedBusData", JSON.stringify(busData));
+          const key = busStorageKey("savedBusData");
+          if (key) await AsyncStorage.setItem(key, JSON.stringify(busData));
         }
       } catch (err) {
         console.log("Error persisting bus data:", err);
       }
     };
     persistBusData();
-  }, [selectedBusNo, selectedPreviewNumber, busData, locationStatus]);
+  }, [
+    selectedBusNo,
+    selectedPreviewNumber,
+    busData,
+    locationStatus,
+    busStorageKey,
+  ]);
 
+  /**
+   * Reset bus state whenever the logged-in user changes (login/logout/switch).
+   * This is the key fix for "everyone sees the same bus": stale state from a
+   * previous user is completely cleared before applying the current user's bus.
+   */
   useEffect(() => {
-    if (user?.bus_no && !isAdmin && !selectedBusNo && !selectedPreviewNumber) {
+    // Clear all bus state so nothing from the previous user lingers.
+    setBusData(null);
+    setLastGoodLocation(null);
+    setRoutesData(null);
+    setIsBusFound(false);
+    setNoBusFound(false);
+    setIsOffline(false);
+    setIsBusSearchAttempted(false);
+    setSelectedPreviewNumber(null);
+    setMarkerStatus("moving");
+    sameCoordinateCountRef.current = 0;
+    lastCoordinateRef.current = null;
+    busStatusRef.current = "moving";
+    selectedBusNoRef.current = null;
+
+    if (isAdmin) {
+      // Admin derives their bus only from explicit search / scoped persisted data.
+      setSelectedBusNo(null);
+      setLocationStatus("idle");
+      return;
+    }
+
+    // Non-admin: derive ONLY from their own profile.
+    if (user?.bus_no) {
       setSelectedBusNo(user.bus_no);
       setLocationStatus("loading");
-      setIsOffline(false);
+    } else {
+      setSelectedBusNo(null);
+      setLocationStatus("idle");
     }
-  }, [user, isAdmin, selectedBusNo, selectedPreviewNumber]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, user?._id, isAdmin]);
+
+  /**
+   * Auto-fetch the non-admin's assigned bus location once per bus/user.
+   * Handles all cases: found+live, found+offline, bus not found, no bus assigned.
+   */
+  const autoLoadedBusKeyRef = useRef(null);
+  useEffect(() => {
+    if (isAdmin) return;
+    const assignedBusNo = (user?.bus_no || "").trim().toUpperCase() || null;
+    // Keep the ref in sync so the guard matches the current assigned bus.
+    if (assignedBusNo) {
+      selectedBusNoRef.current = assignedBusNo;
+      setSelectedBusNo(assignedBusNo);
+    } else {
+      selectedBusNoRef.current = null;
+      setSelectedBusNo(null);
+      setLocationStatus("idle");
+      setNoBusFound(false);
+      return;
+    }
+
+    const loadKey = `${user?.id || user?._id || "anon"}::${assignedBusNo}`;
+    if (autoLoadedBusKeyRef.current === loadKey) return; // already auto-loaded
+    autoLoadedBusKeyRef.current = loadKey;
+
+    let cancelled = false;
+    setLocationStatus("loading");
+    setIsOffline(false);
+    setNoBusFound(false);
+    setIsBusFound(false);
+    setBusData(null);
+    setLastGoodLocation(null);
+
+    (async () => {
+      try {
+        const data = await busApi.getBusLocation(token, assignedBusNo);
+        if (cancelled) return;
+
+        const hasValidCoords =
+          data &&
+          data.latitude != null &&
+          data.longitude != null &&
+          Number.isFinite(Number(data.latitude)) &&
+          Number.isFinite(Number(data.longitude)) &&
+          data.latitude !== "NaN" &&
+          data.longitude !== "NaN";
+
+        setIsBusFound(true);
+        setRoutesData((prev) => prev); // leave to the routes effect
+
+        if (isGpsStale(data) || !hasValidCoords) {
+          // Found but offline / no live coords — show plan + (if available)
+          // last known location. Only set busData when we have coords to avoid
+          // a bogus "0.0 KM" bus card / marker for a coords-less bus.
+          const offlineData = {
+            ...data,
+            busNo: data.busNo || data.bus_no || assignedBusNo,
+          };
+          if (hasValidCoords) {
+            setBusData(offlineData);
+            setLastGoodLocation(offlineData);
+          } else {
+            setBusData(null);
+            setLastGoodLocation(null);
+          }
+          setLocationStatus("offline");
+          setIsOffline(true);
+          setNoBusFound(false);
+        } else {
+          const nextBusData = {
+            ...data,
+            source: data.source || "gps",
+            busNo: data.busNo || data.bus_no || assignedBusNo,
+          };
+          setBusData(nextBusData);
+          setLastGoodLocation(nextBusData);
+          setLocationStatus("live");
+          setIsOffline(false);
+          setNoBusFound(false);
+          const statusFromAPI = data.busState;
+          const statusFromCoordinates = detectBusStatus(
+            data.latitude,
+            data.longitude,
+          );
+          setMarkerStatus(
+            chooseBusStatus(statusFromAPI, statusFromCoordinates) || "moving",
+          );
+        }
+      } catch (err) {
+        if (cancelled) return;
+        // Bus assigned to the user does not exist / not found.
+        console.log(
+          `Auto-load assigned bus ${assignedBusNo} error:`,
+          err.message,
+        );
+        setSelectedBusNo(assignedBusNo);
+        setBusData(null);
+        setLastGoodLocation(null);
+        setRoutesData(null);
+        setLocationStatus("error");
+        setNoBusFound(true);
+        setIsBusFound(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id, user?._id, user?.bus_no, token, isAdmin]);
 
   useEffect(() => {
     if (isAdmin) setIsSuperadminSearched(false);
@@ -224,15 +387,93 @@ const HomeScreen = () => {
     return () => socket.off("bus-update", handleBusUpdate);
   }, [socket]);
 
+  // Listen for live location updates from the DB (pushed by the GPS sync
+  // worker or in response to a `request-bus-location` refresh). This updates
+  // the marker WITHOUT making an HTTP API call — avoiding the rate-limited GPS
+  // provider. We only update the map (busData) here; we do NOT re-zoom.
+  useEffect(() => {
+    if (!socket) return;
+    const handleLocationUpdate = (data) => {
+      if (!data || data.error) return;
+      const selected = selectedBusNoRef.current;
+      if (!selected) return;
+      const incomingBusNo =
+        data.busNo ?? data.bus_no ?? data.busNumber ?? data.previewNumber;
+      if (!incomingBusNo) return;
+      const incomingStr = String(incomingBusNo);
+      const selectedStr = String(selected);
+      // Only accept updates for the currently selected/searching bus.
+      // Allow matching by previewNumber too (e.g. searched "4" → bus no "TN..").
+      if (
+        incomingStr !== selectedStr &&
+        String(data.previewNumber ?? "") !== selectedStr
+      ) {
+        return;
+      }
+
+      const hasValidCoords =
+        data.latitude != null &&
+        data.longitude != null &&
+        Number.isFinite(Number(data.latitude)) &&
+        Number.isFinite(Number(data.longitude)) &&
+        data.latitude !== "NaN" &&
+        data.longitude !== "NaN";
+
+      if (!hasValidCoords) return;
+
+      const live = data.status === "online" || data.is_online === true;
+      const nextBusData = {
+        ...(busData || {}),
+        busNo: data.busNo ?? data.bus_no ?? selected,
+        bus_no: data.bus_no ?? selected,
+        previewNumber: data.previewNumber ?? selectedPreviewNumber ?? undefined,
+        currentPlan: data.currentPlan ?? busData?.currentPlan,
+        latitude: data.latitude,
+        longitude: data.longitude,
+        speed: data.speed ?? 0,
+        source: data.source || "gps",
+        _isOffline: !live,
+      };
+
+      setBusData(nextBusData);
+      setLastGoodLocation(nextBusData);
+      setLocationStatus(live ? "live" : "offline");
+      setIsOffline(!live);
+      setNoBusFound(false);
+      setIsBusFound(true);
+    };
+    socket.on("locationUpdate", handleLocationUpdate);
+    return () => socket.off("locationUpdate", handleLocationUpdate);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [socket, busData, selectedBusNo, selectedPreviewNumber]);
+
+  // Refresh the selected bus marker straight from the DB via socket.
+  // This avoids re-fetching from the rate-limited GPS provider / HTTP API.
+  const handleSocketRefresh = useCallback(() => {
+    if (!socket) return;
+    const busToRefresh = selectedPreviewNumber || selectedBusNo;
+    if (!busToRefresh) return;
+    setLocationStatus("loading");
+    socket.emit("request-bus-location", busToRefresh);
+  }, [socket, selectedPreviewNumber, selectedBusNo]);
+
   useEffect(() => {
     refreshBuses();
+    // Restore persisted bus data is now ADMIN-ONLY and USER-SCOPED.
+    // Non-admins ALWAYS derive their bus from the profile (see the reset +
+    // auto-load effects) so a different user's saved bus can never leak in.
     const loadPersistedBusData = async () => {
+      if (!isAdmin) return;
       try {
-        const savedBusNo = await AsyncStorage.getItem("selectedBusNo");
-        const savedPreviewNumber = await AsyncStorage.getItem(
-          "selectedPreviewNumber",
+        const savedBusNo = await AsyncStorage.getItem(
+          busStorageKey("selectedBusNo"),
         );
-        const savedBusData = await AsyncStorage.getItem("savedBusData");
+        const savedPreviewNumber = await AsyncStorage.getItem(
+          busStorageKey("selectedPreviewNumber"),
+        );
+        const savedBusData = await AsyncStorage.getItem(
+          busStorageKey("savedBusData"),
+        );
         if (savedBusNo) setSelectedBusNo(savedBusNo);
         if (savedPreviewNumber) setSelectedPreviewNumber(savedPreviewNumber);
         if (savedBusData) {
@@ -245,7 +486,8 @@ const HomeScreen = () => {
       }
     };
     loadPersistedBusData();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busStorageKey]);
 
   const normalizeBusState = (state) => {
     const normalized = typeof state === "string" ? state.toLowerCase() : "";
@@ -399,7 +641,8 @@ const HomeScreen = () => {
     // A purely numeric query is treated as a preview-number search (e.g. "4").
     // Alphanumeric queries (e.g. "TN30AH5907") are treated as bus_no.
     const isPreviewSearch = /^\d+$/.test(query);
-    setSearchQuery("");
+    // Keep the typed query in the search bar so the user can see/cross it out.
+    // Do NOT clear it here — use the cross (close-circle) button to clear.
 
     // ⚠️ FIX: Reset ALL state atomically before each new search.
     // Prevent stale data from previous search appearing while loading.
@@ -694,6 +937,26 @@ const HomeScreen = () => {
 
         {/* RIGHT ICONS */}
         <View style={styles.rightIcons}>
+          {/* REFRESH (DB/socket-based, no API re-fetch) */}
+          <TouchableOpacity
+            style={[
+              styles.iconButtonPrimary,
+              locationStatus === "loading" && { opacity: 0.6 },
+            ]}
+            onPress={handleSocketRefresh}
+            activeOpacity={0.7}
+            disabled={locationStatus === "loading"}
+          >
+            <Ionicons
+              name="refresh"
+              size={18}
+              color="#fff"
+              style={
+                locationStatus === "loading" ? styles.refreshSpin : undefined
+              }
+            />
+          </TouchableOpacity>
+
           {isAdmin && (
             <TouchableOpacity
               style={styles.organizeButton}
@@ -987,6 +1250,10 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.primary,
     justifyContent: "center",
     alignItems: "center",
+  },
+  refreshSpin: {
+    // Simple static style for the refresh icon while a refresh is in progress.
+    // (A real rotation animation would use RN Animated; kept minimal here.)
   },
   searchContainer: {
     flex: 1,

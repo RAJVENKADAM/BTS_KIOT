@@ -1,6 +1,7 @@
 const Bus = require("../models/Bus");
 const BusLiveLocation = require("../models/BusLiveLocation");
 const gpsService = require("../services/gpsService");
+const { getIO } = require("../socket");
 
 async function updateOnlineStateBasedOnStaleness({ busId, staleThresholdMs }) {
   const doc = await BusLiveLocation.findOne({ bus_id: busId }).select(
@@ -77,7 +78,7 @@ class GpsSyncWorker {
 
     try {
       const buses = await Bus.find({ status: "active" }).select(
-        "_id gps_device_id reg_no",
+        "_id gps_device_id reg_no bus_no preview_number",
       );
 
       console.log(`GPS Sync Started - buses=${buses.length}`);
@@ -153,6 +154,38 @@ class GpsSyncWorker {
         } catch (e) {
           console.error(
             `staleness update failed for ${regNo}: ${e?.message || e}`,
+          );
+        }
+
+        // 🔴 Push the freshly-updated DB location to all clients in the bus room.
+        // This lets the frontend refresh the marker from the DB without making
+        // an HTTP API call (avoids the rate-limited GPS provider).
+        try {
+          const freshDoc = await BusLiveLocation.findOne({ bus_id: busId });
+          const io = getIO();
+          if (io && bus.bus_no) {
+            const busNo = bus.bus_no;
+            io.to(`bus_${String(busNo).toUpperCase()}`).emit("locationUpdate", {
+              busNo,
+              bus_no: busNo,
+              previewNumber: bus.preview_number,
+              latitude: freshDoc ? freshDoc.latitude : null,
+              longitude: freshDoc ? freshDoc.longitude : null,
+              speed: freshDoc ? freshDoc.speed : 0,
+              status: freshDoc && freshDoc.is_online ? "online" : "offline",
+              source: freshDoc && freshDoc.source ? freshDoc.source : "offline",
+              is_online: !!(freshDoc && freshDoc.is_online),
+              lastSuccessfulGpsUpdate: freshDoc
+                ? freshDoc.lastSuccessfulGpsUpdate
+                : null,
+              lastUpdated: freshDoc
+                ? freshDoc.lastSuccessfulGpsUpdate || freshDoc.updatedAt
+                : null,
+            });
+          }
+        } catch (emitErr) {
+          console.error(
+            `locationUpdate emit failed for ${regNo}: ${emitErr?.message || emitErr}`,
           );
         }
       }
