@@ -3,10 +3,16 @@
  * Provides login, logout, token persistence via AsyncStorage,
  * and exposes user, token, loading, isAuthenticated to the app tree.
  */
-import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { API_BASE_URL } from '../api/api';
-
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  useRef,
+} from "react";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { API_BASE_URL } from "../api/api";
+import { isNetworkError } from "../utils/errorHandler";
 
 const AuthContext = createContext();
 
@@ -14,7 +20,7 @@ export const useAuth = () => {
   const context = useContext(AuthContext);
 
   if (!context) {
-    throw new Error('useAuth must be used within an AuthProvider');
+    throw new Error("useAuth must be used within an AuthProvider");
   }
 
   return context;
@@ -52,8 +58,10 @@ export const AuthProvider = ({ children }) => {
         // Any non-OK status (401/403) means the token is invalid or expired.
         // Force logout so the user can sign in again and get a fresh token.
         if (!response.ok) {
-          console.log('Session invalid — token rejected by server. Logging out.');
-          await AsyncStorage.multiRemove(['token', 'user']);
+          console.log(
+            "Session invalid — token rejected by server. Logging out.",
+          );
+          await AsyncStorage.multiRemove(["token", "user"]);
           setToken(null);
           setUser(null);
           return;
@@ -61,13 +69,15 @@ export const AuthProvider = ({ children }) => {
 
         const data = await response.json();
         if (data.deactivated === true || data.valid === false) {
-          console.log('Session invalid — account deactivated or token expired. Logging out.');
-          await AsyncStorage.multiRemove(['token', 'user']);
+          console.log(
+            "Session invalid — account deactivated or token expired. Logging out.",
+          );
+          await AsyncStorage.multiRemove(["token", "user"]);
           setToken(null);
           setUser(null);
         }
       } catch (err) {
-        console.log('Token verify network error:', err.message);
+        console.log("Token verify network error:", err.message);
       }
     };
 
@@ -84,8 +94,8 @@ export const AuthProvider = ({ children }) => {
   // LOAD FROM STORAGE — validates token with backend before restoring session
   const loadAuthData = async () => {
     try {
-      const storedToken = await AsyncStorage.getItem('token');
-      const storedUser = await AsyncStorage.getItem('user');
+      const storedToken = await AsyncStorage.getItem("token");
+      const storedUser = await AsyncStorage.getItem("user");
 
       if (storedToken && storedUser) {
         try {
@@ -99,15 +109,15 @@ export const AuthProvider = ({ children }) => {
           // Non-OK response (401/403) means the stored token is invalid/expired.
           // Clear the session and send the user to the login screen.
           if (!verifyRes.ok) {
-            console.log('Stored token rejected on startup — clearing session.');
-            await AsyncStorage.multiRemove(['token', 'user']);
+            console.log("Stored token rejected on startup — clearing session.");
+            await AsyncStorage.multiRemove(["token", "user"]);
             return;
           }
 
           const verifyData = await verifyRes.json();
 
           if (verifyData.deactivated === true || verifyData.valid === false) {
-            await AsyncStorage.multiRemove(['token', 'user']);
+            await AsyncStorage.multiRemove(["token", "user"]);
             return;
           }
 
@@ -116,17 +126,19 @@ export const AuthProvider = ({ children }) => {
         } catch (verifyError) {
           // Network error on startup verify — restore cached session anyway,
           // periodic check will handle it if account gets deactivated later
-          console.log('Token verify failed on startup (network), restoring cached session');
+          console.log(
+            "Token verify failed on startup (network), restoring cached session",
+          );
           setToken(storedToken);
           setUser(JSON.parse(storedUser));
         }
       }
     } catch (error) {
-      console.log('Load auth error:', error);
+      console.log("Load auth error:", error);
       try {
-        await AsyncStorage.multiRemove(['token', 'user']);
+        await AsyncStorage.multiRemove(["token", "user"]);
       } catch (clearError) {
-        console.log('Storage clear error:', clearError);
+        console.log("Storage clear error:", clearError);
       }
     } finally {
       setLoading(false);
@@ -137,9 +149,9 @@ export const AuthProvider = ({ children }) => {
   const login = async (email, password) => {
     try {
       const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
-        method: 'POST',
+        method: "POST",
         headers: {
-          'Content-Type': 'application/json',
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({
           email,
@@ -155,7 +167,7 @@ export const AuthProvider = ({ children }) => {
       } catch (jsonError) {
         return {
           success: false,
-          error: 'Invalid server response',
+          error: "Invalid server response",
         };
       }
 
@@ -163,12 +175,12 @@ export const AuthProvider = ({ children }) => {
         if (!data.token || !data.user) {
           return {
             success: false,
-            error: 'Incomplete server response - missing token or user data',
+            error: "Incomplete server response - missing token or user data",
           };
         }
 
-        await AsyncStorage.setItem('token', data.token);
-        await AsyncStorage.setItem('user', JSON.stringify(data.user));
+        await AsyncStorage.setItem("token", data.token);
+        await AsyncStorage.setItem("user", JSON.stringify(data.user));
 
         setToken(data.token);
         setUser(data.user);
@@ -181,12 +193,14 @@ export const AuthProvider = ({ children }) => {
 
       return {
         success: false,
-        error: data.error || data.message || 'Login failed',
+        error: data.error || data.message || "Login failed",
       };
     } catch (error) {
       return {
         success: false,
-        error: `Network error: ${error.message}`,
+        error: isNetworkError(error)
+          ? "Cannot connect to the server. Please check your internet connection."
+          : `Login failed: ${error.message}`,
       };
     }
   };
@@ -203,10 +217,10 @@ export const AuthProvider = ({ children }) => {
       if (token) {
         try {
           await fetch(`${API_BASE_URL}/api/auth/logout`, {
-            method: 'POST',
+            method: "POST",
             headers: {
               Authorization: `Bearer ${token}`,
-              'Content-Type': 'application/json',
+              "Content-Type": "application/json",
             },
           });
         } catch (apiError) {
@@ -214,13 +228,13 @@ export const AuthProvider = ({ children }) => {
         }
       }
 
-      await AsyncStorage.multiRemove(['token', 'user']);
+      await AsyncStorage.multiRemove(["token", "user"]);
 
       setToken(null);
       setUser(null);
     } catch (error) {
       try {
-        await AsyncStorage.multiRemove(['token', 'user']);
+        await AsyncStorage.multiRemove(["token", "user"]);
       } catch {}
 
       setToken(null);
@@ -233,10 +247,10 @@ export const AuthProvider = ({ children }) => {
   // UPDATE USER
   const updateUserData = async (userData) => {
     try {
-      await AsyncStorage.setItem('user', JSON.stringify(userData));
+      await AsyncStorage.setItem("user", JSON.stringify(userData));
       setUser(userData);
     } catch (error) {
-      console.log('Update user error:', error);
+      console.log("Update user error:", error);
     }
   };
 
@@ -244,10 +258,10 @@ export const AuthProvider = ({ children }) => {
   const deleteAccount = async () => {
     try {
       const response = await fetch(`${API_BASE_URL}/api/auth/account`, {
-        method: 'DELETE',
+        method: "DELETE",
         headers: {
           Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
+          "Content-Type": "application/json",
         },
       });
 
@@ -260,12 +274,12 @@ export const AuthProvider = ({ children }) => {
       } catch (jsonError) {
         return {
           success: false,
-          error: 'Invalid server response',
+          error: "Invalid server response",
         };
       }
 
       if (response.ok) {
-        await AsyncStorage.multiRemove(['token', 'user']);
+        await AsyncStorage.multiRemove(["token", "user"]);
         setToken(null);
         setUser(null);
 
@@ -277,12 +291,14 @@ export const AuthProvider = ({ children }) => {
 
       return {
         success: false,
-        error: data.error || 'Account deletion failed',
+        error: data.error || "Account deletion failed",
       };
     } catch (error) {
       return {
         success: false,
-        error: error.message || 'Network error occurred',
+        error: isNetworkError(error)
+          ? "Cannot connect to the server. Please check your internet connection."
+          : error.message || "Account deletion failed",
       };
     }
   };
@@ -298,9 +314,5 @@ export const AuthProvider = ({ children }) => {
     isAuthenticated: !!token && !!user,
   };
 
-  return (
-    <AuthContext.Provider value={value}>
-      {children}
-    </AuthContext.Provider>
-  );
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 };

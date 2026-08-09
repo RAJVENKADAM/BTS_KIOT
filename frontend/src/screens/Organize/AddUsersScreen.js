@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect } from "react";
 import {
   View,
   TouchableOpacity,
@@ -9,23 +9,24 @@ import {
   Platform,
   RefreshControl,
   ActivityIndicator,
-} from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { useAuth } from '../../context/AuthContext';
+} from "react-native";
+import { Ionicons } from "@expo/vector-icons";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { useAuth } from "../../context/AuthContext";
 
-import { excelManagementApi } from '../../api/excelManagementApi';
-import MultiExcelUpload from '../../components/MultiExcelUpload';
-import ExcelUploadCard from '../../components/ExcelUploadCard';
-import UserCard from '../../components/UserCard';
-import Card from '../../components/UI/Card';
-import * as DocumentPicker from 'expo-document-picker';
+import { excelManagementApi } from "../../api/excelManagementApi";
+import MultiExcelUpload from "../../components/MultiExcelUpload";
+import ExcelUploadCard from "../../components/ExcelUploadCard";
+import UserCard from "../../components/UserCard";
+import Card from "../../components/UI/Card";
+import * as DocumentPicker from "expo-document-picker";
 
-import { readExcelFile, convertExcelToJson } from '../../utils/excelImport';
-import { importUsersExcelJson } from '../../api/importApi';
+import { readExcelFile, convertExcelToJson } from "../../utils/excelImport";
+import { importUsersExcelJson } from "../../api/importApi";
 
-import { COLORS, SPACING, RADIUS, SHADOWS } from '../../theme';
-import { Header, Body, MutedText } from '../../components/UI/Typography';
+import { COLORS, SPACING, RADIUS, SHADOWS } from "../../theme";
+import { Header, Body, MutedText } from "../../components/UI/Typography";
+import { getErrorMessage } from "../../utils/errorHandler";
 
 export default function AddUsersScreen() {
   const [uploading, setUploading] = useState(false);
@@ -34,7 +35,6 @@ export default function AddUsersScreen() {
   const [loadingUsersByUpload, setLoadingUsersByUpload] = useState({});
   const [refreshing, setRefreshing] = useState(false);
   const { token, loading: authLoading } = useAuth();
-
 
   useEffect(() => {
     if (token) loadExcelUploads();
@@ -45,14 +45,17 @@ export default function AddUsersScreen() {
 
     try {
       setLoadingUsersByUpload((p) => ({ ...p, [uploadId]: true }));
-      const response = await excelManagementApi.getUsersByUpload(token, uploadId);
+      const response = await excelManagementApi.getUsersByUpload(
+        token,
+        uploadId,
+      );
       if (response.success) {
         setUsersByUpload((p) => ({ ...p, [uploadId]: response.data || [] }));
       } else {
         setUsersByUpload((p) => ({ ...p, [uploadId]: [] }));
       }
     } catch (e) {
-      console.error('Failed to load users for upload:', uploadId, e);
+      console.error("Failed to load users for upload:", uploadId, e);
     } finally {
       setLoadingUsersByUpload((p) => ({ ...p, [uploadId]: false }));
     }
@@ -73,7 +76,11 @@ export default function AddUsersScreen() {
         }
       }
     } catch (error) {
-      console.error('Failed to load Excel uploads:', error);
+      console.error("Failed to load Excel uploads:", error);
+      Alert.alert(
+        "Load failed",
+        getErrorMessage(error, "Could not load your Excel uploads."),
+      );
     }
   };
 
@@ -86,7 +93,7 @@ export default function AddUsersScreen() {
   const handleFileUpload = async (file, customName) => {
     if (!token || !file?.uri) return;
 
-    console.log('DocumentPicker asset:', file);
+    console.log("DocumentPicker asset:", file);
 
     setUploading(true);
 
@@ -114,37 +121,46 @@ export default function AddUsersScreen() {
 
       if (response?.success) {
         Alert.alert(
-          'Import complete',
-          `totalRows: ${response.summary.totalRows}\ninserted: ${response.summary.insertedRows}\nupdated: ${response.summary.updatedRows}\nunchanged: ${response.summary.unchangedRows}\nfailed: ${response.summary.failedRows}`
+          "Import complete",
+          `totalRows: ${response.summary.totalRows}\ninserted: ${response.summary.insertedRows}\nupdated: ${response.summary.updatedRows}\nunchanged: ${response.summary.unchangedRows}\nfailed: ${response.summary.failedRows}`,
         );
       }
 
       // Keep existing UI behavior; legacy Excel management list will stay as-is.
       loadExcelUploads();
     } catch (e) {
-      Alert.alert('Import failed', e?.message || 'Unknown error');
+      Alert.alert(
+        "Import failed",
+        getErrorMessage(e, "The user import could not be completed."),
+      );
     } finally {
       setUploading(false);
     }
   };
 
-
   const handleEditUpload = async (uploadId) => {
     try {
       const result = await DocumentPicker.getDocumentAsync({
-        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       });
 
       if (result.canceled) return;
       setUploading(true);
-      const response = await excelManagementApi.reupload(token, uploadId, result.assets[0]);
+      const response = await excelManagementApi.reupload(
+        token,
+        uploadId,
+        result.assets[0],
+      );
 
       if (response.success) {
-        Alert.alert('Updated', 'User list updated successfully');
+        Alert.alert("Updated", "User list updated successfully");
         loadExcelUploads();
       }
     } catch (error) {
-      Alert.alert('Error', error.message);
+      Alert.alert(
+        "Error",
+        getErrorMessage(error, "Could not update the Excel upload."),
+      );
     } finally {
       setUploading(false);
     }
@@ -152,28 +168,31 @@ export default function AddUsersScreen() {
 
   const handleDeleteUpload = async (uploadId) => {
     Alert.alert(
-      'Delete Upload',
-      'This will deactivate users associated with this file. Continue?',
+      "Delete Upload",
+      "This will deactivate users associated with this file. Continue?",
       [
-        { text: 'Cancel', style: 'cancel' },
+        { text: "Cancel", style: "cancel" },
         {
-          text: 'Delete',
-          style: 'destructive',
+          text: "Delete",
+          style: "destructive",
           onPress: async () => {
             setUploading(true);
             try {
-              const response = await excelManagementApi.deleteUpload(token, uploadId);
+              const response = await excelManagementApi.deleteUpload(
+                token,
+                uploadId,
+              );
               if (response.success) {
                 await loadExcelUploads();
               }
             } catch (error) {
-              Alert.alert('Error', 'Delete failed');
+              Alert.alert("Error", getErrorMessage(error, "Delete failed."));
             } finally {
               setUploading(false);
             }
           },
         },
-      ]
+      ],
     );
   };
 
@@ -181,23 +200,26 @@ export default function AddUsersScreen() {
     if (!user?.id || !uploadId) return;
 
     Alert.alert(
-      'Deactivate user',
-      `Deactivate ${user?.name || user?.email || 'this user'}?`,
+      "Deactivate user",
+      `Deactivate ${user?.name || user?.email || "this user"}?`,
       [
-        { text: 'Cancel', style: 'cancel' },
+        { text: "Cancel", style: "cancel" },
         {
-          text: 'Deactivate',
-          style: 'destructive',
+          text: "Deactivate",
+          style: "destructive",
           onPress: async () => {
             try {
               await excelManagementApi.deactivateUser(token, user.id);
               await loadUsersForUpload(uploadId);
             } catch (e) {
-              Alert.alert('Error', e?.message || 'Failed to deactivate user');
+              Alert.alert(
+                "Error",
+                getErrorMessage(e, "Failed to deactivate user."),
+              );
             }
           },
         },
-      ]
+      ],
     );
   };
 
@@ -210,25 +232,35 @@ export default function AddUsersScreen() {
         await loadUsersForUpload(uploadId);
       }
     } catch (e) {
-      Alert.alert('Error', e?.message || 'Failed to update user');
+      Alert.alert("Error", getErrorMessage(e, "Failed to update user."));
     }
   };
 
   if (authLoading) {
     return (
-      <View style={styles.centered}><ActivityIndicator color={COLORS.primary} /></View>
+      <View style={styles.centered}>
+        <ActivityIndicator color={COLORS.primary} />
+      </View>
     );
   }
 
   return (
-    <SafeAreaView edges={['bottom']} style={styles.safeArea}>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ flex: 1 }}>
+    <SafeAreaView edges={["bottom"]} style={styles.safeArea}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        style={{ flex: 1 }}
+      >
         <ScrollView
           contentContainerStyle={styles.scrollContainer}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={COLORS.primary} />}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={COLORS.primary}
+            />
+          }
           showsVerticalScrollIndicator={false}
         >
-
           <View style={styles.section}>
             <Header style={styles.sectionLabel}>Upload Users</Header>
             <View style={[styles.uploadBox, uploading && styles.disabledBox]}>
@@ -238,7 +270,10 @@ export default function AddUsersScreen() {
                   <Body style={styles.processingText}>Processing Users...</Body>
                 </View>
               ) : (
-                <MultiExcelUpload onUpload={handleFileUpload} disabled={uploading} />
+                <MultiExcelUpload
+                  onUpload={handleFileUpload}
+                  disabled={uploading}
+                />
               )}
             </View>
           </View>
@@ -246,7 +281,8 @@ export default function AddUsersScreen() {
           {excelUploads.length > 0 && (
             <View style={styles.section}>
               <View style={styles.historyHeader}>
-                <Header style={styles.sectionLabel}>Manage Users</Header></View>
+                <Header style={styles.sectionLabel}>Manage Users</Header>
+              </View>
 
               {excelUploads.map((upload) => (
                 <View key={upload.id}>
@@ -267,7 +303,7 @@ export default function AddUsersScreen() {
 
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: COLORS.background },
-  centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  centered: { flex: 1, justifyContent: "center", alignItems: "center" },
   scrollContainer: { padding: SPACING.screenPadding, paddingBottom: 40 },
   section: { marginBottom: 28 },
   sectionLabel: { fontSize: 18, marginBottom: 12 },
@@ -276,31 +312,34 @@ const styles = StyleSheet.create({
     borderRadius: RADIUS.card,
     borderWidth: 1,
     borderColor: COLORS.border,
-    borderStyle: 'solid',
-    overflow: 'hidden',
+    borderStyle: "solid",
+    overflow: "hidden",
     ...SHADOWS.soft,
   },
   disabledBox: { opacity: 0.7 },
-  processing: { padding: 40, alignItems: 'center' },
-  processingText: { marginTop: 12, color: COLORS.primary, fontWeight: '700' },
-  historyHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
+  processing: { padding: 40, alignItems: "center" },
+  processingText: { marginTop: 12, color: COLORS.primary, fontWeight: "700" },
+  historyHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 16,
+  },
   usersSection: {
     paddingLeft: 16,
     marginBottom: 16,
   },
   usersCount: {
     fontSize: 12,
-    fontWeight: '700',
-    textTransform: 'uppercase',
+    fontWeight: "700",
+    textTransform: "uppercase",
     letterSpacing: 0.5,
     marginBottom: 8,
     marginTop: 4,
   },
   noUsers: {
-    textAlign: 'center',
+    textAlign: "center",
     fontSize: 13,
     marginVertical: 8,
     paddingLeft: 16,
   },
 });
-

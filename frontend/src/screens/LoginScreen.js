@@ -55,7 +55,11 @@ export default function LoginScreen() {
         setError(result.error || "Invalid email or password");
       }
     } catch (err) {
-      setError("Unable to connect. Please check your internet.");
+      setError(
+        err?.isNetwork
+          ? "Cannot connect to the server. Please check your internet connection and try again."
+          : "Unable to connect. Please try again.",
+      );
     } finally {
       setLoading(false);
     }

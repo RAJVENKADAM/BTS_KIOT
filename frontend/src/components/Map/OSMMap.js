@@ -19,20 +19,33 @@ export default function OSMMap({ busData, buses = [] }) {
   useEffect(() => {
     if (!webRef.current) return;
 
-    // Always clear previous markers by forcing a new HTML instance would be best,
-    // but for minimal change we simply avoid sending BUSES_LOCATION.
-
-    if (busData && busData.latitude != null && busData.longitude != null) {
-      const singlePayload = {
-        type: "BUS_LOCATION",
-        busNo: busData.busNo ?? busData.bus_no ?? "single",
-        previewNumber: busData.previewNumber ?? busData.preview_number,
-        latitude: busData.latitude,
-        longitude: busData.longitude,
-        isOffline: busData._isOffline === true,
-      };
-      webRef.current.postMessage(JSON.stringify(singlePayload));
+    // Strict single-focus behavior:
+    // - If busData is null or has no valid coords → tell the map to clear ALL
+    //   bus markers so it reverts to the KIOT college default (no stale marker
+    //   from a previously searched/cancelled bus).
+    // - Otherwise send only THIS bus's marker. The map clears all existing
+    //   markers before rendering the single one (see CLEAR before upsert in
+    //   the WebView JS), so only the searched bus ever shows.
+    if (
+      !busData ||
+      busData.latitude == null ||
+      busData.longitude == null ||
+      !Number.isFinite(Number(busData.latitude)) ||
+      !Number.isFinite(Number(busData.longitude))
+    ) {
+      webRef.current.postMessage(JSON.stringify({ type: "CLEAR_MARKERS" }));
+      return;
     }
+
+    const singlePayload = {
+      type: "BUS_LOCATION",
+      busNo: busData.busNo ?? busData.bus_no ?? "single",
+      previewNumber: busData.previewNumber ?? busData.preview_number,
+      latitude: busData.latitude,
+      longitude: busData.longitude,
+      isOffline: busData._isOffline === true,
+    };
+    webRef.current.postMessage(JSON.stringify(singlePayload));
   }, [busData]);
 
   const html = `
@@ -122,7 +135,34 @@ export default function OSMMap({ busData, buses = [] }) {
       var initialLat = ${KIOT_LAT};
       var initialLng = ${KIOT_LNG};
 
-      var map = L.map('map', { zoomControl: false, rotate: true }).setView([initialLat, initialLng], 14);
+// Compute the minimum zoom so the map always fills the entire screen
+      // (never showing white background). Leaflet's world at zoom 0 is 256px
+      // wide; to cover the viewport we need the map's pixel size >= the
+      // largest screen dimension. We use the bigger of width/height so both
+      // portrait and landscape stay fully covered.
+      function computeMinZoom() {
+        var size = window.innerWidth;
+        if (window.innerHeight > size) size = window.innerHeight;
+        // 256 * 2^z >= size  =>  z >= log2(size / 256)
+        var z = Math.ceil(Math.log(size / 256) / Math.LN2);
+        return Math.max(0, z);
+      }
+
+      var minZoom = computeMinZoom();
+
+// Constrain panning to the world bounds so dragging can never reveal
+      // the blank background beyond the map's vertical edges (Leaflet does not
+      // wrap vertically). high viscosity snaps the map back instead of letting
+      // the user hold it at the edge (which would show white).
+      var worldBounds = [[-85.0511, -180], [85.0511, 180]];
+
+      var map = L.map('map', {
+        zoomControl: false,
+        rotate: true,
+        minZoom: minZoom,
+        maxBounds: worldBounds,
+        maxBoundsViscosity: 1.0
+      }).setView([initialLat, initialLng], 14);
 
       // Enable manual rotation (Leaflet rotate plugin)
       // Note: in many builds rotate is supported only with a plugin; keeping rotate:true for best-effort.
@@ -173,7 +213,7 @@ export default function OSMMap({ busData, buses = [] }) {
         return m;
       }
 
-      function upsertBusMarker(key, lat, lng, offline) {
+function upsertBusMarker(key, lat, lng, offline) {
         if (!isFiniteNumber(lat) || !isFiniteNumber(lng)) return;
         var marker = busMarkers[key];
         if (!marker) {
@@ -188,13 +228,34 @@ export default function OSMMap({ busData, buses = [] }) {
         marker.setLatLng([lat, lng]);
       }
 
+      // Remove ALL bus markers and reset the registry. Used when a search is
+      // cancelled or when a different bus is searched so only the actively
+      // searched bus (or none, reverting to the KIOT default) ever shows.
+      function clearAllBusMarkers() {
+        var keys = Object.keys(busMarkers);
+        for (var i = 0; i < keys.length; i++) {
+          var m = busMarkers[keys[i]];
+          if (m) {
+            try { map.removeLayer(m); } catch (e) {}
+          }
+        }
+        busMarkers = {};
+      }
+
       function handleMessage(raw) {
         try {
           var data = typeof raw === 'string' ? JSON.parse(raw) : raw;
           if (!data) return;
 
-          // Multi-bus payload (should not be used after strict changes)
+          // Clear all bus markers (cancel search / reset / not found)
+          if (data.type === 'CLEAR_MARKERS') {
+            clearAllBusMarkers();
+            return;
+          }
+
+          // Multi-bus payload — clear stale markers first, then render each.
           if (data.type === 'BUSES_LOCATION' && Array.isArray(data.buses)) {
+            clearAllBusMarkers();
             data.buses.forEach(function (b) {
               if (!b) return;
               var key = (b.busNo || b.bus_no || b.previewNumber || b.preview_number || '').toString();
@@ -204,8 +265,10 @@ export default function OSMMap({ busData, buses = [] }) {
             return;
           }
 
-          // Single bus payload
+          // Single bus payload — STRICTLY only this bus. Clear all previous
+          // markers so a previously searched bus never lingers on the map.
           if (data.type === 'BUS_LOCATION') {
+            clearAllBusMarkers();
             var keySingle = (data.busNo || data.bus_no || data.previewNumber || data.preview_number || 'single').toString();
             upsertBusMarker(keySingle, data.latitude, data.longitude, data.isOffline);
             // Focus strictly on the bus location
@@ -223,12 +286,25 @@ export default function OSMMap({ busData, buses = [] }) {
         handleMessage(event.data);
       });
 
-      // Ensure Leaflet recalculates size after WebView layout settles
+// Ensure Leaflet recalculates size after WebView layout settles.
+      // Also recompute minZoom on resize/rotation so the map always fills the
+      // entire screen (no white background) in both portrait and landscape.
       function safeResize() {
-        try { map.invalidateSize(true); } catch (e) {}
+        try {
+          var newMin = computeMinZoom();
+          if (newMin !== minZoom) {
+            minZoom = newMin;
+            map.setMinZoom(minZoom);
+            // If the current zoom dropped below the new minimum, snap back.
+            if (map.getZoom() < minZoom) map.setZoom(minZoom);
+          }
+          map.invalidateSize(true);
+        } catch (e) {}
       }
       setTimeout(safeResize, 0);
       setTimeout(safeResize, 300);
+
+      window.addEventListener('resize', safeResize);
 
       document.addEventListener('visibilitychange', function () {
         if (!document.hidden) safeResize();

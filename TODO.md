@@ -1,14 +1,18 @@
-# Task Implementation Progress
+# Error Handling Improvement Task
 
-## Goal
-
-Add refresh button (socket/DB-based, no API re-fetch), keep searched bus number in search bar, and stop map re-zooming on every update.
+Fix every error handling in the app so that network problems, server errors,
+auth errors, and not-found cases are clearly and specifically reported to the user.
 
 ## Steps
 
-- [x] 1. Backend: Add `request-bus-location` socket handler in `trackSocket.js` (reads latest location from DB and emits `locationUpdate` back to requester).
-- [x] 2. Backend: Emit `locationUpdate` socket event to `bus_<busNo>` room after each DB update in `gpsSyncWorker.js`.
-- [x] 3. Frontend: Add socket `locationUpdate` listener in `HomeScreen.js` to update bus marker from DB (no HTTP API call).
-- [x] 4. Frontend: Add refresh button in top bar (after search bar, before Organize/Profile based on role) that emits `request-bus-location`.
-- [x] 5. Frontend: Remove `setSearchQuery("")` from `handleSearch` so the searched number stays in the bar.
-- [x] 6. Frontend: Change `focusMap` in `OSMMap.js` to use `map.panTo` (preserve zoom) instead of `setView`.
+- [x] 1. Analyze the app's error handling across all API modules and screens
+- [x] 2. Create `frontend/src/utils/errorHandler.js` (centralized error classification)
+- [x] 3. Update `frontend/src/api/busApi.js` (response.ok checks + network-error typing)
+- [x] 4. Update `frontend/src/api/excelManagementApi.js` (response.ok + network typing)
+- [x] 5. Update `frontend/src/api/importApi.js` (response.ok + network typing)
+- [x] 6. Update `frontend/src/context/BusContext.js` (distinguish error types)
+- [x] 7. Update `frontend/src/context/AuthContext.js` (specific network message)
+- [x] 8. Update `frontend/src/screens/HomeScreen.js` (show specific problem, not "Bus Not Found")
+- [x] 9. Update `frontend/src/screens/Organize/AddUsersScreen.js` (specific alert messages)
+- [x] 10. Update `frontend/src/screens/Organize/AddBusesScreen.js` (specific alert messages)
+- [x] 11. Verify all changes and review

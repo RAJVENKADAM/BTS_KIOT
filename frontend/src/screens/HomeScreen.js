@@ -60,6 +60,7 @@ import { COLORS, SHADOWS } from "../theme";
 import { useAuth } from "../context/AuthContext";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import BottomSheet, { BottomSheetView } from "@gorhom/bottom-sheet";
+import { isNetworkError, getErrorMessage } from "../utils/errorHandler";
 
 const SNAP_POINTS = ["25%", "50%", "75%"];
 
@@ -91,6 +92,7 @@ const HomeScreen = () => {
   const [searchQuery, setSearchQuery] = useState("");
   const [busData, setBusData] = useState(null);
   const [noBusFound, setNoBusFound] = useState(false);
+  const [trackingError, setTrackingError] = useState(null);
   const [isBusSearchAttempted, setIsBusSearchAttempted] = useState(false);
   const [selectedPreviewNumber, setSelectedPreviewNumber] = useState(null);
   const [selectedBusNo, setSelectedBusNo] = useState(null);
@@ -178,6 +180,7 @@ const HomeScreen = () => {
     setRoutesData(null);
     setIsBusFound(false);
     setNoBusFound(false);
+    setTrackingError(null);
     setIsOffline(false);
     setIsBusSearchAttempted(false);
     setSelectedPreviewNumber(null);
@@ -294,7 +297,6 @@ const HomeScreen = () => {
         }
       } catch (err) {
         if (cancelled) return;
-        // Bus assigned to the user does not exist / not found.
         console.log(
           `Auto-load assigned bus ${assignedBusNo} error:`,
           err.message,
@@ -304,7 +306,16 @@ const HomeScreen = () => {
         setLastGoodLocation(null);
         setRoutesData(null);
         setLocationStatus("error");
-        setNoBusFound(true);
+        // Distinguish a network problem from a genuine "bus not found".
+        if (isNetworkError(err)) {
+          setNoBusFound(false);
+          setTrackingError(
+            "Cannot connect to the server. Please check your internet connection.",
+          );
+        } else {
+          setNoBusFound(true);
+          setTrackingError(null);
+        }
         setIsBusFound(false);
       }
     })();
@@ -623,7 +634,16 @@ const HomeScreen = () => {
         setIsBusFound(true);
       } else {
         setLocationStatus("error");
-        setNoBusFound(true);
+        // Distinguish a network problem from a genuine "bus not found".
+        if (isNetworkError(err)) {
+          setNoBusFound(false);
+          setTrackingError(
+            "Cannot connect to the server. Please check your internet connection.",
+          );
+        } else {
+          setNoBusFound(true);
+          setTrackingError(null);
+        }
       }
     }
     await refreshBuses();
@@ -648,6 +668,7 @@ const HomeScreen = () => {
     // Prevent stale data from previous search appearing while loading.
     const currentSearch = ++searchCounterRef.current;
     setNoBusFound(false);
+    setTrackingError(null);
     setLocationStatus("loading");
     setIsBusSearchAttempted(true);
     setIsOffline(false);
@@ -724,7 +745,16 @@ const HomeScreen = () => {
         setIsBusFound(false);
         setRoutesData(null);
         setLocationStatus("error");
-        setNoBusFound(true);
+        // Distinguish a network problem from a genuine "bus not found".
+        if (isNetworkError(err)) {
+          setNoBusFound(false);
+          setTrackingError(
+            "Cannot connect to the server. Please check your internet connection.",
+          );
+        } else {
+          setNoBusFound(true);
+          setTrackingError(null);
+        }
       }
     } else {
       const busNo = query.toUpperCase();
@@ -792,10 +822,46 @@ const HomeScreen = () => {
         setIsBusFound(false);
         setRoutesData(null);
         setLocationStatus("error");
-        setNoBusFound(true);
+        // Distinguish a network problem from a genuine "bus not found".
+        if (isNetworkError(err)) {
+          setNoBusFound(false);
+          setTrackingError(
+            "Cannot connect to the server. Please check your internet connection.",
+          );
+        } else {
+          setNoBusFound(true);
+          setTrackingError(null);
+        }
       }
     }
   };
+
+  /**
+   * Cancel / clear the current bus search. Fully resets ALL bus state so the
+   * map reverts to the KIOT college default (no stale marker). Increments the
+   * search counter so any in-flight async search result is ignored.
+   */
+  const handleClearSearch = useCallback(() => {
+    searchCounterRef.current += 1;
+    setSearchQuery("");
+    setNoBusFound(false);
+    setTrackingError(null);
+    setLocationStatus("idle");
+    setIsBusSearchAttempted(false);
+    setSelectedPreviewNumber(null);
+    setSelectedBusNo(null);
+    setLastGoodLocation(null);
+    setBusData(null);
+    setIsOffline(false);
+    setIsBusFound(false);
+    setRoutesData(null);
+    setMarkerStatus("moving");
+    sameCoordinateCountRef.current = 0;
+    lastCoordinateRef.current = null;
+    busStatusRef.current = "moving";
+    selectedBusNoRef.current = null;
+    if (isAdmin) setIsSuperadminSearched(false);
+  }, [isAdmin]);
 
   const shouldShowBusMarker = (() => {
     if (!isAdmin) return !!selectedBusNo || !!selectedPreviewNumber;
@@ -924,10 +990,11 @@ const HomeScreen = () => {
             placeholderTextColor={COLORS.textBody}
           />
 
-          {/* CLEAR BUTTON */}
+          {/* CLEAR / CANCEL BUTTON — fully resets the search so the map
+              reverts to the KIOT college default (no stale bus marker). */}
           {searchQuery ? (
             <TouchableOpacity
-              onPress={() => setSearchQuery("")}
+              onPress={handleClearSearch}
               style={styles.clearButton}
             >
               <Ionicons name="close-circle" size={18} color={COLORS.textBody} />
@@ -1003,7 +1070,16 @@ const HomeScreen = () => {
           </View>
 
           <View style={styles.content}>
-            {error ? (
+            {trackingError ? (
+              <View>
+                <Text style={[styles.infoText, styles.errorText]}>
+                  {trackingError}
+                </Text>
+                <Text style={[styles.infoText, styles.subInfoText]}>
+                  Showing KIOT campus location.
+                </Text>
+              </View>
+            ) : error ? (
               <Text style={[styles.infoText, styles.errorText]}>{error}</Text>
             ) : noBusFound ? (
               <View>
@@ -1477,7 +1553,7 @@ const styles = StyleSheet.create({
   // stops modal
   modalOverlay: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.45)",
+    backgroundColor: "transparent",
     justifyContent: "flex-end",
   },
   modalContent: {

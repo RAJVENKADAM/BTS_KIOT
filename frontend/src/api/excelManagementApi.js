@@ -2,35 +2,27 @@
  * excelManagementApi — CRUD operations for Excel uploads and user management.
  * Used by AddUsersScreen for importing/managing users via Excel.
  */
-import { API_BASE_URL } from './api';
+import { API_BASE_URL } from "./api";
+import {
+  fetchJson,
+  isNetworkError,
+  getErrorMessage,
+} from "../utils/errorHandler";
 
 export const excelManagementApi = {
   // Get all Excel uploads
   getAllUploads: async (token) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/excel-management`, {
-        method: 'GET',
+      const data = await fetchJson(`${API_BASE_URL}/api/excel-management`, {
+        method: "GET",
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
         },
       });
-
-      const rawText = await response.text();
-      const data = rawText ? JSON.parse(rawText) : {};
-
-      if (!response.ok) {
-        // Handle auth errors - let caller decide what to do
-        if (response.status === 401 || response.status === 403) {
-          console.error('Auth error - token may be invalid:', data.error);
-          throw new Error('Authentication failed. Please login again.');
-        }
-        throw new Error(data.error || 'Failed to fetch Excel uploads');
-      }
-
       return data;
     } catch (error) {
-      console.error('Get Excel uploads error:', error);
+      console.error("Get Excel uploads error:", error);
       throw error;
     }
   },
@@ -38,24 +30,19 @@ export const excelManagementApi = {
   // Get specific Excel upload
   getUpload: async (token, id) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/excel-management/${id}`, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
+      const data = await fetchJson(
+        `${API_BASE_URL}/api/excel-management/${id}`,
+        {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
         },
-      });
-
-      const rawText = await response.text();
-      const data = rawText ? JSON.parse(rawText) : {};
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to fetch Excel upload');
-      }
-
+      );
       return data;
     } catch (error) {
-      console.error('Get Excel upload error:', error);
+      console.error("Get Excel upload error:", error);
       throw error;
     }
   },
@@ -64,30 +51,27 @@ export const excelManagementApi = {
   reupload: async (token, id, file) => {
     try {
       const formData = new FormData();
-      formData.append('file', {
+      formData.append("file", {
         uri: file.uri,
-        name: file.name || 'users.xlsx',
-        type: file.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        name: file.name || "users.xlsx",
+        type:
+          file.type ||
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       });
 
-      const response = await fetch(`${API_BASE_URL}/api/excel-management/${id}`, {
-        method: 'PUT',
-        headers: {
-          'Authorization': `Bearer ${token}`,
+      const data = await fetchJson(
+        `${API_BASE_URL}/api/excel-management/${id}`,
+        {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+          body: formData,
         },
-        body: formData,
-      });
-
-      const rawText = await response.text();
-      const data = rawText ? JSON.parse(rawText) : {};
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to re-upload Excel file');
-      }
-
+      );
       return data;
     } catch (error) {
-      console.error('Re-upload Excel error:', error);
+      console.error("Re-upload Excel error:", error);
       throw error;
     }
   },
@@ -95,24 +79,19 @@ export const excelManagementApi = {
   // Delete Excel upload
   deleteUpload: async (token, id) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/excel-management/${id}`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
+      const data = await fetchJson(
+        `${API_BASE_URL}/api/excel-management/${id}`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
         },
-      });
-
-      const rawText = await response.text();
-      const data = rawText ? JSON.parse(rawText) : {};
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to delete Excel upload');
-      }
-
+      );
       return data;
     } catch (error) {
-      console.error('Delete Excel upload error:', error);
+      console.error("Delete Excel upload error:", error);
       throw error;
     }
   },
@@ -120,66 +99,51 @@ export const excelManagementApi = {
   // Get users by Excel upload
   getUsersByUpload: async (token, id) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/excel-management/${id}/users`, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
+      const data = await fetchJson(
+        `${API_BASE_URL}/api/excel-management/${id}/users`,
+        {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
         },
-      });
-
-      const rawText = await response.text();
-      const data = rawText ? JSON.parse(rawText) : {};
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to fetch users');
-      }
-
+      );
       return data;
     } catch (error) {
-      console.error('Get users by upload error:', error);
+      console.error("Get users by upload error:", error);
       throw error;
     }
   },
 
   // Update user (superadmin)
   updateUser: async (token, userId, payload) => {
-    const response = await fetch(`${API_BASE_URL}/api/superadmin/users/${userId}`, {
-      method: 'PUT',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
+    const data = await fetchJson(
+      `${API_BASE_URL}/api/superadmin/users/${userId}`,
+      {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
       },
-      body: JSON.stringify(payload),
-    });
-
-    const rawText = await response.text();
-    const data = rawText ? JSON.parse(rawText) : {};
-
-    if (!response.ok) {
-      throw new Error(data?.error || 'Failed to update user');
-    }
-
+    );
     return data;
   },
 
   // Deactivate user (superadmin)
   deactivateUser: async (token, userId) => {
-    const response = await fetch(`${API_BASE_URL}/api/superadmin/users/${userId}`, {
-      method: 'DELETE',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
+    const data = await fetchJson(
+      `${API_BASE_URL}/api/superadmin/users/${userId}`,
+      {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
       },
-    });
-
-    const rawText = await response.text();
-    const data = rawText ? JSON.parse(rawText) : {};
-
-    if (!response.ok) {
-      throw new Error(data?.error || 'Failed to deactivate user');
-    }
-
+    );
     return data;
-  }
+  },
 };

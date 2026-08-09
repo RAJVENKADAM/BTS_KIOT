@@ -3,11 +3,18 @@
  * Provides buses list, selected bus, live location, ETA, plan selection,
  * and socket connection for live tracking updates.
  */
-import React, { createContext, useContext, useReducer, useEffect, useState } from 'react';
-import io from 'socket.io-client';
-import { API_BASE_URL } from '../api/api';
-import { useAuth } from './AuthContext';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import React, {
+  createContext,
+  useContext,
+  useReducer,
+  useEffect,
+  useState,
+} from "react";
+import io from "socket.io-client";
+import { API_BASE_URL } from "../api/api";
+import { useAuth } from "./AuthContext";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { isNetworkError, getErrorMessage } from "../utils/errorHandler";
 
 const BusContext = createContext();
 
@@ -20,40 +27,47 @@ const initialState = {
   etaToCollege: null,
   loading: false,
   error: null,
-  selectedPlan: 'PLAN A', // Default plan
+  selectedPlan: "PLAN A", // Default plan
 };
 
 const busReducer = (state, action) => {
   switch (action.type) {
-    case 'SET_LOADING':
+    case "SET_LOADING":
       return { ...state, loading: action.payload, error: null };
-    case 'SET_ERROR':
+    case "SET_ERROR":
       return { ...state, error: action.payload, loading: false };
-    case 'SET_BUSES':
+    case "SET_BUSES":
       return { ...state, buses: action.payload };
-    case 'SET_SELECTED_BUS':
+    case "SET_SELECTED_BUS":
       return { ...state, selectedBus: action.payload };
-    case 'UPDATE_BUS_STATUS':
+    case "UPDATE_BUS_STATUS":
       return {
         ...state,
-        buses: state.buses.map(bus => 
-          (bus.busNo === action.payload.busNo || bus.bus_no === action.payload.busNo) 
-            ? { ...bus, ...action.payload } 
-            : bus
+        buses: state.buses.map((bus) =>
+          bus.busNo === action.payload.busNo ||
+          bus.bus_no === action.payload.busNo
+            ? { ...bus, ...action.payload }
+            : bus,
         ),
-        selectedBus: state.selectedBus?.busNo === action.payload.busNo || state.selectedBus?.bus_no === action.payload.busNo
-          ? { ...state.selectedBus, ...action.payload } 
-          : state.selectedBus,
+        selectedBus:
+          state.selectedBus?.busNo === action.payload.busNo ||
+          state.selectedBus?.bus_no === action.payload.busNo
+            ? { ...state.selectedBus, ...action.payload }
+            : state.selectedBus,
       };
-    case 'SET_SELECTED_PREVIEW':
+    case "SET_SELECTED_PREVIEW":
       return { ...state, selectedPreviewNumber: action.payload };
-    case 'SET_LOCATION':
+    case "SET_LOCATION":
       return { ...state, currentLocation: action.payload };
-    case 'SET_ETA':
-      return { ...state, etaToUser: action.payload.etaToUser, etaToCollege: action.payload.etaToCollege };
-    case 'SET_SELECTED_PLAN':
+    case "SET_ETA":
+      return {
+        ...state,
+        etaToUser: action.payload.etaToUser,
+        etaToCollege: action.payload.etaToCollege,
+      };
+    case "SET_SELECTED_PLAN":
       return { ...state, selectedPlan: action.payload };
-    case 'RESET':
+    case "RESET":
       return initialState;
     default:
       return state;
@@ -83,9 +97,9 @@ export const BusProvider = ({ children }) => {
 
     // Connect to the root namespace — backend socket.io serves only "/".
     // Backend uses `path: "/socket.io"` (no trailing slash).
-    const newSocket = io(`${API_BASE_URL}`, { 
-      path: '/socket.io',
-      transports: ['websocket'],
+    const newSocket = io(`${API_BASE_URL}`, {
+      path: "/socket.io",
+      transports: ["websocket"],
 
       auth: { token },
       reconnection: true,
@@ -94,31 +108,31 @@ export const BusProvider = ({ children }) => {
       reconnectionAttempts: 5,
     });
 
-    newSocket.on('connect', () => {
-      console.log('BusContext socket connected:', newSocket.id);
+    newSocket.on("connect", () => {
+      console.log("BusContext socket connected:", newSocket.id);
       setSocket(newSocket);
     });
-    
-    newSocket.on('locationUpdate', (data) => {
-      dispatch({ type: 'UPDATE_BUS_STATUS', payload: data });
+
+    newSocket.on("locationUpdate", (data) => {
+      dispatch({ type: "UPDATE_BUS_STATUS", payload: data });
     });
 
-    newSocket.on('connect_error', (error) => {
-      console.log('BusContext socket connect error:', error.message);
+    newSocket.on("connect_error", (error) => {
+      console.log("BusContext socket connect error:", error.message);
     });
 
-    newSocket.on('bus-update', (data) => {
-      console.log('BusContext bus-update:', data);
-      dispatch({ type: 'UPDATE_BUS_STATUS', payload: data });
-      
+    newSocket.on("bus-update", (data) => {
+      console.log("BusContext bus-update:", data);
+      dispatch({ type: "UPDATE_BUS_STATUS", payload: data });
+
       // Direct plan update if available, plus refresh for robustness
-      if (data.actionType === 'PLAN_CHANGED' && data.currentPlan) {
-        dispatch({ 
-          type: 'UPDATE_BUS_STATUS', 
-          payload: { busNo: data.busNo, currentPlan: data.currentPlan } 
+      if (data.actionType === "PLAN_CHANGED" && data.currentPlan) {
+        dispatch({
+          type: "UPDATE_BUS_STATUS",
+          payload: { busNo: data.busNo, currentPlan: data.currentPlan },
         });
       }
-      if (data.actionType === 'PLAN_CHANGED') {
+      if (data.actionType === "PLAN_CHANGED") {
         refreshBuses();
       }
     });
@@ -134,81 +148,108 @@ export const BusProvider = ({ children }) => {
   const getSocket = () => socket;
 
   const loadBuses = async () => {
-    dispatch({ type: 'SET_LOADING', payload: true });
+    dispatch({ type: "SET_LOADING", payload: true });
     try {
-      const cached = await AsyncStorage.getItem('buses');
+      const cached = await AsyncStorage.getItem("buses");
       if (cached) {
-        dispatch({ type: 'SET_BUSES', payload: JSON.parse(cached) });
+        dispatch({ type: "SET_BUSES", payload: JSON.parse(cached) });
       }
     } catch (err) {
-      console.error('Cache load error:', err);
+      console.error("Cache load error:", err);
     } finally {
-      dispatch({ type: 'SET_LOADING', payload: false });
+      dispatch({ type: "SET_LOADING", payload: false });
     }
   };
 
   const refreshBuses = async () => {
-    dispatch({ type: 'SET_LOADING', payload: true });
+    dispatch({ type: "SET_LOADING", payload: true });
     try {
       const response = await fetch(`${API_BASE_URL}/api/bus/get-all-buses`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      const data = await response.json();
+      const rawText = await response.text();
+      const data = rawText ? JSON.parse(rawText) : {};
       if (response.ok) {
-        dispatch({ type: 'SET_BUSES', payload: data.buses });
-        await AsyncStorage.setItem('buses', JSON.stringify(data.buses));
+        dispatch({ type: "SET_BUSES", payload: data.buses });
+        dispatch({ type: "SET_ERROR", payload: null });
+        await AsyncStorage.setItem("buses", JSON.stringify(data.buses));
+      } else {
+        // Non-OK response → surface a descriptive message based on status.
+        const err = new Error(
+          data.error || `Request failed (${response.status})`,
+        );
+        err.status = response.status;
+        throw err;
       }
     } catch (error) {
-      dispatch({ type: 'SET_ERROR', payload: error.message });
+      // Network error → clear connection message; otherwise show server message.
+      const message = isNetworkError(error)
+        ? "Cannot connect to the server. Please check your internet connection."
+        : getErrorMessage(error, "Failed to load buses.");
+      dispatch({ type: "SET_ERROR", payload: message });
     } finally {
-      dispatch({ type: 'SET_LOADING', payload: false });
+      dispatch({ type: "SET_LOADING", payload: false });
     }
   };
 
   const selectPreviewBus = async (previewNumber) => {
-    dispatch({ type: 'SET_LOADING', payload: true });
+    dispatch({ type: "SET_LOADING", payload: true });
     try {
-      const response = await fetch(`${API_BASE_URL}/api/bus/track-by-preview/${previewNumber}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const response = await fetch(
+        `${API_BASE_URL}/api/bus/track-by-preview/${previewNumber}`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
       const data = await response.json();
-      
-      const bus = state.buses.find(b => b.previewNumber === previewNumber);
-      dispatch({ type: 'SET_SELECTED_PREVIEW', payload: previewNumber });
-      dispatch({ type: 'SET_SELECTED_BUS', payload: { previewNumber, busNo: data.busNo || 'Unknown' } });
-      await AsyncStorage.setItem('selectedBusPreviewNumber', previewNumber);
+
+      const bus = state.buses.find((b) => b.previewNumber === previewNumber);
+      dispatch({ type: "SET_SELECTED_PREVIEW", payload: previewNumber });
+      dispatch({
+        type: "SET_SELECTED_BUS",
+        payload: { previewNumber, busNo: data.busNo || "Unknown" },
+      });
+      await AsyncStorage.setItem("selectedBusPreviewNumber", previewNumber);
       const currentSocket = getSocket();
-      if (currentSocket) currentSocket.emit('join-bus', data.busNo);
+      if (currentSocket) currentSocket.emit("join-bus", data.busNo);
     } catch (error) {
-      dispatch({ type: 'SET_ERROR', payload: error.message });
+      dispatch({
+        type: "SET_ERROR",
+        payload: getErrorMessage(
+          error,
+          "Could not track the selected bus. Please try again.",
+        ),
+      });
     } finally {
-      dispatch({ type: 'SET_LOADING', payload: false });
+      dispatch({ type: "SET_LOADING", payload: false });
     }
   };
 
   const selectBus = (busNo) => {
-    const bus = state.buses.find(b => b.busNo === busNo);
-    dispatch({ type: 'SET_SELECTED_BUS', payload: bus || null });
+    const bus = state.buses.find((b) => b.busNo === busNo);
+    dispatch({ type: "SET_SELECTED_BUS", payload: bus || null });
   };
 
   const setSelectedPlan = (plan) => {
-    dispatch({ type: 'SET_SELECTED_PLAN', payload: plan });
+    dispatch({ type: "SET_SELECTED_PLAN", payload: plan });
   };
 
   const updateLocation = (location) => {
-    dispatch({ type: 'SET_LOCATION', payload: location });
+    dispatch({ type: "SET_LOCATION", payload: location });
   };
 
   // Load persisted selected bus on startup
   useEffect(() => {
     const loadPersistedBus = async () => {
       try {
-        const previewNumber = await AsyncStorage.getItem('selectedBusPreviewNumber');
+        const previewNumber = await AsyncStorage.getItem(
+          "selectedBusPreviewNumber",
+        );
         if (previewNumber && token) {
           selectPreviewBus(previewNumber);
         }
       } catch (error) {
-        console.error('Failed to load persisted bus:', error);
+        console.error("Failed to load persisted bus:", error);
       }
     };
     loadPersistedBus();
@@ -224,11 +265,7 @@ export const BusProvider = ({ children }) => {
     getSocket,
   };
 
-  return (
-    <BusContext.Provider value={value}>
-      {children}
-    </BusContext.Provider>
-  );
+  return <BusContext.Provider value={value}>{children}</BusContext.Provider>;
 };
 
 export const useBus = () => useContext(BusContext);
