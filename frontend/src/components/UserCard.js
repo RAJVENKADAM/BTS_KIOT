@@ -4,6 +4,7 @@ import { MaterialIcons } from '@expo/vector-icons';
 import Card from './UI/Card';
 import { COLORS, RADIUS, SHADOWS } from '../theme';
 import { Body, MutedText, Header as TypographyHeader } from './UI/Typography';
+import { getDisplayBusNumber } from '../utils/busDisplay';
 
 export default function UserCard({
   user,
@@ -59,7 +60,7 @@ export default function UserCard({
           {!editing ? (
             <View style={styles.metaRow}>
               <Body style={styles.metaText}>Role: <Text style={styles.metaValue}>{user?.role || '-'}</Text></Body>
-              <Body style={styles.metaText}>Bus: <Text style={styles.metaValue}>{user?.bus_no || '—'}</Text></Body>
+              <Body style={styles.metaText}>Bus: <Text style={styles.metaValue}>{getDisplayBusNumber({ previewNumber: user?.previewNumber ?? user?.preview_number, busNo: user?.bus_no })}</Text></Body>
             </View>
           ) : (
             <View style={styles.form}>

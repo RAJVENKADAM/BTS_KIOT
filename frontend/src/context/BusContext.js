@@ -125,13 +125,6 @@ export const BusProvider = ({ children }) => {
       console.log("BusContext bus-update:", data);
       dispatch({ type: "UPDATE_BUS_STATUS", payload: data });
 
-      // Direct plan update if available, plus refresh for robustness
-      if (data.actionType === "PLAN_CHANGED" && data.currentPlan) {
-        dispatch({
-          type: "UPDATE_BUS_STATUS",
-          payload: { busNo: data.busNo, currentPlan: data.currentPlan },
-        });
-      }
       if (data.actionType === "PLAN_CHANGED") {
         refreshBuses();
       }

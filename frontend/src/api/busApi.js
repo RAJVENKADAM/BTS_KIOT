@@ -122,7 +122,7 @@ export const busApi = {
     return data;
   },
 
-  // Change the current plan (superadmin)
+  // Change the current plan for an individual bus (legacy path; global plan is managed separately)
   updatePlan: async (token, busNo, plan) => {
     const data = await fetchJson(
       `${API_BASE_URL}/api/bus/update-plan/${busNo}`,
@@ -138,10 +138,62 @@ export const busApi = {
     return data;
   },
 
+  getGlobalActivePlan: async (token) => {
+    const data = await fetchJson(`${API_BASE_URL}/api/bus/global-plan`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!data.success) {
+      const err = new Error(
+        data.error || "Failed to load the active route plan",
+      );
+      err.code = "SERVER";
+      throw err;
+    }
+    return data;
+  },
+
+  setGlobalActivePlan: async (token, plan) => {
+    const data = await fetchJson(`${API_BASE_URL}/api/bus/global-plan`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ plan }),
+    });
+    if (!data.success) {
+      const err = new Error(
+        data.error || "Failed to update the active route plan",
+      );
+      err.code = "SERVER";
+      throw err;
+    }
+    return data;
+  },
+
+  getAllBuses: async (token) => {
+    const data = await fetchJson(`${API_BASE_URL}/api/bus/get-all-buses`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    return data;
+  },
+
+  getBusesForPlan: async (token, plan) => {
+    const data = await fetchJson(
+      `${API_BASE_URL}/api/bus/plan-buses/${encodeURIComponent(plan || "PLAN A")}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+    );
+    return data;
+  },
+
   // Update bus details (preview number, GPS device id, reg no)
   updateBusDetails: async (token, busNo, payload) => {
     const data = await fetchJson(
-      `${API_BASE_URL}/api/bus/update-bus-details/${busNo}`,
+      `${API_BASE_URL}/api/bus/update-bus-details/${encodeURIComponent(busNo)}`,
       {
         method: "PUT",
         headers: {
@@ -151,6 +203,7 @@ export const busApi = {
         body: JSON.stringify(payload),
       },
     );
+
     return data;
   },
 };

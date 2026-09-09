@@ -58,6 +58,19 @@ router.put(
   BusController.updatePlan   // IMPORTANT FIX
 );
 
+router.get(
+  '/global-plan',
+  authenticateToken,
+  BusController.getGlobalActivePlan,
+);
+
+router.put(
+  '/global-plan',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  BusController.setGlobalActivePlan,
+);
+
 router.put(
   '/update-bus-details/:busNo',
   authenticateToken,
@@ -121,6 +134,12 @@ router.get(
   '/get-all-buses',
   authenticateToken,
   BusController.getAllBuses
+);
+
+router.get(
+  '/plan-buses/:plan',
+  authenticateToken,
+  BusController.getBusesForPlan
 );
 
 router.get(

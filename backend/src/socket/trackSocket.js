@@ -58,7 +58,6 @@ function registerTrackSocketHandlers() {
           busNo: bus.bus_no,
           bus_no: bus.bus_no,
           previewNumber: bus.preview_number,
-          currentPlan: bus.current_plan,
           latitude: location ? location.latitude : null,
           longitude: location ? location.longitude : null,
           speed: location ? location.speed : 0,

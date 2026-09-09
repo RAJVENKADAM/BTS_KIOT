@@ -33,10 +33,6 @@ const busSchema = new mongoose.Schema(
       enum: ['active', 'inactive'],
       default: 'active'
     },
-    current_plan: {
-      type: String,
-      default: 'PLAN A'
-    },
     mobile_live: {
       type: Boolean,
       default: false

@@ -1,7 +1,30 @@
 const Bus = require("../models/Bus");
 const BusRoute = require("../models/BusRoute");
 const BusLiveLocation = require("../models/BusLiveLocation");
+const AppSetting = require("../models/AppSetting");
 const { getIO } = require("../socket");
+
+const GLOBAL_ACTIVE_PLAN_KEY = "global_active_plan";
+const DEFAULT_PLAN_NAMES = ["PLAN A", "PLAN B", "PLAN C", "PLAN D"];
+
+function normalizePlanName(plan) {
+  const value = String(plan ?? "")
+    .trim()
+    .toUpperCase();
+  return value || "PLAN A";
+}
+
+async function getCurrentGlobalPlan() {
+  const setting = await AppSetting.findOne({
+    key: GLOBAL_ACTIVE_PLAN_KEY,
+  }).lean();
+  const activePlan = normalizePlanName(setting?.value || "PLAN A");
+  return DEFAULT_PLAN_NAMES.includes(activePlan) ? activePlan : "PLAN A";
+}
+
+function buildNotActiveMessage(activePlan) {
+  return `This bus is not in the active global plan (${activePlan}).`;
+}
 
 // ================= SHARED HELPERS =================
 /**
@@ -146,7 +169,6 @@ async function getAllBuses(req, res) {
         status: bus.status,
         gpsDeviceId: bus.gps_device_id,
         mobileLive: bus.mobile_live,
-        currentPlan: bus.current_plan,
         latitude: location?.latitude ?? null,
         longitude: location?.longitude ?? null,
         speed: location?.speed ?? 0,
@@ -164,6 +186,55 @@ async function getAllBuses(req, res) {
   } catch (error) {
     console.error("GET ALL BUSES ERROR:", error);
     res.status(500).json({ error: error.message });
+  }
+}
+
+async function getBusesForPlan(req, res) {
+  try {
+    const { plan } = req.params || {};
+    const targetPlan = normalizePlanName(plan || "PLAN A");
+
+    const busIds = await BusRoute.find({ plan_name: targetPlan })
+      .distinct("bus_id")
+      .catch(() => []);
+
+    const buses = await Bus.find({
+      _id: { $in: busIds },
+      status: "active",
+    }).sort({ bus_no: 1, preview_number: 1 });
+
+    const liveLocations = await BusLiveLocation.find({
+      bus_id: { $in: buses.map((bus) => bus._id) },
+    });
+    const locationMap = new Map(
+      liveLocations.map((loc) => [loc.bus_id.toString(), loc]),
+    );
+
+    const response = buses.map((bus) => {
+      const liveLocation = locationMap.get(bus._id.toString());
+      return {
+        busNo: bus.bus_no,
+        previewNumber: bus.preview_number,
+        status: bus.status,
+        latitude: liveLocation?.latitude ?? null,
+        longitude: liveLocation?.longitude ?? null,
+        speed: liveLocation?.speed ?? 0,
+        isOnline: !!liveLocation,
+        lastUpdated:
+          liveLocation?.lastSuccessfulGpsUpdate ?? liveLocation?.updatedAt ?? null,
+        source: liveLocation?.source ?? "offline",
+      };
+    });
+
+    res.status(200).json({
+      success: true,
+      plan: targetPlan,
+      buses: response,
+      count: response.length,
+    });
+  } catch (error) {
+    console.error("GET BUSES FOR PLAN ERROR:", error);
+    res.status(500).json({ success: false, error: error.message });
   }
 }
 
@@ -248,40 +319,59 @@ async function updatePreviewNumber(req, res) {
 // ================= UPDATE PLAN =================
 async function updatePlan(req, res) {
   try {
-    const { busNo } = req.params;
-    const { plan } = req.body;
-
-    const bus = await findBusByIdentifier(busNo);
-    if (!bus) {
-      return res
-        .status(404)
-        .json({ success: false, error: `Bus ${busNo} not found` });
-    }
-
-    await Bus.updateOne({ _id: bus._id }, { current_plan: plan });
-
-    // Emit real-time plan change to all clients in the bus room.
-    // Use the real bus_no for the room so socket joins stay consistent.
-    const roomBusNo = bus.bus_no;
-    const io = getIO();
-    if (io) {
-      io.to(`bus_${roomBusNo}`).emit("bus-update", {
-        busNo: roomBusNo,
-        currentPlan: plan,
-        actionType: "PLAN_CHANGED",
-        timestamp: new Date().toISOString(),
-      });
-    }
-
-    res.json({
-      success: true,
-      message: "Plan updated successfully",
-      busNo: busNo,
-      newPlan: plan,
+    return res.status(400).json({
+      success: false,
+      error:
+        "Individual bus plans are no longer supported. Use the global active plan instead.",
     });
   } catch (error) {
     console.error("Update plan error:", error);
     res.status(500).json({ error: error.message });
+  }
+}
+
+// ================= GLOBAL ACTIVE PLAN =================
+async function getGlobalActivePlan(req, res) {
+  try {
+    const activePlan = await getCurrentGlobalPlan();
+    res.json({
+      success: true,
+      activePlan,
+      planNames: DEFAULT_PLAN_NAMES,
+    });
+  } catch (error) {
+    console.error("getGlobalActivePlan error:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+}
+
+async function setGlobalActivePlan(req, res) {
+  try {
+    const { plan } = req.body;
+    const normalized = normalizePlanName(plan);
+
+    if (!DEFAULT_PLAN_NAMES.includes(normalized)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid plan. Choose PLAN A, PLAN B, PLAN C, or PLAN D.",
+      });
+    }
+
+    const updated = await AppSetting.findOneAndUpdate(
+      { key: GLOBAL_ACTIVE_PLAN_KEY },
+      { key: GLOBAL_ACTIVE_PLAN_KEY, value: normalized },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+
+    res.json({
+      success: true,
+      message: "Global active plan updated successfully",
+      activePlan: updated.value,
+      planNames: DEFAULT_PLAN_NAMES,
+    });
+  } catch (error) {
+    console.error("setGlobalActivePlan error:", error);
+    res.status(500).json({ success: false, error: error.message });
   }
 }
 
@@ -310,11 +400,21 @@ async function getBusRoutes(req, res) {
       });
     }
 
+    const activePlan = await getCurrentGlobalPlan();
+    const isBusActiveInCurrentPlan = await BusRoute.exists({
+      bus_id: bus._id,
+      plan_name: activePlan,
+    });
+
     res.json({
       success: true,
       busNo: bus.bus_no,
       previewNumber: bus.preview_number,
-      currentPlan: bus.current_plan,
+      activePlan,
+      isBusActiveInCurrentPlan: !!isBusActiveInCurrentPlan,
+      notActiveMessage: isBusActiveInCurrentPlan
+        ? null
+        : buildNotActiveMessage(activePlan),
       planNames: Object.keys(plansMap),
       plans: plansMap,
     });
@@ -439,6 +539,11 @@ async function getLiveLocation(req, res) {
     }
 
     const location = await BusLiveLocation.findOne({ bus_id: bus._id });
+    const activePlan = await getCurrentGlobalPlan();
+    const isBusActiveInCurrentPlan = await BusRoute.exists({
+      bus_id: bus._id,
+      plan_name: activePlan,
+    });
 
     // ⚠️ Frontend validation: busApi.getBusLocation() rejects responses whose
     // busNo doesn't match the requested value. When the user searched by a
@@ -453,7 +558,12 @@ async function getLiveLocation(req, res) {
       success: !!location,
       busNo: responseBusNo,
       bus_no: responseBusNo,
-      currentPlan: bus.current_plan,
+      currentPlan: null,
+      activePlan,
+      isBusActiveInCurrentPlan: !!isBusActiveInCurrentPlan,
+      notActiveMessage: isBusActiveInCurrentPlan
+        ? null
+        : buildNotActiveMessage(activePlan),
       previewNumber: bus.preview_number,
       latitude: location?.latitude ?? null,
       longitude: location?.longitude ?? null,
@@ -505,6 +615,11 @@ async function trackByPreview(req, res) {
     }
 
     const location = await BusLiveLocation.findOne({ bus_id: bus._id });
+    const activePlan = await getCurrentGlobalPlan();
+    const isBusActiveInCurrentPlan = await BusRoute.exists({
+      bus_id: bus._id,
+      plan_name: activePlan,
+    });
 
     // Bus found → always return 200 with offline status if no location doc,
     // so the frontend can show the bus's plan even when GPS is offline.
@@ -512,7 +627,12 @@ async function trackByPreview(req, res) {
       success: true,
       busNo: bus.bus_no,
       previewNumber: bus.preview_number,
-      currentPlan: bus.current_plan,
+      currentPlan: null,
+      activePlan,
+      isBusActiveInCurrentPlan: !!isBusActiveInCurrentPlan,
+      notActiveMessage: isBusActiveInCurrentPlan
+        ? null
+        : buildNotActiveMessage(activePlan),
       latitude: location?.latitude ?? null,
       longitude: location?.longitude ?? null,
       speed: location?.speed ?? 0,
@@ -535,12 +655,15 @@ module.exports = {
   uploadBusRoutes,
   updateBusNumber,
   getAllBuses,
+  getBusesForPlan,
   deleteBus,
   activateBus,
   deactivateBus,
   validatePreviewNumber,
   updatePreviewNumber,
   updatePlan,
+  setGlobalActivePlan,
+  getGlobalActivePlan,
   updateBusDetails,
   getBusRoutes,
   getPlans,

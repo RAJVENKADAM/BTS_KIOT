@@ -18,6 +18,7 @@ import { useAuth } from '../context/AuthContext';
 import { COLORS, SPACING, RADIUS, SHADOWS } from '../theme';
 import { Header, Subtitle, Body, MutedText } from '../components/UI/Typography';
 import Card from '../components/UI/Card';
+import { getDisplayBusNumber } from '../utils/busDisplay';
 
 export default function ProfileScreen() {
   const { user, logout, loading } = useAuth();
@@ -93,7 +94,7 @@ export default function ProfileScreen() {
           <InfoItem label="Full Name" value={user?.name} icon="person-outline" />
           <InfoItem label="Email Address" value={user?.email} icon="mail-outline" />
           <InfoItem label="Role" value={user?.role} icon="shield-checkmark-outline" />
-          <InfoItem label="Bus Number" value={user?.bus_no} icon="bus-outline" />
+          <InfoItem label="Bus Number" value={getDisplayBusNumber({ previewNumber: user?.previewNumber ?? user?.preview_number, busNo: user?.bus_no })} icon="bus-outline" />
 
           <TouchableOpacity
             style={[styles.logoutButton, isLoggingOut && styles.logoutButtonDisabled]}

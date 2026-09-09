@@ -19,7 +19,7 @@
  * Socket Integration:
  * ───────────────────
  * - Joins/leaves socket room "bus_{busNo}" when selectedBusNo changes.
- * - Listens for "bus-update" events to update currentPlan in real time.
+ * - Listens for "bus-update" events to refresh live bus status in real time.
  * - No polling — live updates are socket-driven; manual refresh via handleRefresh.
  *
  * Search & Marker Rules:
@@ -61,6 +61,7 @@ import { useAuth } from "../context/AuthContext";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import BottomSheet, { BottomSheetView } from "@gorhom/bottom-sheet";
 import { isNetworkError, getErrorMessage } from "../utils/errorHandler";
+import { getDisplayBusNumber } from "../utils/busDisplay";
 
 const SNAP_POINTS = ["25%", "50%", "75%"];
 
@@ -102,11 +103,26 @@ const HomeScreen = () => {
   const [markerStatus, setMarkerStatus] = useState("moving");
   const [isOffline, setIsOffline] = useState(false);
 
-  // Plan / routes modal state
+  // Plan / routes modal / sheet state
   const [routesData, setRoutesData] = useState(null);
   const [showStopsModal, setShowStopsModal] = useState(false);
+  const [showPlanListModal, setShowPlanListModal] = useState(false);
+  const [planBuses, setPlanBuses] = useState([]);
   const [activePlanTab, setActivePlanTab] = useState("PLAN A");
+  const [globalPlan, setGlobalPlan] = useState("PLAN A");
   const [loadingRoutes, setLoadingRoutes] = useState(false);
+  const [loadingPlanBuses, setLoadingPlanBuses] = useState(false);
+  // Bottom-sheet control: show plans/stops inside the sheet instead of separate modal
+  const bottomSheetRef = useRef(null);
+  const [showPlanInSheet, setShowPlanInSheet] = useState(false);
+  const [planViewMode, setPlanViewMode] = useState(null); // 'activePlan' | 'stopsForBus' | null
+
+  const closeAllOverlayPanels = useCallback(() => {
+    setShowPlanListModal(false);
+    setShowStopsModal(false);
+    setShowPlanInSheet(false);
+    setPlanViewMode(null);
+  }, []);
   // True once the searched/selected bus is confirmed to exist (even offline / no GPS)
   const [isBusFound, setIsBusFound] = useState(false);
 
@@ -136,6 +152,11 @@ const HomeScreen = () => {
     },
     [isAdmin, user?.id, user?._id],
   );
+
+  const normalizePlanName = useCallback((plan) => {
+    const value = String(plan ?? "PLAN A").trim();
+    return value ? value.toUpperCase() : "PLAN A";
+  }, []);
 
   useEffect(() => {
     const persistBusData = async () => {
@@ -257,13 +278,29 @@ const HomeScreen = () => {
         setIsBusFound(true);
         setRoutesData((prev) => prev); // leave to the routes effect
 
+        if (data?.notActiveMessage) {
+          setTrackingError(data?.notActiveMessage);
+          setLocationStatus("offline");
+          setIsOffline(true);
+          setBusData({
+            ...data,
+            busNo: data.busNo || data.bus_no || assignedBusNo,
+          });
+          setLastGoodLocation({
+            ...data,
+            busNo: data.busNo || data.bus_no || assignedBusNo,
+          });
+          setNoBusFound(false);
+          return;
+        }
+
         if (isGpsStale(data) || !hasValidCoords) {
           // Found but offline / no live coords — show plan + (if available)
           // last known location. Only set busData when we have coords to avoid
           // a bogus "0.0 KM" bus card / marker for a coords-less bus.
           const offlineData = {
             ...data,
-            busNo: data.busNo || data.bus_no || assignedBusNo,
+            busNo: data.previewNumber || data || assignedBusNo,
           };
           if (hasValidCoords) {
             setBusData(offlineData);
@@ -279,7 +316,7 @@ const HomeScreen = () => {
           const nextBusData = {
             ...data,
             source: data.source || "gps",
-            busNo: data.busNo || data.bus_no || assignedBusNo,
+            busNo: data.previewNumber || data.bus_no || assignedBusNo,
           };
           setBusData(nextBusData);
           setLastGoodLocation(nextBusData);
@@ -324,7 +361,7 @@ const HomeScreen = () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id, user?._id, user?.bus_no, token, isAdmin]);
+  }, [user?.id, user?._id, user?.bus_no, token, isAdmin, globalPlan]);
 
   useEffect(() => {
     if (isAdmin) setIsSuperadminSearched(false);
@@ -349,15 +386,11 @@ const HomeScreen = () => {
         if (cancelled) return;
         setRoutesData(data);
         setIsBusFound(true);
-        setActivePlanTab(data.currentPlan || data.planNames?.[0] || "PLAN A");
-        // Ensure busData reflects the latest currentPlan
-        setBusData((prev) => {
-          if (!prev)
-            return { busNo: selectedBusNo, currentPlan: data.currentPlan };
-          if (prev.currentPlan && prev.currentPlan !== data.currentPlan)
-            return prev;
-          return { ...prev, currentPlan: data.currentPlan };
-        });
+        const preferredPlan =
+          data?.activePlan && (data.planNames || []).includes(data.activePlan)
+            ? data.activePlan
+            : data?.planNames?.[0] || globalPlan || "PLAN A";
+        setActivePlanTab(preferredPlan);
       })
       .catch((e) => console.log("Failed to load routes:", e.message))
       .finally(() => {
@@ -366,37 +399,7 @@ const HomeScreen = () => {
     return () => {
       cancelled = true;
     };
-  }, [selectedBusNo, token]);
-
-  useEffect(() => {
-    if (!socket) return;
-    const handleBusUpdate = (data) => {
-      if (!data) return;
-      const selected = selectedBusNoRef.current;
-      if (!selected) return;
-      const incomingBusNo = data.busNo ?? data.bus_no ?? data.busNumber;
-      if (!incomingBusNo || String(incomingBusNo) !== String(selected)) return;
-      const newPlan = data.currentPlan;
-      if (!newPlan || lastPlanRef.current === newPlan) return;
-      lastPlanRef.current = newPlan;
-      setBusData((prev) => {
-        if (!prev)
-          return {
-            busNo: selected,
-            currentPlan: newPlan,
-            _updatedAt: Date.now(),
-          };
-        return { ...prev, currentPlan: newPlan, _updatedAt: Date.now() };
-      });
-      // Keep plan modal state in sync with live plan changes
-      setRoutesData((prevRoutes) =>
-        prevRoutes ? { ...prevRoutes, currentPlan: newPlan } : prevRoutes,
-      );
-      setActivePlanTab(newPlan);
-    };
-    socket.on("bus-update", handleBusUpdate);
-    return () => socket.off("bus-update", handleBusUpdate);
-  }, [socket]);
+  }, [selectedBusNo, token, globalPlan]);
 
   // Listen for live location updates from the DB (pushed by the GPS sync
   // worker or in response to a `request-bus-location` refresh). This updates
@@ -438,7 +441,6 @@ const HomeScreen = () => {
         busNo: data.busNo ?? data.bus_no ?? selected,
         bus_no: data.bus_no ?? selected,
         previewNumber: data.previewNumber ?? selectedPreviewNumber ?? undefined,
-        currentPlan: data.currentPlan ?? busData?.currentPlan,
         latitude: data.latitude,
         longitude: data.longitude,
         speed: data.speed ?? 0,
@@ -467,6 +469,87 @@ const HomeScreen = () => {
     setLocationStatus("loading");
     socket.emit("request-bus-location", busToRefresh);
   }, [socket, selectedPreviewNumber, selectedBusNo]);
+
+  const loadGlobalActivePlan = useCallback(async () => {
+    if (!token) return globalPlan || "PLAN A";
+    try {
+      const data = await busApi.getGlobalActivePlan(token);
+      const nextPlan = data?.activePlan
+        ? normalizePlanName(data.activePlan)
+        : null;
+      if (nextPlan) {
+        setGlobalPlan(nextPlan);
+        setActivePlanTab((prev) => {
+          const currentPrev = String(prev || "").trim();
+          return currentPrev && currentPrev !== "PLAN A" ? prev : nextPlan;
+        });
+      }
+      return nextPlan || globalPlan || "PLAN A";
+    } catch (e) {
+      console.log("Failed to load active plan:", e.message);
+      return globalPlan || "PLAN A";
+    }
+  }, [token, globalPlan, normalizePlanName]);
+
+  const loadActivePlanBuses = useCallback(
+    async (planOverride) => {
+      if (!token) return [];
+      const targetPlan = normalizePlanName(
+        planOverride || globalPlan || "PLAN A",
+      );
+      setLoadingPlanBuses(true);
+      try {
+        const data = await busApi.getBusesForPlan(token, targetPlan);
+        const buses = data?.buses || [];
+        const sorted = [...buses].sort((a, b) =>
+          String(a.busNo).localeCompare(String(b.busNo)),
+        );
+        setPlanBuses(sorted);
+        return sorted;
+      } catch (e) {
+        setPlanBuses([]);
+        console.log("Failed to load buses for active plan:", e.message);
+        return [];
+      } finally {
+        setLoadingPlanBuses(false);
+      }
+    },
+    [token, globalPlan, normalizePlanName],
+  );
+
+  const openActivePlanModal = useCallback(async () => {
+    const latestPlan = await loadGlobalActivePlan();
+    await loadActivePlanBuses(latestPlan);
+    closeAllOverlayPanels();
+    setShowPlanListModal(true);
+  }, [closeAllOverlayPanels, loadGlobalActivePlan, loadActivePlanBuses]);
+
+  // Open active plan view inside the bottom sheet (expanded)
+  const openActivePlanInSheet = useCallback(async () => {
+    const latestPlan = await loadGlobalActivePlan();
+    await loadActivePlanBuses(latestPlan);
+    closeAllOverlayPanels();
+    setPlanViewMode("activePlan");
+    setShowPlanInSheet(true);
+    // expand to largest snap point
+    if (bottomSheetRef.current && bottomSheetRef.current.snapToIndex) {
+      try {
+        bottomSheetRef.current.snapToIndex(2);
+      } catch (e) {
+        // ignore if method unavailable
+      }
+    }
+  }, [closeAllOverlayPanels, loadGlobalActivePlan, loadActivePlanBuses]);
+
+  useEffect(() => {
+    loadGlobalActivePlan();
+  }, [loadGlobalActivePlan]);
+
+  useEffect(() => {
+    if (showPlanListModal) {
+      loadActivePlanBuses(globalPlan);
+    }
+  }, [showPlanListModal, globalPlan, loadActivePlanBuses]);
 
   useEffect(() => {
     refreshBuses();
@@ -579,6 +662,17 @@ const HomeScreen = () => {
         (data.busNo || data.bus_no || data.busNumber)
       );
 
+      if (data?.notActiveMessage) {
+        setTrackingError(data.notActiveMessage);
+        setBusData({ ...data, source: data?.source || "gps" });
+        setLastGoodLocation({ ...data, source: data?.source || "gps" });
+        setLocationStatus("offline");
+        setIsOffline(true);
+        setNoBusFound(false);
+        setIsBusFound(true);
+        return;
+      }
+
       // 1. Check GPS timestamp staleness FIRST (most reliable)
       const staleGps = isGpsStale(data);
 
@@ -653,7 +747,74 @@ const HomeScreen = () => {
     token,
     lastGoodLocation,
     refreshBuses,
+    globalPlan,
   ]);
+
+  const handleOpenPlanBus = useCallback(
+    async (busNo) => {
+      if (!busNo) return;
+      closeAllOverlayPanels();
+      setSearchQuery(String(busNo));
+      setSelectedPreviewNumber(null);
+      setSelectedBusNo(String(busNo).toUpperCase());
+      setIsBusSearchAttempted(true);
+      setLocationStatus("loading");
+      setTrackingError(null);
+      try {
+        const data = await busApi.getBusLocation(
+          token,
+          String(busNo).toUpperCase(),
+        );
+        if (data?.notActiveMessage) {
+          setTrackingError(data.notActiveMessage);
+          setBusData({
+            ...data,
+            busNo: data?.busNo || data?.bus_no || String(busNo).toUpperCase(),
+          });
+          setLastGoodLocation({
+            ...data,
+            busNo: data?.busNo || data?.bus_no || String(busNo).toUpperCase(),
+          });
+          setLocationStatus("offline");
+          setIsOffline(true);
+          setNoBusFound(false);
+          setIsBusFound(true);
+          setShowStopsModal(true);
+          return;
+        }
+
+        if (
+          data &&
+          data.latitude != null &&
+          data.longitude != null &&
+          Number.isFinite(Number(data.latitude)) &&
+          Number.isFinite(Number(data.longitude)) &&
+          data.latitude !== "NaN" &&
+          data.longitude !== "NaN"
+        ) {
+          setBusData({ ...data, source: data.source || "gps" });
+          setLastGoodLocation({ ...data, source: data.source || "gps" });
+          setLocationStatus("live");
+          setIsOffline(false);
+          setNoBusFound(false);
+          setIsBusFound(true);
+        } else {
+          setBusData(null);
+          setLastGoodLocation(null);
+          setLocationStatus("offline");
+          setIsOffline(true);
+          setIsBusFound(true);
+          setNoBusFound(false);
+        }
+        setShowStopsModal(true);
+      } catch (err) {
+        console.log("Open plan bus error:", err.message);
+        setTrackingError(getErrorMessage(err, "Could not load this bus"));
+        setLocationStatus("error");
+      }
+    },
+    [closeAllOverlayPanels, globalPlan, token],
+  );
 
   const handleSearch = async () => {
     const query = searchQuery.trim();
@@ -697,6 +858,20 @@ const HomeScreen = () => {
         const nextBusNo = data.busNo || data.bus_no || null;
         setSelectedBusNo(nextBusNo);
         setIsBusFound(true);
+
+        if (data?.notActiveMessage) {
+          setTrackingError(data.notActiveMessage);
+          setBusData({ ...data, previewNumber: query, busNo: nextBusNo });
+          setLastGoodLocation({
+            ...data,
+            previewNumber: query,
+            busNo: nextBusNo,
+          });
+          setLocationStatus("offline");
+          setIsOffline(true);
+          setNoBusFound(false);
+          return;
+        }
 
         // Bus found — always show plan. GPS may be offline/missing.
         const hasPreviewCoords =
@@ -767,6 +942,16 @@ const HomeScreen = () => {
 
         // ⚠️ FIX: Ignore stale response from previous search
         if (currentSearch !== searchCounterRef.current) return;
+
+        if (data?.notActiveMessage) {
+          setTrackingError(data.notActiveMessage);
+          setBusData({ ...data, source: data?.source || "gps" });
+          setLastGoodLocation({ ...data, source: data?.source || "gps" });
+          setLocationStatus("offline");
+          setIsOffline(true);
+          setNoBusFound(false);
+          return;
+        }
 
         // ⚠️ FIX: busApi.getBusLocation now validates busNo match internally
         // and throws if mismatch. If we reach here, the response is valid.
@@ -869,8 +1054,15 @@ const HomeScreen = () => {
   })();
 
   const displayBusData = shouldShowBusMarker ? busData : null;
-  const displayBusLabel =
-    selectedPreviewNumber || selectedBusNo || displayBusData?.busNo;
+  const displayBusLabel = getDisplayBusNumber({
+    previewNumber: selectedPreviewNumber ?? displayBusData?.previewNumber,
+    preview_number: displayBusData?.preview_number,
+    busNo: selectedBusNo ?? displayBusData?.busNo ?? displayBusData?.bus_no,
+  });
+  const assignedBusDisplay = getDisplayBusNumber({
+    previewNumber: user?.previewNumber ?? user?.preview_number,
+    busNo: user?.bus_no,
+  });
 
   const busCardContent = React.useMemo(() => {
     if (!displayBusData) return null;
@@ -882,11 +1074,6 @@ const HomeScreen = () => {
     );
     return (
       <View style={styles.busCard}>
-        {isOffline && (
-          <Text style={styles.offlineNote}>
-            ⚠ Last known location — GPS is offline
-          </Text>
-        )}
         <View style={styles.cardHeader}>
           <Text style={styles.busNumber}>Bus {displayBusLabel}</Text>
           <View
@@ -906,8 +1093,17 @@ const HomeScreen = () => {
           <Text style={styles.etaLabel}>Distance to College</Text>
           <View style={styles.etaRow}>
             <View style={styles.etaItem}>
-              <Text style={styles.etaValue}>{distance.toFixed(1)} KM</Text>
-              <Text style={styles.etaSubtext}>KIOT Campus</Text>
+              {isOffline ? (
+                <>
+                  <Text style={styles.etaValue}>OFFLINE</Text>
+                  <Text style={styles.etaSubtext}>Location unavailable</Text>
+                </>
+              ) : (
+                <>
+                  <Text style={styles.etaValue}>{distance.toFixed(1)} KM</Text>
+                  <Text style={styles.etaSubtext}>KIOT Campus</Text>
+                </>
+              )}
             </View>
           </View>
         </View>
@@ -915,11 +1111,13 @@ const HomeScreen = () => {
     );
   }, [displayBusData, displayBusLabel, markerStatus, isOffline]);
 
-  // Standalone Plan card — always visible once a bus is found, even if offline / no GPS coords.
+  // Standalone Plan card — visible for all users so the current global plan
+  // and route list are always available, even before a bus is selected.
   const planCardContent = React.useMemo(() => {
-    if (!isBusFound && !routesData) return null;
-    const currentPlan =
-      displayBusData?.currentPlan || routesData?.currentPlan || "PLAN A";
+    const hasPlanContext = !!(routesData || globalPlan || isBusFound);
+    if (!hasPlanContext) return null;
+
+    const currentPlan = globalPlan || "PLAN A";
     const hasPlanStops = !!routesData?.planNames?.length;
     const isOfflineMode = isOffline || !displayBusData;
     return (
@@ -932,15 +1130,31 @@ const HomeScreen = () => {
               color={COLORS.textBody}
             />
             <Text style={styles.lastPlanNoteText}>
-              {routesData && !hasPlanStops
-                ? "No stops uploaded for this bus yet."
-                : `The bus's last plan is ${currentPlan}`}
+              {trackingError
+                ? trackingError
+                : routesData && !hasPlanStops
+                  ? "No stops uploaded for this bus yet."
+                  : displayBusData
+                    ? `Current global plan is ${currentPlan}`
+                    : `Current global plan is ${currentPlan}`}
             </Text>
           </View>
         )}
         <TouchableOpacity
           style={styles.planChip}
-          onPress={() => setShowStopsModal(true)}
+          onPress={() => {
+            if (!selectedBusNo && !selectedPreviewNumber) {
+              openActivePlanInSheet();
+              return;
+            }
+            setPlanViewMode("stopsForBus");
+            setShowPlanInSheet(true);
+            if (bottomSheetRef.current && bottomSheetRef.current.snapToIndex) {
+              try {
+                bottomSheetRef.current.snapToIndex(2);
+              } catch (e) {}
+            }
+          }}
           activeOpacity={0.7}
         >
           <Ionicons name="map-outline" size={16} color={COLORS.primary} />
@@ -955,7 +1169,18 @@ const HomeScreen = () => {
         )}
       </View>
     );
-  }, [isBusFound, routesData, displayBusData, isOffline, isAdmin]);
+  }, [
+    routesData,
+    globalPlan,
+    isBusFound,
+    displayBusData,
+    isOffline,
+    isAdmin,
+    openActivePlanInSheet,
+    selectedBusNo,
+    selectedPreviewNumber,
+    trackingError,
+  ]);
 
   return (
     <View style={styles.container}>
@@ -982,7 +1207,7 @@ const HomeScreen = () => {
 
           {/* INPUT */}
           <TextInput
-            placeholder={"Search Bus"}
+            placeholder={"Search"}
             value={searchQuery}
             onChangeText={setSearchQuery}
             onSubmitEditing={handleSearch}
@@ -1024,6 +1249,16 @@ const HomeScreen = () => {
             />
           </TouchableOpacity>
 
+          <TouchableOpacity
+            style={styles.planButton}
+            onPress={openActivePlanInSheet}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.planButtonText}>
+              {globalPlan?.replace("PLAN ", "") || "A"}
+            </Text>
+          </TouchableOpacity>
+
           {isAdmin && (
             <TouchableOpacity
               style={styles.organizeButton}
@@ -1046,96 +1281,280 @@ const HomeScreen = () => {
 
       {/* BOTTOM SHEET (gorhom) */}
       <BottomSheet
-        index={isAdmin ? 0 : 0}
+        ref={bottomSheetRef}
+        index={0}
         snapPoints={SNAP_POINTS}
         enablePanDownToClose={false}
-        animateOnMount={false}
-        topInset={350}
+        animateOnMount={true}
         handleIndicatorStyle={styles.handleIndicator}
         backgroundStyle={styles.sheetBackground}
         containerStyle={styles.sheetContainer}
+        onChange={(idx) => {
+          // when sheet collapsed to smallest snap, clear plan-in-sheet state
+          if (idx === 0) {
+            setShowPlanInSheet(false);
+            setPlanViewMode(null);
+          }
+        }}
       >
         <BottomSheetView style={styles.sheetContent}>
-          <View style={styles.sheetHeader}>
+          {/* When plan view is requested, render plan lists/stops inside sheet */}
+          {showPlanInSheet && planViewMode === "activePlan" ? (
             <View>
-              <Text style={styles.sheetLabel}>Live Bus Tracking</Text>
-              <Text style={styles.sheetSubLabel}>
-                {isAdmin
-                  ? "search for bus to view time location"
-                  : user?.bus_no
-                    ? `tracking your bus ${user.bus_no}`
-                    : "no bus assigned"}
-              </Text>
-            </View>
-          </View>
-
-          <View style={styles.content}>
-            {trackingError ? (
-              <View>
-                <Text style={[styles.infoText, styles.errorText]}>
-                  {trackingError}
-                </Text>
-                <Text style={[styles.infoText, styles.subInfoText]}>
-                  Showing KIOT campus location.
-                </Text>
-              </View>
-            ) : error ? (
-              <Text style={[styles.infoText, styles.errorText]}>{error}</Text>
-            ) : noBusFound ? (
-              <View>
-                <Text style={[styles.infoText, styles.errorText]}>
-                  Bus Not Found
-                </Text>
-                <Text style={[styles.infoText, styles.subInfoText]}>
-                  Showing KIOT campus location.
-                </Text>
-              </View>
-            ) : isBusSearchAttempted &&
-              !displayBusData &&
-              !isBusFound &&
-              !routesData ? (
-              <View>
-                <Text style={[styles.infoText, styles.errorText]}>
-                  Bus Not Found
-                </Text>
-                <Text style={[styles.infoText, styles.subInfoText]}>
-                  Showing KIOT campus location.
-                </Text>
-              </View>
-            ) : !selectedBusNo && !selectedPreviewNumber ? (
-              <Text style={styles.infoText}>
-                {isAdmin
-                  ? "Search any bus to track its live location."
-                  : user?.bus_no
-                    ? `Tracking your bus ${user.bus_no}...`
-                    : "No bus assigned"}
-              </Text>
-            ) : locationStatus === "loading" && !routesData ? (
-              <Text style={styles.infoText}>Loading live location...</Text>
-            ) : displayBusData ? (
-              <>
-                {busCardContent}
-                {planCardContent}
-              </>
-            ) : (
-              <>
-                {planCardContent}
-                {!displayBusData && isBusFound && (
-                  <Text
-                    style={[
-                      styles.infoText,
-                      styles.offlineNote,
-                      { marginTop: 12 },
-                    ]}
-                  >
-                    Bus is offline or no live GPS available right now.
+              <View style={styles.sheetHeader}>
+                <View>
+                  <Text style={styles.sheetLabel}>{globalPlan}</Text>
+                  <Text style={styles.sheetSubLabel}>
+                    List of buses in active plan
                   </Text>
+                </View>
+                <TouchableOpacity
+                  onPress={() => {
+                    setShowPlanInSheet(false);
+                    setPlanViewMode(null);
+                    if (
+                      bottomSheetRef.current &&
+                      bottomSheetRef.current.snapToIndex
+                    ) {
+                      try {
+                        bottomSheetRef.current.snapToIndex(0);
+                      } catch (e) {}
+                    }
+                  }}
+                >
+                  <Ionicons name="close" size={24} color={COLORS.textBody} />
+                </TouchableOpacity>
+              </View>
+
+              {loadingPlanBuses ? (
+                <ActivityIndicator
+                  color={COLORS.primary}
+                  style={{ marginVertical: 30 }}
+                />
+              ) : planBuses.length === 0 ? (
+                <View style={styles.noPlansBox}>
+                  <Text style={styles.noPlansText}>
+                    No buses are assigned to {globalPlan} right now.
+                  </Text>
+                </View>
+              ) : (
+                <ScrollView style={[styles.stopsList, { maxHeight: 400 }]}>
+                  {planBuses.map((bus) => (
+                    <TouchableOpacity
+                      key={bus.previewNumber}
+                      style={styles.planBusRow}
+                      onPress={() => handleOpenPlanBus(bus.previewNumber)}
+                    >
+                      <Text style={styles.planBusNumber}>
+                        Bus {getDisplayBusNumber(bus)}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              )}
+            </View>
+          ) : showPlanInSheet && planViewMode === "stopsForBus" ? (
+            <View>
+              <View style={styles.sheetHeader}>
+                <View>
+                  <Text style={styles.sheetLabel}>Bus {displayBusLabel}</Text>
+                  <Text style={styles.sheetSubLabel}>Plans & Stops</Text>
+                </View>
+                <TouchableOpacity
+                  onPress={() => {
+                    setShowPlanInSheet(false);
+                    setPlanViewMode(null);
+                    if (
+                      bottomSheetRef.current &&
+                      bottomSheetRef.current.snapToIndex
+                    ) {
+                      try {
+                        bottomSheetRef.current.snapToIndex(0);
+                      } catch (e) {}
+                    }
+                  }}
+                >
+                  <Ionicons name="close" size={24} color={COLORS.textBody} />
+                </TouchableOpacity>
+              </View>
+
+              {loadingRoutes ? (
+                <ActivityIndicator
+                  color={COLORS.primary}
+                  style={{ marginVertical: 30 }}
+                />
+              ) : !routesData || !routesData.planNames?.length ? (
+                <View style={styles.noPlansBox}>
+                  <Text style={styles.noPlansText}>
+                    No plans uploaded for this bus yet.
+                  </Text>
+                  {isAdmin && (
+                    <Text style={styles.noPlansHint}>
+                      Go to Organize → Buses → Edit Routes to upload a routes
+                      Excel.
+                    </Text>
+                  )}
+                </View>
+              ) : (
+                <>
+                  <ScrollView style={[styles.stopsList, { maxHeight: 400 }]}>
+                    {(routesData.plans[activePlanTab] || []).map(
+                      (stop, idx) => (
+                        <View
+                          key={`${activePlanTab}-${idx}`}
+                          style={styles.stopRow}
+                        >
+                          <View style={styles.stopIndex}>
+                            <Text style={styles.stopIndexText}>{idx + 1}</Text>
+                          </View>
+                          <Text style={styles.stopName}>{stop.stop_name}</Text>
+                        </View>
+                      ),
+                    )}
+                  </ScrollView>
+                </>
+              )}
+            </View>
+          ) : (
+            <>
+              <View style={styles.sheetHeader}>
+                <View>
+                  <Text style={styles.sheetLabel}>Live Bus Tracking</Text>
+                  <Text style={styles.sheetSubLabel}>
+                    {isAdmin
+                      ? "search for bus to view time location"
+                      : assignedBusDisplay === "—"
+                        ? "no bus assigned"
+                        : `tracking your bus ${assignedBusDisplay}`}
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.content}>
+                {trackingError ? (
+                  <View>
+                    <Text style={[styles.infoText, styles.errorText]}>
+                      {trackingError}
+                    </Text>
+                    <Text style={[styles.infoText, styles.subInfoText]}>
+                      Showing KIOT campus location.
+                    </Text>
+                  </View>
+                ) : error ? (
+                  <Text style={[styles.infoText, styles.errorText]}>
+                    {error}
+                  </Text>
+                ) : noBusFound ? (
+                  <View>
+                    <Text style={[styles.infoText, styles.errorText]}>
+                      Bus Not Found
+                    </Text>
+                    <Text style={[styles.infoText, styles.subInfoText]}>
+                      Showing KIOT campus location.
+                    </Text>
+                  </View>
+                ) : isBusSearchAttempted &&
+                  !displayBusData &&
+                  !isBusFound &&
+                  !routesData ? (
+                  <View>
+                    <Text style={[styles.infoText, styles.errorText]}>
+                      Bus Not Found
+                    </Text>
+                    <Text style={[styles.infoText, styles.subInfoText]}>
+                      Showing KIOT campus location.
+                    </Text>
+                  </View>
+                ) : !selectedBusNo && !selectedPreviewNumber ? (
+                  <Text style={styles.infoText}>
+                    {isAdmin
+                      ? "Search any bus to track its live location."
+                      : assignedBusDisplay === "—"
+                        ? "No bus assigned"
+                        : `Tracking your bus ${assignedBusDisplay}...`}
+                  </Text>
+                ) : locationStatus === "loading" && !routesData ? (
+                  <Text style={styles.infoText}>Loading live location...</Text>
+                ) : displayBusData ? (
+                  <>
+                    {busCardContent}
+                    {planCardContent}
+                  </>
+                ) : (
+                  <>
+                    {planCardContent}
+                    {!displayBusData && isBusFound && (
+                      <Text
+                        style={[
+                          styles.infoText,
+                          styles.offlineNote,
+                          { marginTop: 12 },
+                        ]}
+                      >
+                        Bus is offline or no live GPS available right now.
+                      </Text>
+                    )}
+                  </>
                 )}
-              </>
-            )}
-          </View>
+              </View>
+            </>
+          )}
         </BottomSheetView>
       </BottomSheet>
+
+      {/* ============ ACTIVE PLAN BUSES MODAL ============ */}
+      <Modal
+        visible={showPlanListModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowPlanListModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <View>
+                <Text style={styles.modalTitle}>Plan {globalPlan}</Text>
+                <Text style={styles.modalSubtitle}>Buses in active plan</Text>
+              </View>
+              <TouchableOpacity
+                onPress={() => setShowPlanListModal(false)}
+                style={styles.modalCloseBtn}
+              >
+                <Ionicons name="close" size={24} color={COLORS.textBody} />
+              </TouchableOpacity>
+            </View>
+
+            {loadingPlanBuses ? (
+              <ActivityIndicator
+                color={COLORS.primary}
+                style={{ marginVertical: 30 }}
+              />
+            ) : planBuses.length === 0 ? (
+              <View style={styles.noPlansBox}>
+                <Text style={styles.noPlansText}>
+                  No buses are assigned to {globalPlan} right now.
+                </Text>
+              </View>
+            ) : (
+              <ScrollView style={styles.stopsList}>
+                {planBuses.map((bus) => (
+                  <TouchableOpacity
+                    key={bus.previewNumber || bus.busNo}
+                    style={styles.planBusRow}
+                    onPress={() =>
+                      handleOpenPlanBus(bus.previewNumber || bus.busNo)
+                    }
+                  >
+                    <Text style={styles.planBusNumber}>
+                      Bus {getDisplayBusNumber(bus)}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            )}
+          </View>
+        </View>
+      </Modal>
 
       {/* ============ PLANS / STOPS MODAL ============ */}
       <Modal
@@ -1178,77 +1597,6 @@ const HomeScreen = () => {
               </View>
             ) : (
               <>
-                {/* Plan selector tabs */}
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  style={styles.planTabs}
-                  contentContainerStyle={styles.planTabsContent}
-                >
-                  {routesData.planNames.map((plan) => {
-                    const isActive = plan === activePlanTab;
-                    const isCurrent =
-                      plan ===
-                      (routesData.currentPlan || displayBusData?.currentPlan);
-                    return (
-                      <TouchableOpacity
-                        key={plan}
-                        style={[
-                          styles.planTab,
-                          isActive && styles.planTabActive,
-                        ]}
-                        onPress={() => setActivePlanTab(plan)}
-                      >
-                        <Text
-                          style={[
-                            styles.planTabText,
-                            isActive && styles.planTabTextActive,
-                          ]}
-                        >
-                          {plan}
-                        </Text>
-                        {isCurrent && <View style={styles.currentDot} />}
-                      </TouchableOpacity>
-                    );
-                  })}
-                </ScrollView>
-
-                {/* Admin: change current plan */}
-                {isAdmin && routesData.planNames.length > 1 && (
-                  <TouchableOpacity
-                    style={styles.changePlanBtn}
-                    onPress={async () => {
-                      if (
-                        activePlanTab ===
-                        (routesData.currentPlan || displayBusData?.currentPlan)
-                      )
-                        return;
-                      try {
-                        await busApi.updatePlan(
-                          token,
-                          selectedBusNo,
-                          activePlanTab,
-                        );
-                        setRoutesData((prev) => ({
-                          ...prev,
-                          currentPlan: activePlanTab,
-                        }));
-                        setBusData((prev) => ({
-                          ...prev,
-                          currentPlan: activePlanTab,
-                        }));
-                      } catch (e) {
-                        Alert.alert("Failed", e.message);
-                      }
-                    }}
-                  >
-                    <Ionicons name="swap-horizontal" size={16} color="#fff" />
-                    <Text style={styles.changePlanBtnText}>
-                      Set "{activePlanTab}" as Current Plan
-                    </Text>
-                  </TouchableOpacity>
-                )}
-
                 {/* Stops for active plan */}
                 <ScrollView style={styles.stopsList}>
                   {(routesData.plans[activePlanTab] || []).map((stop, idx) => (
@@ -1326,6 +1674,21 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.primary,
     justifyContent: "center",
     alignItems: "center",
+  },
+
+  planButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: COLORS.primary,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  planButtonText: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "800",
   },
   refreshSpin: {
     // Simple static style for the refresh icon while a refresh is in progress.
@@ -1405,7 +1768,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 12,
+    marginBottom: 10,
   },
 
   sheetLabel: {
@@ -1561,15 +1924,15 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 30,
+    paddingTop: 5,
+    paddingBottom: 40,
     maxHeight: "75%",
   },
   modalHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 12,
+    marginBottom: 15,
   },
   modalTitle: {
     fontSize: 18,
@@ -1590,37 +1953,32 @@ const styles = StyleSheet.create({
   },
   planTabsContent: {
     gap: 8,
-    paddingVertical: 4,
+    paddingVertical: 5,
   },
   planTab: {
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 14,
-    paddingVertical: 8,
+    paddingHorizontal: 7,
+    paddingVertical: 0,
     borderRadius: 20,
     backgroundColor: COLORS.inputBg,
     borderWidth: 1,
     borderColor: "transparent",
     gap: 6,
+    height: 24,
   },
   planTabActive: {
     backgroundColor: "#EEF2FF",
     borderColor: COLORS.primary,
   },
   planTabText: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: "600",
     color: COLORS.textBody,
     textTransform: "uppercase",
   },
   planTabTextActive: {
     color: COLORS.primary,
-  },
-  currentDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: COLORS.success,
   },
   changePlanBtn: {
     flexDirection: "row",
@@ -1639,6 +1997,23 @@ const styles = StyleSheet.create({
   },
   stopsList: {
     flexGrow: 0,
+  },
+  planBusRow: {
+    backgroundColor: "#F6F8FB",
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    marginBottom: 8,
+  },
+  planBusNumber: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: COLORS.textHeader,
+  },
+  planBusMeta: {
+    fontSize: 12,
+    color: COLORS.textBody,
+    marginTop: 4,
   },
   stopRow: {
     flexDirection: "row",

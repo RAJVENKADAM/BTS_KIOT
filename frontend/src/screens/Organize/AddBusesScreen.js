@@ -24,6 +24,7 @@ import {
   convertColumnsToPlans,
 } from "../../utils/excelImport";
 import { getErrorMessage } from "../../utils/errorHandler";
+import { getDisplayBusNumber } from "../../utils/busDisplay";
 
 // Uppercase plan names so they match the default current_plan "PLAN A"
 const normalizePlans = (plans) => {
@@ -68,7 +69,12 @@ export default function AddBusesScreen() {
   const [parsingEditExcel, setParsingEditExcel] = useState(false);
   const [savingRoutes, setSavingRoutes] = useState(false);
 
-  // Change plan modal
+  // Global active plan
+  const [showGlobalPlanModal, setShowGlobalPlanModal] = useState(false);
+  const [globalPlan, setGlobalPlan] = useState("PLAN A");
+  const [savingGlobalPlan, setSavingGlobalPlan] = useState(false);
+
+  // Legacy per-bus plan modal kept for compatibility, but the global plan is the only supported control.
   const [showPlanModal, setShowPlanModal] = useState(false);
   const [planNames, setPlanNames] = useState([]);
   const [currentPlan, setCurrentPlan] = useState("PLAN A");
@@ -100,7 +106,17 @@ export default function AddBusesScreen() {
 
   useEffect(() => {
     loadBuses();
-  }, []);
+    const loadGlobalPlan = async () => {
+      try {
+        const data = await busApi.getGlobalActivePlan(token);
+        if (data?.activePlan)
+          setGlobalPlan(String(data.activePlan).toUpperCase());
+      } catch (e) {
+        console.log("Failed to load active plan:", e.message);
+      }
+    };
+    loadGlobalPlan();
+  }, [token]);
 
   // ---------- Excel parsing helpers ----------
   const pickAndParseExcel = async (isEdit) => {
@@ -257,33 +273,34 @@ export default function AddBusesScreen() {
     }
   };
 
-  // ---------- Change plan ----------
-  const openPlanModal = async () => {
+  // ---------- Global active plan ----------
+  const openGlobalPlanModal = async () => {
     setShowOptionsModal(false);
-    setPlanNames([]);
-    setCurrentPlan(selectedBus?.currentPlan || "PLAN A");
     try {
-      const data = await busApi.getBusRoutes(token, selectedBus.busNo);
-      setPlanNames(data.planNames || []);
-      setCurrentPlan(data.currentPlan || "PLAN A");
+      const data = await busApi.getGlobalActivePlan(token);
+      if (data?.activePlan)
+        setGlobalPlan(String(data.activePlan).toUpperCase());
     } catch (e) {
-      setPlanNames([]);
+      console.log("Failed to load active plan for global modal:", e.message);
     }
-    setShowPlanModal(true);
+    setShowGlobalPlanModal(true);
   };
 
-  const handleSelectPlan = async (plan) => {
-    if (plan === currentPlan) return;
-    setChangingPlan(true);
+  const handleSelectGlobalPlan = async (plan) => {
+    if (plan === globalPlan) return;
+    setSavingGlobalPlan(true);
     try {
-      await busApi.updatePlan(token, selectedBus.busNo, plan);
-      setCurrentPlan(plan);
-      setShowPlanModal(false);
+      const data = await busApi.setGlobalActivePlan(token, plan);
+      setGlobalPlan(String(data?.activePlan || plan).toUpperCase());
+      setShowGlobalPlanModal(false);
       loadBuses();
     } catch (e) {
-      Alert.alert("Failed", getErrorMessage(e, "Could not change the plan."));
+      Alert.alert(
+        "Failed",
+        getErrorMessage(e, "Could not update the global plan."),
+      );
     } finally {
-      setChangingPlan(false);
+      setSavingGlobalPlan(false);
     }
   };
 
@@ -345,7 +362,7 @@ export default function AddBusesScreen() {
       }}
     >
       <View style={styles.cardHeaderRow}>
-        <Text style={styles.title}>Bus: {item.busNo}</Text>
+        <Text style={styles.title}>Bus: {getDisplayBusNumber(item)}</Text>
         <View
           style={[
             styles.dot,
@@ -353,16 +370,10 @@ export default function AddBusesScreen() {
           ]}
         />
       </View>
-      <Text style={styles.subtitle}>Preview: {item.previewNumber}</Text>
+      <Text style={styles.subtitle}>Preview: {getDisplayBusNumber(item)}</Text>
       <Text style={styles.subtitle}>
         Device: {item.gpsDeviceId || item.gps_device_id}
       </Text>
-      <View style={styles.planBadge}>
-        <Ionicons name="map-outline" size={12} color={COLORS.primary} />
-        <Text style={styles.planBadgeText}>
-          Current Plan: {item.currentPlan || "PLAN A"}
-        </Text>
-      </View>
     </TouchableOpacity>
   );
 
@@ -370,6 +381,16 @@ export default function AddBusesScreen() {
 
   return (
     <View style={{ flex: 1 }}>
+      <View style={styles.globalPlanBar}>
+        <Text style={styles.globalPlanLabel}>Active Plan</Text>
+        <TouchableOpacity
+          style={styles.globalPlanButton}
+          onPress={openGlobalPlanModal}
+        >
+          <Text style={styles.globalPlanButtonText}>{globalPlan}</Text>
+        </TouchableOpacity>
+      </View>
+
       <FlatList
         data={buses}
         renderItem={renderBus}
@@ -470,7 +491,7 @@ export default function AddBusesScreen() {
         <View style={styles.overlay}>
           <View style={styles.modalBox}>
             <Text style={styles.header}>Bus Options</Text>
-            <Text style={styles.subHeader}>Bus: {selectedBus?.busNo}</Text>
+            <Text style={styles.subHeader}>Bus: {getDisplayBusNumber(selectedBus)}</Text>
 
             <TouchableOpacity
               style={styles.optionButton}
@@ -499,14 +520,6 @@ export default function AddBusesScreen() {
             </TouchableOpacity>
 
             <TouchableOpacity
-              style={styles.optionButton}
-              onPress={openPlanModal}
-            >
-              <Ionicons name="map-outline" size={20} color={COLORS.primary} />
-              <Text style={styles.optionText}>Change Current Plan</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
               style={[styles.optionButton, styles.deleteButton]}
               onPress={handleDeleteBus}
             >
@@ -532,7 +545,7 @@ export default function AddBusesScreen() {
         <View style={styles.overlay}>
           <View style={styles.modalBox}>
             <Text style={styles.header}>Edit Details</Text>
-            <Text style={styles.subHeader}>Bus: {selectedBus?.busNo}</Text>
+            <Text style={styles.subHeader}>Bus: {getDisplayBusNumber(selectedBus)}</Text>
             <TextInput
               placeholder="Preview No"
               placeholderTextColor={COLORS.textBody}
@@ -579,7 +592,7 @@ export default function AddBusesScreen() {
               showsVerticalScrollIndicator={false}
             >
               <Text style={styles.header}>Edit Routes</Text>
-              <Text style={styles.subHeader}>Bus: {selectedBus?.busNo}</Text>
+              <Text style={styles.subHeader}>Bus: {getDisplayBusNumber(selectedBus)}</Text>
 
               <TouchableOpacity
                 style={styles.uploadBtn}
@@ -620,53 +633,50 @@ export default function AddBusesScreen() {
         </View>
       </Modal>
 
-      {/* ================= CHANGE PLAN MODAL ================= */}
+      {/* ================= GLOBAL ACTIVE PLAN MODAL ================= */}
       <Modal
         transparent
-        visible={showPlanModal}
-        onRequestClose={() => setShowPlanModal(false)}
+        visible={showGlobalPlanModal}
+        onRequestClose={() => setShowGlobalPlanModal(false)}
       >
         <View style={styles.overlay}>
           <View style={styles.modalBox}>
-            <Text style={styles.header}>Change Current Plan</Text>
-            <Text style={styles.subHeader}>Bus: {selectedBus?.busNo}</Text>
+            <Text style={styles.header}>Set Active Route Plan</Text>
+            <Text style={styles.subHeader}>
+              This applies to the whole app. Only buses under the active plan
+              are treated as active.
+            </Text>
 
-            {planNames.length === 0 ? (
-              <Text style={styles.emptyText}>
-                No plans found. Upload routes Excel first.
-              </Text>
-            ) : (
-              planNames.map((plan) => {
-                const active = plan === currentPlan;
-                return (
-                  <TouchableOpacity
-                    key={plan}
+            {["PLAN A", "PLAN B", "PLAN C", "PLAN D"].map((plan) => {
+              const active = plan === globalPlan;
+              return (
+                <TouchableOpacity
+                  key={plan}
+                  style={[
+                    styles.optionButton,
+                    active && styles.activePlanButton,
+                  ]}
+                  onPress={() => handleSelectGlobalPlan(plan)}
+                  disabled={savingGlobalPlan}
+                >
+                  <Ionicons
+                    name={active ? "radio-button-on" : "radio-button-off"}
+                    size={20}
+                    color={active ? COLORS.primary : COLORS.textBody}
+                  />
+                  <Text
                     style={[
-                      styles.optionButton,
-                      active && styles.activePlanButton,
+                      styles.optionText,
+                      active && { color: COLORS.primary },
                     ]}
-                    onPress={() => handleSelectPlan(plan)}
-                    disabled={changingPlan}
                   >
-                    <Ionicons
-                      name={active ? "radio-button-on" : "radio-button-off"}
-                      size={20}
-                      color={active ? COLORS.primary : COLORS.textBody}
-                    />
-                    <Text
-                      style={[
-                        styles.optionText,
-                        active && { color: COLORS.primary },
-                      ]}
-                    >
-                      {plan}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })
-            )}
+                    {plan}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
 
-            <TouchableOpacity onPress={() => setShowPlanModal(false)}>
+            <TouchableOpacity onPress={() => setShowGlobalPlanModal(false)}>
               <Text style={styles.closeText}>Close</Text>
             </TouchableOpacity>
           </View>
@@ -698,6 +708,33 @@ const styles = StyleSheet.create({
     gap: 4,
   },
   planBadgeText: { fontSize: 12, fontWeight: "600", color: COLORS.primary },
+  globalPlanBar: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: "#fff",
+    borderBottomWidth: 1,
+    borderBottomColor: "#E5E7EB",
+  },
+  globalPlanLabel: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: COLORS.textHeader,
+  },
+  globalPlanButton: {
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 14,
+  },
+  globalPlanButtonText: {
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "700",
+    textTransform: "uppercase",
+  },
   fab: {
     position: "absolute",
     bottom: 20,
