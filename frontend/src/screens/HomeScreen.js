@@ -14,7 +14,7 @@
  * - AuthContext provides { token, user } for API auth.
  * - BusContext provides { error, refreshBuses, getSocket } for bus list + socket.
  * - Local state tracks search query, busData (latest GPS), location status,
- *   marker movement state, and display logic.
+ *    marker movement state, and display logic.
  *
  * Socket Integration:
  * ───────────────────
@@ -32,12 +32,18 @@
  * Bus Status Detection:
  * ──────────────────────
  * - detectBusStatus tracks coordinate repetition via refs.
- *   - Same coord 3x → "waiting"
- *   - Same coord 10x → "stopped"
- *   - Different coord → "moving"
+ *  - Same coord 3x → "waiting"
+ *  - Same coord 10x → "stopped"
+ *  - Different coord → "moving"
  * - chooseBusStatus prioritises API's "stopped" state over coordinate detection.
  */
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, {
+  useState,
+  useRef,
+  useEffect,
+  useCallback,
+  useMemo,
+} from "react";
 import OSMMap from "../components/Map/OSMMap";
 import {
   View,
@@ -47,10 +53,8 @@ import {
   StatusBar,
   Platform,
   TouchableOpacity,
-  Modal,
   ScrollView,
   ActivityIndicator,
-  Alert,
 } from "react-native";
 import { useNavigation } from "@react-navigation/native";
 import { Ionicons } from "@expo/vector-icons";
@@ -62,8 +66,6 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import BottomSheet, { BottomSheetView } from "@gorhom/bottom-sheet";
 import { isNetworkError, getErrorMessage } from "../utils/errorHandler";
 import { getDisplayBusNumber } from "../utils/busDisplay";
-
-const SNAP_POINTS = ["25%", "50%", "75%"];
 
 const KIOT_LAT = 11.554528;
 const KIOT_LNG = 78.019759;
@@ -103,27 +105,30 @@ const HomeScreen = () => {
   const [markerStatus, setMarkerStatus] = useState("moving");
   const [isOffline, setIsOffline] = useState(false);
 
-  // Plan / routes modal / sheet state
+  // Routes and panel states consolidated inside Bottom Sheet
   const [routesData, setRoutesData] = useState(null);
-  const [showStopsModal, setShowStopsModal] = useState(false);
-  const [showPlanListModal, setShowPlanListModal] = useState(false);
   const [planBuses, setPlanBuses] = useState([]);
   const [activePlanTab, setActivePlanTab] = useState("PLAN A");
   const [globalPlan, setGlobalPlan] = useState("PLAN A");
   const [loadingRoutes, setLoadingRoutes] = useState(false);
   const [loadingPlanBuses, setLoadingPlanBuses] = useState(false);
-  // Bottom-sheet control: show plans/stops inside the sheet instead of separate modal
   const bottomSheetRef = useRef(null);
   const [showPlanInSheet, setShowPlanInSheet] = useState(false);
   const [planViewMode, setPlanViewMode] = useState(null); // 'activePlan' | 'stopsForBus' | null
 
+  // Dynamic snap points based on view mode
+  const snapPoints = useMemo(() => {
+    if (showPlanInSheet) {
+      return ["50%", "85%"];
+    }
+    return ["25%", "45%"];
+  }, [showPlanInSheet]);
+
   const closeAllOverlayPanels = useCallback(() => {
-    setShowPlanListModal(false);
-    setShowStopsModal(false);
     setShowPlanInSheet(false);
     setPlanViewMode(null);
   }, []);
-  // True once the searched/selected bus is confirmed to exist (even offline / no GPS)
+
   const [isBusFound, setIsBusFound] = useState(false);
 
   const lastCoordinateRef = useRef(null);
@@ -133,20 +138,11 @@ const HomeScreen = () => {
   useEffect(() => {
     selectedBusNoRef.current = selectedBusNo;
   }, [selectedBusNo]);
-  const lastPlanRef = useRef(null);
-  // ⚠️ FIX: Search counter to prevent stale state.
-  // Incremented on each new search. After async API call completes,
-  // we check if this is still the latest search — if not, ignore the result.
   const searchCounterRef = useRef(0);
 
-  /**
-   * Scope persisted bus keys by user id so one user's saved bus data never
-   * leaks into another user's session. Returns null for keys that should not
-   * be persisted (non-admins ALWAYS derive their bus from their profile).
-   */
   const busStorageKey = useCallback(
     (key) => {
-      if (!isAdmin) return null; // students/primary admins derive from user.bus_no
+      if (!isAdmin) return null;
       const uid = user?.id || user?._id || "anon";
       return `bus_${uid}_${key}`;
     },
@@ -162,8 +158,6 @@ const HomeScreen = () => {
     const persistBusData = async () => {
       if (locationStatus === "loading") return;
       try {
-        // Persistence is admin-only and user-scoped. Non-admins always derive
-        // their bus from the profile — never persist (avoids cross-user leaks).
         if (selectedBusNo) {
           const key = busStorageKey("selectedBusNo");
           if (key) await AsyncStorage.setItem(key, selectedBusNo);
@@ -189,13 +183,7 @@ const HomeScreen = () => {
     busStorageKey,
   ]);
 
-  /**
-   * Reset bus state whenever the logged-in user changes (login/logout/switch).
-   * This is the key fix for "everyone sees the same bus": stale state from a
-   * previous user is completely cleared before applying the current user's bus.
-   */
   useEffect(() => {
-    // Clear all bus state so nothing from the previous user lingers.
     setBusData(null);
     setLastGoodLocation(null);
     setRoutesData(null);
@@ -212,13 +200,11 @@ const HomeScreen = () => {
     selectedBusNoRef.current = null;
 
     if (isAdmin) {
-      // Admin derives their bus only from explicit search / scoped persisted data.
       setSelectedBusNo(null);
       setLocationStatus("idle");
       return;
     }
 
-    // Non-admin: derive ONLY from their own profile.
     if (user?.bus_no) {
       setSelectedBusNo(user.bus_no);
       setLocationStatus("loading");
@@ -226,18 +212,12 @@ const HomeScreen = () => {
       setSelectedBusNo(null);
       setLocationStatus("idle");
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id, user?._id, isAdmin]);
+  }, [user?.id, user?._id, user?.bus_no, isAdmin]);
 
-  /**
-   * Auto-fetch the non-admin's assigned bus location once per bus/user.
-   * Handles all cases: found+live, found+offline, bus not found, no bus assigned.
-   */
   const autoLoadedBusKeyRef = useRef(null);
   useEffect(() => {
     if (isAdmin) return;
     const assignedBusNo = (user?.bus_no || "").trim().toUpperCase() || null;
-    // Keep the ref in sync so the guard matches the current assigned bus.
     if (assignedBusNo) {
       selectedBusNoRef.current = assignedBusNo;
       setSelectedBusNo(assignedBusNo);
@@ -250,7 +230,7 @@ const HomeScreen = () => {
     }
 
     const loadKey = `${user?.id || user?._id || "anon"}::${assignedBusNo}`;
-    if (autoLoadedBusKeyRef.current === loadKey) return; // already auto-loaded
+    if (autoLoadedBusKeyRef.current === loadKey) return;
     autoLoadedBusKeyRef.current = loadKey;
 
     let cancelled = false;
@@ -276,7 +256,7 @@ const HomeScreen = () => {
           data.longitude !== "NaN";
 
         setIsBusFound(true);
-        setRoutesData((prev) => prev); // leave to the routes effect
+        setRoutesData((prev) => prev);
 
         if (data?.notActiveMessage) {
           setTrackingError(data?.notActiveMessage);
@@ -295,9 +275,6 @@ const HomeScreen = () => {
         }
 
         if (isGpsStale(data) || !hasValidCoords) {
-          // Found but offline / no live coords — show plan + (if available)
-          // last known location. Only set busData when we have coords to avoid
-          // a bogus "0.0 KM" bus card / marker for a coords-less bus.
           const offlineData = {
             ...data,
             busNo: data.previewNumber || data || assignedBusNo,
@@ -334,16 +311,11 @@ const HomeScreen = () => {
         }
       } catch (err) {
         if (cancelled) return;
-        console.log(
-          `Auto-load assigned bus ${assignedBusNo} error:`,
-          err.message,
-        );
         setSelectedBusNo(assignedBusNo);
         setBusData(null);
         setLastGoodLocation(null);
         setRoutesData(null);
         setLocationStatus("error");
-        // Distinguish a network problem from a genuine "bus not found".
         if (isNetworkError(err)) {
           setNoBusFound(false);
           setTrackingError(
@@ -360,7 +332,6 @@ const HomeScreen = () => {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, user?._id, user?.bus_no, token, isAdmin, globalPlan]);
 
   useEffect(() => {
@@ -375,7 +346,6 @@ const HomeScreen = () => {
     };
   }, [socket, selectedBusNo]);
 
-  // Load plans + stops for the selected bus (for the bottom sheet plan chip + modal)
   useEffect(() => {
     if (!selectedBusNo || !token) return;
     let cancelled = false;
@@ -401,10 +371,6 @@ const HomeScreen = () => {
     };
   }, [selectedBusNo, token, globalPlan]);
 
-  // Listen for live location updates from the DB (pushed by the GPS sync
-  // worker or in response to a `request-bus-location` refresh). This updates
-  // the marker WITHOUT making an HTTP API call — avoiding the rate-limited GPS
-  // provider. We only update the map (busData) here; we do NOT re-zoom.
   useEffect(() => {
     if (!socket) return;
     const handleLocationUpdate = (data) => {
@@ -416,8 +382,6 @@ const HomeScreen = () => {
       if (!incomingBusNo) return;
       const incomingStr = String(incomingBusNo);
       const selectedStr = String(selected);
-      // Only accept updates for the currently selected/searching bus.
-      // Allow matching by previewNumber too (e.g. searched "4" → bus no "TN..").
       if (
         incomingStr !== selectedStr &&
         String(data.previewNumber ?? "") !== selectedStr
@@ -457,11 +421,8 @@ const HomeScreen = () => {
     };
     socket.on("locationUpdate", handleLocationUpdate);
     return () => socket.off("locationUpdate", handleLocationUpdate);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [socket, busData, selectedBusNo, selectedPreviewNumber]);
 
-  // Refresh the selected bus marker straight from the DB via socket.
-  // This avoids re-fetching from the rate-limited GPS provider / HTTP API.
   const handleSocketRefresh = useCallback(() => {
     if (!socket) return;
     const busToRefresh = selectedPreviewNumber || selectedBusNo;
@@ -501,9 +462,40 @@ const HomeScreen = () => {
       try {
         const data = await busApi.getBusesForPlan(token, targetPlan);
         const buses = data?.buses || [];
-        const sorted = [...buses].sort((a, b) =>
-          String(a.busNo).localeCompare(String(b.busNo)),
-        );
+
+        const sorted = [...buses].sort((a, b) => {
+          const getVal = (item) => {
+            if (typeof item === "string" || typeof item === "number") {
+              return String(item);
+            }
+            return String(
+              item?.previewNumber ||
+                item?.preview_number ||
+                item?.busNumber ||
+                item?.bus_number ||
+                item?.busNo ||
+                item?.bus_no ||
+                item?.name ||
+                "",
+            ).trim();
+          };
+
+          const strA = getVal(a);
+          const strB = getVal(b);
+
+          const numA = parseInt(strA.replace(/\D/g, ""), 10);
+          const numB = parseInt(strB.replace(/\D/g, ""), 10);
+
+          if (!isNaN(numA) && !isNaN(numB)) {
+            return numA - numB;
+          }
+
+          return strA.localeCompare(strB, undefined, {
+            numeric: true,
+            sensitivity: "base",
+          });
+        });
+
         setPlanBuses(sorted);
         return sorted;
       } catch (e) {
@@ -517,45 +509,24 @@ const HomeScreen = () => {
     [token, globalPlan, normalizePlanName],
   );
 
-  const openActivePlanModal = useCallback(async () => {
-    const latestPlan = await loadGlobalActivePlan();
-    await loadActivePlanBuses(latestPlan);
-    closeAllOverlayPanels();
-    setShowPlanListModal(true);
-  }, [closeAllOverlayPanels, loadGlobalActivePlan, loadActivePlanBuses]);
-
-  // Open active plan view inside the bottom sheet (expanded)
   const openActivePlanInSheet = useCallback(async () => {
     const latestPlan = await loadGlobalActivePlan();
     await loadActivePlanBuses(latestPlan);
-    closeAllOverlayPanels();
     setPlanViewMode("activePlan");
     setShowPlanInSheet(true);
-    // expand to largest snap point
     if (bottomSheetRef.current && bottomSheetRef.current.snapToIndex) {
       try {
-        bottomSheetRef.current.snapToIndex(2);
-      } catch (e) {
-        // ignore if method unavailable
-      }
+        bottomSheetRef.current.snapToIndex(1); // expand to higher snap point
+      } catch (e) {}
     }
-  }, [closeAllOverlayPanels, loadGlobalActivePlan, loadActivePlanBuses]);
+  }, [loadGlobalActivePlan, loadActivePlanBuses]);
 
   useEffect(() => {
     loadGlobalActivePlan();
   }, [loadGlobalActivePlan]);
 
   useEffect(() => {
-    if (showPlanListModal) {
-      loadActivePlanBuses(globalPlan);
-    }
-  }, [showPlanListModal, globalPlan, loadActivePlanBuses]);
-
-  useEffect(() => {
     refreshBuses();
-    // Restore persisted bus data is now ADMIN-ONLY and USER-SCOPED.
-    // Non-admins ALWAYS derive their bus from the profile (see the reset +
-    // auto-load effects) so a different user's saved bus can never leak in.
     const loadPersistedBusData = async () => {
       if (!isAdmin) return;
       try {
@@ -580,8 +551,7 @@ const HomeScreen = () => {
       }
     };
     loadPersistedBusData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busStorageKey]);
+  }, [busStorageKey, isAdmin]);
 
   const normalizeBusState = (state) => {
     const normalized = typeof state === "string" ? state.toLowerCase() : "";
@@ -620,20 +590,13 @@ const HomeScreen = () => {
     return nextStatus;
   };
 
-  /**
-   * Determines if GPS data is stale based on lastSuccessfulGpsUpdate timestamp.
-   * Backend GPS worker retains old coordinates even when GPS provider fails.
-   * The real indicator of freshness is lastSuccessfulGpsUpdate: if null or >3min old → offline.
-   */
   const isGpsStale = (data) => {
     if (!data) return true;
-    // If backend reports status as offline, trust it
     if (data.status === "offline") return true;
-    // Check lastSuccessfulGpsUpdate timestamp
     const lastGps = data.lastSuccessfulGpsUpdate;
-    if (!lastGps) return true; // never had a successful GPS fix → offline
+    if (!lastGps) return true;
     const ageMs = Date.now() - new Date(lastGps).getTime();
-    return ageMs > 3 * 60 * 1000; // older than 3 min → stale/offline
+    return ageMs > 3 * 60 * 1000;
   };
 
   const handleRefresh = useCallback(async () => {
@@ -656,7 +619,6 @@ const HomeScreen = () => {
         data.latitude !== "NaN" &&
         data.longitude !== "NaN";
 
-      // Bus is "found" if backend returned a bus identifier (even when offline/no GPS)
       const foundInBackend = !!(
         data &&
         (data.busNo || data.bus_no || data.busNumber)
@@ -673,15 +635,12 @@ const HomeScreen = () => {
         return;
       }
 
-      // 1. Check GPS timestamp staleness FIRST (most reliable)
       const staleGps = isGpsStale(data);
 
       if (staleGps) {
-        // GPS is stale → mark offline immediately
         setIsOffline(true);
         setLocationStatus("offline");
         if (hasValidCoords) {
-          // Show the coordinates but marked offline
           setBusData({ ...data, source: data.source || "gps" });
           setLastGoodLocation({ ...data, source: data.source || "gps" });
           setNoBusFound(false);
@@ -696,7 +655,6 @@ const HomeScreen = () => {
           setIsBusFound(foundInBackend);
         }
       } else if (hasValidCoords) {
-        // Fresh GPS with valid coords → live
         const nextBusData = { ...data, source: data.source || "gps" };
         setBusData(nextBusData);
         setLastGoodLocation(nextBusData);
@@ -711,7 +669,6 @@ const HomeScreen = () => {
         );
         setMarkerStatus(chooseBusStatus(statusFromAPI, statusFromCoordinates));
       } else {
-        // No valid coords — bus may still exist (offline) → keep plan visible
         setBusData(null);
         setLastGoodLocation(null);
         setLocationStatus("offline");
@@ -728,7 +685,6 @@ const HomeScreen = () => {
         setIsBusFound(true);
       } else {
         setLocationStatus("error");
-        // Distinguish a network problem from a genuine "bus not found".
         if (isNetworkError(err)) {
           setNoBusFound(false);
           setTrackingError(
@@ -747,13 +703,11 @@ const HomeScreen = () => {
     token,
     lastGoodLocation,
     refreshBuses,
-    globalPlan,
   ]);
 
   const handleOpenPlanBus = useCallback(
     async (busNo) => {
       if (!busNo) return;
-      closeAllOverlayPanels();
       setSearchQuery(String(busNo));
       setSelectedPreviewNumber(null);
       setSelectedBusNo(String(busNo).toUpperCase());
@@ -779,7 +733,8 @@ const HomeScreen = () => {
           setIsOffline(true);
           setNoBusFound(false);
           setIsBusFound(true);
-          setShowStopsModal(true);
+          setPlanViewMode("stopsForBus");
+          setShowPlanInSheet(true);
           return;
         }
 
@@ -806,27 +761,25 @@ const HomeScreen = () => {
           setIsBusFound(true);
           setNoBusFound(false);
         }
-        setShowStopsModal(true);
+        setPlanViewMode("stopsForBus");
+        setShowPlanInSheet(true);
+        if (bottomSheetRef.current && bottomSheetRef.current.snapToIndex) {
+          bottomSheetRef.current.snapToIndex(1);
+        }
       } catch (err) {
         console.log("Open plan bus error:", err.message);
         setTrackingError(getErrorMessage(err, "Could not load this bus"));
         setLocationStatus("error");
       }
     },
-    [closeAllOverlayPanels, globalPlan, token],
+    [token],
   );
 
   const handleSearch = async () => {
     const query = searchQuery.trim();
     if (!query) return;
-    // A purely numeric query is treated as a preview-number search (e.g. "4").
-    // Alphanumeric queries (e.g. "TN30AH5907") are treated as bus_no.
     const isPreviewSearch = /^\d+$/.test(query);
-    // Keep the typed query in the search bar so the user can see/cross it out.
-    // Do NOT clear it here — use the cross (close-circle) button to clear.
 
-    // ⚠️ FIX: Reset ALL state atomically before each new search.
-    // Prevent stale data from previous search appearing while loading.
     const currentSearch = ++searchCounterRef.current;
     setNoBusFound(false);
     setTrackingError(null);
@@ -847,7 +800,6 @@ const HomeScreen = () => {
       try {
         const data = await busApi.trackByPreview(token, query);
 
-        // ⚠️ FIX: Ignore stale response from previous search
         if (currentSearch !== searchCounterRef.current) return;
 
         if (!data || data.error || !(data.busNo || data.bus_no)) {
@@ -873,14 +825,12 @@ const HomeScreen = () => {
           return;
         }
 
-        // Bus found — always show plan. GPS may be offline/missing.
         const hasPreviewCoords =
           data.latitude != null &&
           data.longitude != null &&
           Number.isFinite(Number(data.latitude)) &&
           Number.isFinite(Number(data.longitude));
 
-        // Check GPS staleness
         if (isGpsStale(data) || !hasPreviewCoords) {
           setBusData({ ...data, previewNumber: query, busNo: nextBusNo });
           setLastGoodLocation({
@@ -910,8 +860,6 @@ const HomeScreen = () => {
           );
         }
       } catch (err) {
-        console.log("Preview search error:", err.message);
-        // ⚠️ FIX: Ignore stale response from previous search
         if (currentSearch !== searchCounterRef.current) return;
         setSelectedBusNo(null);
         setSelectedPreviewNumber(null);
@@ -920,7 +868,6 @@ const HomeScreen = () => {
         setIsBusFound(false);
         setRoutesData(null);
         setLocationStatus("error");
-        // Distinguish a network problem from a genuine "bus not found".
         if (isNetworkError(err)) {
           setNoBusFound(false);
           setTrackingError(
@@ -935,12 +882,11 @@ const HomeScreen = () => {
       const busNo = query.toUpperCase();
       setSelectedPreviewNumber(null);
       setSelectedBusNo(busNo);
-      setIsBusFound(true); // Optimistic — will be confirmed by API
+      setIsBusFound(true);
 
       try {
         const data = await busApi.getBusLocation(token, busNo);
 
-        // ⚠️ FIX: Ignore stale response from previous search
         if (currentSearch !== searchCounterRef.current) return;
 
         if (data?.notActiveMessage) {
@@ -953,9 +899,6 @@ const HomeScreen = () => {
           return;
         }
 
-        // ⚠️ FIX: busApi.getBusLocation now validates busNo match internally
-        // and throws if mismatch. If we reach here, the response is valid.
-
         if (
           data &&
           data.latitude != null &&
@@ -965,7 +908,6 @@ const HomeScreen = () => {
           data.latitude !== "NaN" &&
           data.longitude !== "NaN"
         ) {
-          // Check GPS staleness
           if (isGpsStale(data)) {
             setBusData({ ...data, source: data.source || "gps" });
             setLastGoodLocation({ ...data, source: data.source || "gps" });
@@ -987,10 +929,6 @@ const HomeScreen = () => {
             );
           }
         } else {
-          // Bus found but no valid live coords → show offline + plan.
-          // (getBusLocation throws only when bus doesn't exist, so reaching
-          // here means the bus exists but GPS is offline/missing.)
-          console.log("No valid location for bus search:", data);
           setBusData(null);
           setLastGoodLocation(null);
           setLocationStatus("offline");
@@ -999,15 +937,12 @@ const HomeScreen = () => {
           setNoBusFound(false);
         }
       } catch (err) {
-        console.log("Bus search error:", err.message);
-        // ⚠️ FIX: Ignore stale response from previous search
         if (currentSearch !== searchCounterRef.current) return;
         setBusData(null);
         setLastGoodLocation(null);
         setIsBusFound(false);
         setRoutesData(null);
         setLocationStatus("error");
-        // Distinguish a network problem from a genuine "bus not found".
         if (isNetworkError(err)) {
           setNoBusFound(false);
           setTrackingError(
@@ -1021,11 +956,6 @@ const HomeScreen = () => {
     }
   };
 
-  /**
-   * Cancel / clear the current bus search. Fully resets ALL bus state so the
-   * map reverts to the KIOT college default (no stale marker). Increments the
-   * search counter so any in-flight async search result is ignored.
-   */
   const handleClearSearch = useCallback(() => {
     searchCounterRef.current += 1;
     setSearchQuery("");
@@ -1045,8 +975,9 @@ const HomeScreen = () => {
     lastCoordinateRef.current = null;
     busStatusRef.current = "moving";
     selectedBusNoRef.current = null;
+    closeAllOverlayPanels();
     if (isAdmin) setIsSuperadminSearched(false);
-  }, [isAdmin]);
+  }, [isAdmin, closeAllOverlayPanels]);
 
   const shouldShowBusMarker = (() => {
     if (!isAdmin) return !!selectedBusNo || !!selectedPreviewNumber;
@@ -1111,8 +1042,6 @@ const HomeScreen = () => {
     );
   }, [displayBusData, displayBusLabel, markerStatus, isOffline]);
 
-  // Standalone Plan card — visible for all users so the current global plan
-  // and route list are always available, even before a bus is selected.
   const planCardContent = React.useMemo(() => {
     const hasPlanContext = !!(routesData || globalPlan || isBusFound);
     if (!hasPlanContext) return null;
@@ -1134,9 +1063,7 @@ const HomeScreen = () => {
                 ? trackingError
                 : routesData && !hasPlanStops
                   ? "No stops uploaded for this bus yet."
-                  : displayBusData
-                    ? `Current global plan is ${currentPlan}`
-                    : `Current global plan is ${currentPlan}`}
+                  : `Current global plan is ${currentPlan}`}
             </Text>
           </View>
         )}
@@ -1150,9 +1077,7 @@ const HomeScreen = () => {
             setPlanViewMode("stopsForBus");
             setShowPlanInSheet(true);
             if (bottomSheetRef.current && bottomSheetRef.current.snapToIndex) {
-              try {
-                bottomSheetRef.current.snapToIndex(2);
-              } catch (e) {}
+              bottomSheetRef.current.snapToIndex(1);
             }
           }}
           activeOpacity={0.7}
@@ -1190,7 +1115,6 @@ const HomeScreen = () => {
         barStyle="dark-content"
       />
 
-      {/* MAP */}
       <View style={styles.mapBackground}>
         <OSMMap
           busData={
@@ -1202,10 +1126,8 @@ const HomeScreen = () => {
 
       <View style={styles.topBar}>
         <View style={styles.searchContainer}>
-          {/* LEFT ICON */}
           <Ionicons name="search" size={18} color={COLORS.textBody} />
 
-          {/* INPUT */}
           <TextInput
             placeholder={"Search"}
             value={searchQuery}
@@ -1215,21 +1137,23 @@ const HomeScreen = () => {
             placeholderTextColor={COLORS.textBody}
           />
 
-          {/* CLEAR / CANCEL BUTTON — fully resets the search so the map
-              reverts to the KIOT college default (no stale bus marker). */}
-          {searchQuery ? (
-            <TouchableOpacity
-              onPress={handleClearSearch}
-              style={styles.clearButton}
-            >
-              <Ionicons name="close-circle" size={18} color={COLORS.textBody} />
-            </TouchableOpacity>
-          ) : null}
+          <View style={styles.clearSlot}>
+            {searchQuery ? (
+              <TouchableOpacity
+                onPress={handleClearSearch}
+                style={styles.clearButton}
+              >
+                <Ionicons
+                  name="close-circle"
+                  size={18}
+                  color={COLORS.textBody}
+                />
+              </TouchableOpacity>
+            ) : null}
+          </View>
         </View>
 
-        {/* RIGHT ICONS */}
         <View style={styles.rightIcons}>
-          {/* REFRESH (DB/socket-based, no API re-fetch) */}
           <TouchableOpacity
             style={[
               styles.iconButtonPrimary,
@@ -1239,14 +1163,7 @@ const HomeScreen = () => {
             activeOpacity={0.7}
             disabled={locationStatus === "loading"}
           >
-            <Ionicons
-              name="refresh"
-              size={18}
-              color="#fff"
-              style={
-                locationStatus === "loading" ? styles.refreshSpin : undefined
-              }
-            />
+            <Ionicons name="refresh" size={18} color="#fff" />
           </TouchableOpacity>
 
           <TouchableOpacity
@@ -1279,26 +1196,22 @@ const HomeScreen = () => {
         </View>
       </View>
 
-      {/* BOTTOM SHEET (gorhom) */}
       <BottomSheet
         ref={bottomSheetRef}
         index={0}
-        snapPoints={SNAP_POINTS}
+        snapPoints={snapPoints}
         enablePanDownToClose={false}
         animateOnMount={true}
         handleIndicatorStyle={styles.handleIndicator}
         backgroundStyle={styles.sheetBackground}
         containerStyle={styles.sheetContainer}
         onChange={(idx) => {
-          // when sheet collapsed to smallest snap, clear plan-in-sheet state
-          if (idx === 0) {
-            setShowPlanInSheet(false);
-            setPlanViewMode(null);
+          if (idx === 0 && !showPlanInSheet) {
+            closeAllOverlayPanels();
           }
         }}
       >
         <BottomSheetView style={styles.sheetContent}>
-          {/* When plan view is requested, render plan lists/stops inside sheet */}
           {showPlanInSheet && planViewMode === "activePlan" ? (
             <View>
               <View style={styles.sheetHeader}>
@@ -1308,29 +1221,18 @@ const HomeScreen = () => {
                     List of buses in active plan
                   </Text>
                 </View>
-                <TouchableOpacity
-                  onPress={() => {
-                    setShowPlanInSheet(false);
-                    setPlanViewMode(null);
-                    if (
-                      bottomSheetRef.current &&
-                      bottomSheetRef.current.snapToIndex
-                    ) {
-                      try {
-                        bottomSheetRef.current.snapToIndex(0);
-                      } catch (e) {}
-                    }
-                  }}
-                >
+                <TouchableOpacity onPress={closeAllOverlayPanels}>
                   <Ionicons name="close" size={24} color={COLORS.textBody} />
                 </TouchableOpacity>
               </View>
 
               {loadingPlanBuses ? (
-                <ActivityIndicator
-                  color={COLORS.primary}
-                  style={{ marginVertical: 30 }}
-                />
+                <View style={styles.loadingContainer}>
+                  <ActivityIndicator color={COLORS.primary} size="small" />
+                  <Text style={styles.loadingText}>
+                    Fetching active plan buses...
+                  </Text>
+                </View>
               ) : planBuses.length === 0 ? (
                 <View style={styles.noPlansBox}>
                   <Text style={styles.noPlansText}>
@@ -1338,7 +1240,7 @@ const HomeScreen = () => {
                   </Text>
                 </View>
               ) : (
-                <ScrollView style={[styles.stopsList, { maxHeight: 400 }]}>
+                <ScrollView style={[styles.stopsList, { maxHeight: 350 }]}>
                   {planBuses.map((bus) => (
                     <TouchableOpacity
                       key={bus.previewNumber}
@@ -1360,29 +1262,18 @@ const HomeScreen = () => {
                   <Text style={styles.sheetLabel}>Bus {displayBusLabel}</Text>
                   <Text style={styles.sheetSubLabel}>Plans & Stops</Text>
                 </View>
-                <TouchableOpacity
-                  onPress={() => {
-                    setShowPlanInSheet(false);
-                    setPlanViewMode(null);
-                    if (
-                      bottomSheetRef.current &&
-                      bottomSheetRef.current.snapToIndex
-                    ) {
-                      try {
-                        bottomSheetRef.current.snapToIndex(0);
-                      } catch (e) {}
-                    }
-                  }}
-                >
+                <TouchableOpacity onPress={closeAllOverlayPanels}>
                   <Ionicons name="close" size={24} color={COLORS.textBody} />
                 </TouchableOpacity>
               </View>
 
               {loadingRoutes ? (
-                <ActivityIndicator
-                  color={COLORS.primary}
-                  style={{ marginVertical: 30 }}
-                />
+                <View style={styles.loadingContainer}>
+                  <ActivityIndicator color={COLORS.primary} size="small" />
+                  <Text style={styles.loadingText}>
+                    Fetching route stops...
+                  </Text>
+                </View>
               ) : !routesData || !routesData.planNames?.length ? (
                 <View style={styles.noPlansBox}>
                   <Text style={styles.noPlansText}>
@@ -1396,23 +1287,19 @@ const HomeScreen = () => {
                   )}
                 </View>
               ) : (
-                <>
-                  <ScrollView style={[styles.stopsList, { maxHeight: 400 }]}>
-                    {(routesData.plans[activePlanTab] || []).map(
-                      (stop, idx) => (
-                        <View
-                          key={`${activePlanTab}-${idx}`}
-                          style={styles.stopRow}
-                        >
-                          <View style={styles.stopIndex}>
-                            <Text style={styles.stopIndexText}>{idx + 1}</Text>
-                          </View>
-                          <Text style={styles.stopName}>{stop.stop_name}</Text>
-                        </View>
-                      ),
-                    )}
-                  </ScrollView>
-                </>
+                <ScrollView style={[styles.stopsList, { maxHeight: 350 }]}>
+                  {(routesData.plans[activePlanTab] || []).map((stop, idx) => (
+                    <View
+                      key={`${activePlanTab}-${idx}`}
+                      style={styles.stopRow}
+                    >
+                      <View style={styles.stopIndex}>
+                        <Text style={styles.stopIndexText}>{idx + 1}</Text>
+                      </View>
+                      <Text style={styles.stopName}>{stop.stop_name}</Text>
+                    </View>
+                  ))}
+                </ScrollView>
               )}
             </View>
           ) : (
@@ -1501,126 +1388,13 @@ const HomeScreen = () => {
           )}
         </BottomSheetView>
       </BottomSheet>
-
-      {/* ============ ACTIVE PLAN BUSES MODAL ============ */}
-      <Modal
-        visible={showPlanListModal}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setShowPlanListModal(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <View>
-                <Text style={styles.modalTitle}>Plan {globalPlan}</Text>
-                <Text style={styles.modalSubtitle}>Buses in active plan</Text>
-              </View>
-              <TouchableOpacity
-                onPress={() => setShowPlanListModal(false)}
-                style={styles.modalCloseBtn}
-              >
-                <Ionicons name="close" size={24} color={COLORS.textBody} />
-              </TouchableOpacity>
-            </View>
-
-            {loadingPlanBuses ? (
-              <ActivityIndicator
-                color={COLORS.primary}
-                style={{ marginVertical: 30 }}
-              />
-            ) : planBuses.length === 0 ? (
-              <View style={styles.noPlansBox}>
-                <Text style={styles.noPlansText}>
-                  No buses are assigned to {globalPlan} right now.
-                </Text>
-              </View>
-            ) : (
-              <ScrollView style={styles.stopsList}>
-                {planBuses.map((bus) => (
-                  <TouchableOpacity
-                    key={bus.previewNumber || bus.busNo}
-                    style={styles.planBusRow}
-                    onPress={() =>
-                      handleOpenPlanBus(bus.previewNumber || bus.busNo)
-                    }
-                  >
-                    <Text style={styles.planBusNumber}>
-                      Bus {getDisplayBusNumber(bus)}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </ScrollView>
-            )}
-          </View>
-        </View>
-      </Modal>
-
-      {/* ============ PLANS / STOPS MODAL ============ */}
-      <Modal
-        visible={showStopsModal}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setShowStopsModal(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <View>
-                <Text style={styles.modalTitle}>Bus {displayBusLabel}</Text>
-                <Text style={styles.modalSubtitle}>Plans & Stops</Text>
-              </View>
-              <TouchableOpacity
-                onPress={() => setShowStopsModal(false)}
-                style={styles.modalCloseBtn}
-              >
-                <Ionicons name="close" size={24} color={COLORS.textBody} />
-              </TouchableOpacity>
-            </View>
-
-            {loadingRoutes ? (
-              <ActivityIndicator
-                color={COLORS.primary}
-                style={{ marginVertical: 30 }}
-              />
-            ) : !routesData || !routesData.planNames?.length ? (
-              <View style={styles.noPlansBox}>
-                <Text style={styles.noPlansText}>
-                  No plans uploaded for this bus yet.
-                </Text>
-                {isAdmin && (
-                  <Text style={styles.noPlansHint}>
-                    Go to Organize → Buses → Edit Routes to upload a routes
-                    Excel.
-                  </Text>
-                )}
-              </View>
-            ) : (
-              <>
-                {/* Stops for active plan */}
-                <ScrollView style={styles.stopsList}>
-                  {(routesData.plans[activePlanTab] || []).map((stop, idx) => (
-                    <View
-                      key={`${activePlanTab}-${idx}`}
-                      style={styles.stopRow}
-                    >
-                      <View style={styles.stopIndex}>
-                        <Text style={styles.stopIndexText}>{idx + 1}</Text>
-                      </View>
-                      <Text style={styles.stopName}>{stop.stop_name}</Text>
-                    </View>
-                  ))}
-                </ScrollView>
-              </>
-            )}
-          </View>
-        </View>
-      </Modal>
     </View>
   );
 };
 
 export default HomeScreen;
+
+// ...styles remain the same
 
 const styles = StyleSheet.create({
   container: {
