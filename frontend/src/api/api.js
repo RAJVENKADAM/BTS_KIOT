@@ -2,8 +2,8 @@
  * API configuration and health check utility.
  * Defines the base URL for all backend API calls.
  */
-//export const API_BASE_URL = "https://bts-kiot.onrender.com";
-export const API_BASE_URL = "http://10.107.1.77:5000";
+export const API_BASE_URL = "https://bts-kiot.onrender.com";
+//export const API_BASE_URL = "http://10.107.1.77:5000";
 
 export const healthCheck = async () => {
   try {
