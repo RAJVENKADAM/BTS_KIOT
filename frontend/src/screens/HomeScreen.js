@@ -27,7 +27,7 @@
  * - Non-admin users auto-load bus_no from user profile; can only see their bus.
  * - Superadmin searches explicitly; "not found" clears all previous markers.
  * - Marker only shows when shouldShowBusMarker evaluates to true — never falls
- *   back to stale lastGoodLocation for a failed search.
+ *    back to stale lastGoodLocation for a failed search.
  *
  * Bus Status Detection:
  * ──────────────────────
@@ -55,6 +55,7 @@ import {
   TouchableOpacity,
   ScrollView,
   ActivityIndicator,
+  Dimensions, // ADD THIS
 } from "react-native";
 import { useNavigation } from "@react-navigation/native";
 import { Ionicons } from "@expo/vector-icons";
@@ -116,10 +117,21 @@ const HomeScreen = () => {
   const [showPlanInSheet, setShowPlanInSheet] = useState(false);
   const [planViewMode, setPlanViewMode] = useState(null); // 'activePlan' | 'stopsForBus' | null
 
-  // Dynamic snap points based on view mode
+  // Compute where the search bar actually ends, so the sheet never expands behind it
+  const { height: SCREEN_HEIGHT } = Dimensions.get("window");
+  const TOP_BAR_TOP = Platform.OS === "ios" ? 60 : 50;
+  const TOP_BAR_HEIGHT = 45;
+  const SAFE_GAP_BELOW_SEARCH = 12;
+  const SEARCH_BAR_BOTTOM =
+    TOP_BAR_TOP + TOP_BAR_HEIGHT + SAFE_GAP_BELOW_SEARCH;
+
+  // Refined snap points to ensure modal expands safely up to right below the search bar without overlapping it
   const snapPoints = useMemo(() => {
+    const maxAvailableHeight = SCREEN_HEIGHT - SEARCH_BAR_BOTTOM;
+    const maxPercent = Math.floor((maxAvailableHeight / SCREEN_HEIGHT) * 100);
+
     if (showPlanInSheet) {
-      return ["50%", "85%"];
+      return ["50%", `${Math.min(maxPercent, 68)}%`];
     }
     return ["25%", "45%"];
   }, [showPlanInSheet]);
@@ -1071,14 +1083,16 @@ const HomeScreen = () => {
           style={styles.planChip}
           onPress={() => {
             if (!selectedBusNo && !selectedPreviewNumber) {
-              openActivePlanInSheet();
+              // Navigate to PlanDetails page for the active global plan
+              navigation.navigate("PlanDetails", { mode: "activePlan", plan: globalPlan });
               return;
             }
-            setPlanViewMode("stopsForBus");
-            setShowPlanInSheet(true);
-            if (bottomSheetRef.current && bottomSheetRef.current.snapToIndex) {
-              bottomSheetRef.current.snapToIndex(1);
-            }
+            // If a bus is selected, navigate to the stops view for that bus
+            navigation.navigate("PlanDetails", {
+              mode: "stopsForBus",
+              previewNumber: selectedPreviewNumber,
+              busNo: selectedBusNo,
+            });
           }}
           activeOpacity={0.7}
         >
@@ -1101,7 +1115,6 @@ const HomeScreen = () => {
     displayBusData,
     isOffline,
     isAdmin,
-    openActivePlanInSheet,
     selectedBusNo,
     selectedPreviewNumber,
     trackingError,
@@ -1168,7 +1181,7 @@ const HomeScreen = () => {
 
           <TouchableOpacity
             style={styles.planButton}
-            onPress={openActivePlanInSheet}
+            onPress={() => navigation.navigate("PlanDetails", { mode: "activePlan", plan: globalPlan })}
             activeOpacity={0.7}
           >
             <Text style={styles.planButtonText}>
@@ -1213,7 +1226,7 @@ const HomeScreen = () => {
       >
         <BottomSheetView style={styles.sheetContent}>
           {showPlanInSheet && planViewMode === "activePlan" ? (
-            <View>
+            <View style={{ flex: 1, paddingBottom: 24 }}>
               <View style={styles.sheetHeader}>
                 <View>
                   <Text style={styles.sheetLabel}>{globalPlan}</Text>
@@ -1240,10 +1253,14 @@ const HomeScreen = () => {
                   </Text>
                 </View>
               ) : (
-                <ScrollView style={[styles.stopsList, { maxHeight: 350 }]}>
-                  {planBuses.map((bus) => (
+                <ScrollView
+                  style={{ flex: 1 }}
+                  contentContainerStyle={{ paddingBottom: 80 }}
+                  showsVerticalScrollIndicator={true}
+                >
+                  {planBuses.map((bus, idx) => (
                     <TouchableOpacity
-                      key={bus.previewNumber}
+                      key={`${bus.previewNumber ?? bus.busNo ?? bus.bus_no ?? "bus"}-${idx}`}
                       style={styles.planBusRow}
                       onPress={() => handleOpenPlanBus(bus.previewNumber)}
                     >
@@ -1256,7 +1273,7 @@ const HomeScreen = () => {
               )}
             </View>
           ) : showPlanInSheet && planViewMode === "stopsForBus" ? (
-            <View>
+            <View style={{ flex: 1, paddingBottom: 24 }}>
               <View style={styles.sheetHeader}>
                 <View>
                   <Text style={styles.sheetLabel}>Bus {displayBusLabel}</Text>
@@ -1287,7 +1304,11 @@ const HomeScreen = () => {
                   )}
                 </View>
               ) : (
-                <ScrollView style={[styles.stopsList, { maxHeight: 350 }]}>
+                <ScrollView
+                  style={{ flex: 1 }}
+                  contentContainerStyle={{ paddingBottom: 80 }}
+                  showsVerticalScrollIndicator={true}
+                >
                   {(routesData.plans[activePlanTab] || []).map((stop, idx) => (
                     <View
                       key={`${activePlanTab}-${idx}`}
@@ -1365,7 +1386,6 @@ const HomeScreen = () => {
                 ) : displayBusData ? (
                   <>
                     {busCardContent}
-                    {planCardContent}
                   </>
                 ) : (
                   <>
@@ -1501,6 +1521,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.white,
   },
   sheetContent: {
+    flex: 1, // ADD THIS — lets inner ScrollViews claim the sheet's real available height
     paddingHorizontal: 16,
     paddingBottom: 16,
   },

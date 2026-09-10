@@ -32,6 +32,7 @@ function AppNavigator() {
           <Stack.Screen name="Home" component={BottomNavigator} />
           <Stack.Screen name="Organize" component={OrganizeScreen} />
           <Stack.Screen name="Profile" component={ProfileScreen} />
+          <Stack.Screen name="PlanDetails" component={require('./src/screens/PlanDetailsScreen').default} />
         </>
       ) : (
         <Stack.Screen name="Login" component={LoginScreen} />
