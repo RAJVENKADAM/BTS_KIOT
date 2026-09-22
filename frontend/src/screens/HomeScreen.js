@@ -87,7 +87,7 @@ const calculateDistance = (lat1, lng1, lat2, lng2) => {
 };
 
 const HomeScreen = () => {
-  const { token, user } = useAuth();
+  const { token, user, updateUserData } = useAuth();
   const navigation = useNavigation();
   const role = (user?.role || "student").toLowerCase();
   const isAdmin = role === "superadmin";
@@ -363,12 +363,19 @@ const HomeScreen = () => {
   useEffect(() => {
     if (!socket || !user?.id) return;
     socket.emit("join-user", user.id);
-    const handleNotification = () => {
+    const handleNotification = (notification) => {
       setUnreadNotifications((count) => count + 1);
+      if (
+        notification?.type === "bus_altered" &&
+        notification.newBusNo &&
+        user
+      ) {
+        updateUserData({ ...user, bus_no: notification.newBusNo });
+      }
     };
     socket.on("notification", handleNotification);
     return () => socket.off("notification", handleNotification);
-  }, [socket, user?.id]);
+  }, [socket, user, updateUserData]);
 
   useEffect(() => {
     if (!socket) return;
@@ -390,7 +397,7 @@ const HomeScreen = () => {
   useEffect(() => {
     if (!token || isAdmin) return;
     notificationApi
-      .getAll(token)
+      .getUnreadCount(token)
       .then((data) => setUnreadNotifications(data.unreadCount || 0))
       .catch((error) => console.error("Failed to load notification count:", error));
   }, [token, isAdmin]);

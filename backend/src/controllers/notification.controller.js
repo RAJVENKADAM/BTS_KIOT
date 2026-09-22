@@ -7,6 +7,11 @@ async function getNotifications(req, res) {
       .limit(50)
       .lean();
 
+    const unreadCount = await Notification.countDocuments({
+      user_id: req.user.id,
+      read_at: null,
+    });
+
     res.json({
       success: true,
       notifications: notifications.map((notification) => ({
@@ -15,14 +20,29 @@ async function getNotifications(req, res) {
         message: notification.message,
         oldBusNo: notification.old_bus_no,
         newBusNo: notification.new_bus_no,
+        planName: notification.plan_name,
+        isBusActive: notification.is_bus_active,
         read: !!notification.read_at,
         createdAt: notification.createdAt,
       })),
-      unreadCount: notifications.filter((notification) => !notification.read_at).length,
+      unreadCount,
     });
   } catch (error) {
     console.error('getNotifications error:', error);
     res.status(500).json({ success: false, error: 'Failed to load notifications.' });
+  }
+}
+
+async function getUnreadCount(req, res) {
+  try {
+    const unreadCount = await Notification.countDocuments({
+      user_id: req.user.id,
+      read_at: null,
+    });
+    res.json({ success: true, unreadCount });
+  } catch (error) {
+    console.error('getUnreadCount error:', error);
+    res.status(500).json({ success: false, error: 'Failed to load unread notifications.' });
   }
 }
 
@@ -39,4 +59,4 @@ async function markNotificationsRead(req, res) {
   }
 }
 
-module.exports = { getNotifications, markNotificationsRead };
+module.exports = { getNotifications, getUnreadCount, markNotificationsRead };

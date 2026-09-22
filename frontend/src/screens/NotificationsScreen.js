@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
@@ -8,7 +8,7 @@ import {
   View,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { useNavigation } from "@react-navigation/native";
+import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import { useAuth } from "../context/AuthContext";
 import notificationApi from "../api/notificationApi";
 import { COLORS } from "../theme";
@@ -31,30 +31,44 @@ export default function NotificationsScreen() {
     }
   }, [token]);
 
-  useEffect(() => {
-    loadNotifications();
-  }, [loadNotifications]);
+  useFocusEffect(
+    useCallback(() => {
+      loadNotifications();
+    }, [loadNotifications]),
+  );
 
   const renderItem = ({ item }) => (
     <View style={styles.card}>
       <View style={styles.icon}>
-        <Ionicons name="swap-horizontal" size={22} color={COLORS.primary} />
+        <Ionicons
+          name={item.type === "plan_changed" ? "git-branch-outline" : "swap-horizontal"}
+          size={22}
+          color={COLORS.primary}
+        />
       </View>
       <View style={styles.body}>
         <Text style={styles.message}>{item.message}</Text>
-        <Text style={styles.meta}>Bus {item.oldBusNo} → Bus {item.newBusNo}</Text>
-        <TouchableOpacity
-          style={styles.button}
-          onPress={() =>
-            navigation.navigate("PlanDetails", {
-              mode: "stopsForBus",
-              busNo: item.newBusNo,
-            })
-          }
-        >
-          <Text style={styles.buttonText}>See stoppings</Text>
-          <Ionicons name="arrow-forward" size={15} color="#fff" />
-        </TouchableOpacity>
+        {item.type === "plan_changed" ? (
+          <Text style={styles.meta}>
+            {item.isBusActive ? "Your bus is active." : "Your bus is not in active."}
+          </Text>
+        ) : (
+          <>
+            <Text style={styles.meta}>Bus {item.oldBusNo} → Bus {item.newBusNo}</Text>
+            <TouchableOpacity
+              style={styles.button}
+              onPress={() =>
+                navigation.navigate("PlanDetails", {
+                  mode: "stopsForBus",
+                  busNo: item.newBusNo,
+                })
+              }
+            >
+              <Text style={styles.buttonText}>See stoppings</Text>
+              <Ionicons name="arrow-forward" size={15} color="#fff" />
+            </TouchableOpacity>
+          </>
+        )}
       </View>
     </View>
   );

@@ -9,6 +9,10 @@ const { getIO } = require("../socket");
 const GLOBAL_ACTIVE_PLAN_KEY = "global_active_plan";
 const DEFAULT_PLAN_NAMES = ["PLAN A", "PLAN B", "PLAN C", "PLAN D"];
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function normalizePlanName(plan) {
   const value = String(plan ?? "")
     .trim()
@@ -365,8 +369,54 @@ async function setGlobalActivePlan(req, res) {
       { upsert: true, new: true, setDefaultsOnInsert: true },
     );
 
+    const students = await User.find({
+      role: "student",
+      is_active: true,
+      bus_no: { $nin: [null, ""] },
+    }).select("_id bus_no").lean();
+    const buses = await Bus.find({ status: "active" })
+      .select("_id bus_no preview_number")
+      .lean();
+    const busByIdentifier = new Map();
+    buses.forEach((bus) => {
+      busByIdentifier.set(String(bus.bus_no).trim().toUpperCase(), bus);
+      if (bus.preview_number != null) {
+        busByIdentifier.set(String(bus.preview_number).trim().toUpperCase(), bus);
+      }
+    });
+    const activeBusIds = new Set(
+      (await BusRoute.find({ plan_name: normalized }).distinct("bus_id"))
+        .map((id) => String(id)),
+    );
+    const planNotifications = students.map((student) => {
+      const bus = busByIdentifier.get(String(student.bus_no).trim().toUpperCase());
+      const isBusActive = !!bus && activeBusIds.has(String(bus._id));
+      return {
+        user_id: student._id,
+        type: "plan_changed",
+        message: isBusActive
+          ? `Plan changed to ${normalized}. Your bus is active.`
+          : `Plan changed to ${normalized}. Your bus is not in active.`,
+        plan_name: normalized,
+        is_bus_active: isBusActive,
+      };
+    });
+    if (planNotifications.length) {
+      await Notification.insertMany(planNotifications);
+    }
+
     const io = getIO();
-    if (io) io.emit("bus-update", { actionType: "PLAN_CHANGED", activePlan: normalized });
+    if (io) {
+      io.emit("bus-update", { actionType: "PLAN_CHANGED", activePlan: normalized });
+      planNotifications.forEach((notification) => {
+        io.to(`user_${String(notification.user_id)}`).emit("notification", {
+          type: notification.type,
+          message: notification.message,
+          planName: notification.plan_name,
+          isBusActive: notification.is_bus_active,
+        });
+      });
+    }
     res.json({
       success: true,
       message: "Global active plan updated successfully",
@@ -397,11 +447,19 @@ async function alterBus(req, res) {
       return res.status(400).json({ success: false, error: 'The new bus is not active.' });
     }
 
+    const sourceIdentifiers = [sourceBus.bus_no];
+    if (sourceBus.preview_number != null) {
+      sourceIdentifiers.push(String(sourceBus.preview_number));
+    }
     const users = await User.find({
-      bus_no: { $regex: `^${sourceBus.bus_no}$`, $options: 'i' },
+      bus_no: {
+        $in: sourceIdentifiers.map(
+          (identifier) => new RegExp(`^${escapeRegExp(identifier)}$`, "i"),
+        ),
+      },
       role: 'student',
       is_active: true,
-    }).select('_id');
+    }).select('_id bus_no');
 
     const message = `Your bus is altered with ${targetBus.bus_no}.`;
     const notifications = users.map((user) => ({
@@ -412,6 +470,12 @@ async function alterBus(req, res) {
       new_bus_no: targetBus.bus_no,
     }));
     if (notifications.length) await Notification.insertMany(notifications);
+    if (users.length) {
+      await User.updateMany(
+        { _id: { $in: users.map((user) => user._id) } },
+        { $set: { bus_no: targetBus.bus_no } },
+      );
+    }
 
     const io = getIO();
     if (io) {

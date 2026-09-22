@@ -6,6 +6,10 @@ export const notificationApi = {
     fetchJson(`${API_BASE_URL}/api/notifications`, {
       headers: { Authorization: `Bearer ${token}` },
     }),
+  getUnreadCount: (token) =>
+    fetchJson(`${API_BASE_URL}/api/notifications/unread-count`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }),
   markRead: (token) =>
     fetchJson(`${API_BASE_URL}/api/notifications/read`, {
       method: "PUT",
