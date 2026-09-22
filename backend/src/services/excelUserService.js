@@ -176,25 +176,25 @@ class ExcelUserService {
         if (userData.type === 'new') {
           await sendEmail(
             userData.email,
-            'Your BTS Account Created',
+            'Your BTMS Account Created',
             `Hello ${userData.name},
 
-Your BTS account has been created.
+Your BTMS account has been created.
 Password: ${userData.permanentPassword}
 
 Best regards,
-BTS Team`
+BTMS Team`
           );
         } else if (userData.type === 'updated') {
           await sendEmail(
             userData.email,
-            'Your BTS Account Updated',
+            'Your BTMS Account Updated',
             `Hello ${userData.name},
 
-Your BTS account has been updated.
+Your BTMS account has been updated.
 
 Best regards,
-BTS Team`
+BTMS Team`
           );
         }
         notifications.push({ email: userData.email, status: 'sent' });

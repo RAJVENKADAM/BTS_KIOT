@@ -109,7 +109,10 @@ export async function parseJsonResponse(response) {
   try {
     return JSON.parse(text);
   } catch (e) {
-    return {};
+    const error = new Error("The server returned an invalid response.");
+    error.code = "INVALID_RESPONSE";
+    error.status = response.status;
+    throw error;
   }
 }
 
@@ -141,14 +144,26 @@ export function createHttpError(response, data) {
  */
 export async function fetchJson(url, options = {}) {
   let response;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs || 15000);
+  const { timeoutMs, signal, ...fetchOptions } = options;
   try {
-    response = await fetch(url, options);
+    response = await fetch(url, {
+      ...fetchOptions,
+      signal: signal || controller.signal,
+    });
   } catch (err) {
     // Native fetch network failure → tag it so callers can show a connection message.
-    const wrapped = new Error(err?.message || "Network request failed");
+    const wrapped = new Error(
+      err?.name === "AbortError"
+        ? "Request timed out"
+        : err?.message || "Network request failed",
+    );
     wrapped.isNetwork = true;
     wrapped.cause = err;
     throw wrapped;
+  } finally {
+    clearTimeout(timeoutId);
   }
 
   const data = await parseJsonResponse(response);

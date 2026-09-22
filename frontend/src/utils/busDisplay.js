@@ -14,9 +14,6 @@ export const getDisplayBusNumber = (valueOrItem) => {
       : valueOrItem.previewNumber ??
         valueOrItem.preview_number ??
         valueOrItem.preview ??
-        valueOrItem.busNo ??
-        valueOrItem.bus_no ??
-        valueOrItem.busNumber ??
         null;
 
   const normalizedPreview = normalizeBusPreview(preview);

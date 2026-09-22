@@ -32,6 +32,8 @@ const initialState = {
 
 const busReducer = (state, action) => {
   switch (action.type) {
+    case "RESET":
+      return initialState;
     case "SET_LOADING":
       return { ...state, loading: action.payload, error: null };
     case "SET_ERROR":
@@ -44,16 +46,17 @@ const busReducer = (state, action) => {
       return {
         ...state,
         buses: state.buses.map((bus) =>
-          bus.busNo === action.payload.busNo ||
-          bus.bus_no === action.payload.busNo
+          // Match and update by previewNumber (privacy: internal bus_no is not exposed to clients)
+          bus.previewNumber && action.payload.previewNumber && (
+            String(bus.previewNumber) === String(action.payload.previewNumber)
+          )
             ? { ...bus, ...action.payload }
             : bus,
         ),
         selectedBus:
-          state.selectedBus?.busNo === action.payload.busNo ||
-          state.selectedBus?.bus_no === action.payload.busNo
-            ? { ...state.selectedBus, ...action.payload }
-            : state.selectedBus,
+          state.selectedBus && state.selectedBus.previewNumber && action.payload.previewNumber && String(state.selectedBus.previewNumber) === String(action.payload.previewNumber)
+                ? { ...state.selectedBus, ...action.payload }
+                : state.selectedBus,
       };
     case "SET_SELECTED_PREVIEW":
       return { ...state, selectedPreviewNumber: action.payload };
@@ -76,17 +79,24 @@ const busReducer = (state, action) => {
 
 export const BusProvider = ({ children }) => {
   const [state, dispatch] = useReducer(busReducer, initialState);
-  const { token } = useAuth();
+  const { token, user } = useAuth();
+  const requestGenerationRef = React.useRef(0);
 
   // Load cached buses on startup
   useEffect(() => {
+    const generation = ++requestGenerationRef.current;
     loadBuses();
+    return () => {
+      if (generation === requestGenerationRef.current) requestGenerationRef.current += 1;
+    };
   }, [token]);
 
   // Socket connection for real-time updates
   const [socket, setSocket] = useState(null);
   useEffect(() => {
     if (!token) {
+      AsyncStorage.multiRemove(["buses", "selectedBusPreviewNumber"]).catch(() => {});
+      dispatch({ type: "RESET" });
       // Disconnect socket if token is cleared
       if (socket) {
         socket.disconnect();
@@ -109,6 +119,7 @@ export const BusProvider = ({ children }) => {
     });
 
     newSocket.on("connect", () => {
+      if (requestGenerationRef.current === 0 || !token) return;
       console.log("BusContext socket connected:", newSocket.id);
       setSocket(newSocket);
     });
@@ -132,9 +143,8 @@ export const BusProvider = ({ children }) => {
 
     // Cleanup: disconnect socket when token changes or component unmounts
     return () => {
-      if (newSocket && newSocket.connected) {
-        newSocket.disconnect();
-      }
+      newSocket.removeAllListeners();
+      newSocket.disconnect();
     };
   }, [token]);
 
@@ -143,7 +153,8 @@ export const BusProvider = ({ children }) => {
   const loadBuses = async () => {
     dispatch({ type: "SET_LOADING", payload: true });
     try {
-      const cached = await AsyncStorage.getItem("buses");
+      const cacheKey = `buses_${user?.id || user?._id || "anonymous"}`;
+      const cached = await AsyncStorage.getItem(cacheKey);
       if (cached) {
         dispatch({ type: "SET_BUSES", payload: JSON.parse(cached) });
       }
@@ -165,7 +176,8 @@ export const BusProvider = ({ children }) => {
       if (response.ok) {
         dispatch({ type: "SET_BUSES", payload: data.buses });
         dispatch({ type: "SET_ERROR", payload: null });
-        await AsyncStorage.setItem("buses", JSON.stringify(data.buses));
+        const cacheKey = `buses_${user?.id || user?._id || "anonymous"}`;
+        await AsyncStorage.setItem(cacheKey, JSON.stringify(data.buses));
       } else {
         // Non-OK response → surface a descriptive message based on status.
         const err = new Error(
@@ -200,11 +212,13 @@ export const BusProvider = ({ children }) => {
       dispatch({ type: "SET_SELECTED_PREVIEW", payload: previewNumber });
       dispatch({
         type: "SET_SELECTED_BUS",
-        payload: { previewNumber, busNo: data.busNo || "Unknown" },
+        payload: { previewNumber, bus: bus || null },
       });
-      await AsyncStorage.setItem("selectedBusPreviewNumber", previewNumber);
+      const cacheKey = `selectedBusPreviewNumber_${user?.id || user?._id || "anonymous"}`;
+      await AsyncStorage.setItem(cacheKey, previewNumber);
       const currentSocket = getSocket();
-      if (currentSocket) currentSocket.emit("join-bus", data.busNo);
+      // Join the preview-based socket room (privacy-preserving)
+      if (currentSocket) currentSocket.emit("join-bus", previewNumber);
     } catch (error) {
       dispatch({
         type: "SET_ERROR",
@@ -236,7 +250,7 @@ export const BusProvider = ({ children }) => {
     const loadPersistedBus = async () => {
       try {
         const previewNumber = await AsyncStorage.getItem(
-          "selectedBusPreviewNumber",
+          `selectedBusPreviewNumber_${user?.id || user?._id || "anonymous"}`,
         );
         if (previewNumber && token) {
           selectPreviewBus(previewNumber);

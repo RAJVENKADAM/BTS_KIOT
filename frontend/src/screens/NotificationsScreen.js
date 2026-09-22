@@ -12,6 +12,7 @@ import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import { useAuth } from "../context/AuthContext";
 import notificationApi from "../api/notificationApi";
 import { COLORS } from "../theme";
+import { getDisplayBusNumber } from "../utils/busDisplay";
 
 export default function NotificationsScreen() {
   const { token } = useAuth();
@@ -23,13 +24,36 @@ export default function NotificationsScreen() {
     try {
       const data = await notificationApi.getAll(token);
       setNotifications(data.notifications || []);
-      await notificationApi.markRead(token);
     } catch (error) {
       console.error("Failed to load notifications:", error);
     } finally {
       setLoading(false);
     }
   }, [token]);
+
+  const markRead = async (id) => {
+    try {
+      await notificationApi.markOneRead(token, id);
+      setNotifications((items) =>
+        items.map((item) =>
+          String(item.id) === String(id) ? { ...item, read: true } : item,
+        ),
+      );
+    } catch (error) {
+      console.error("Failed to mark notification read:", error);
+    }
+  };
+
+  const removeNotification = async (id) => {
+    try {
+      await notificationApi.remove(token, id);
+      setNotifications((items) =>
+        items.filter((item) => String(item.id) !== String(id)),
+      );
+    } catch (error) {
+      console.error("Failed to delete notification:", error);
+    }
+  };
 
   useFocusEffect(
     useCallback(() => {
@@ -38,29 +62,45 @@ export default function NotificationsScreen() {
   );
 
   const renderItem = ({ item }) => (
-    <View style={styles.card}>
+    <TouchableOpacity
+      style={[styles.card, !item.read && styles.unreadCard]}
+      activeOpacity={0.85}
+      onPress={() => !item.read && markRead(item.id)}
+    >
       <View style={styles.icon}>
         <Ionicons
-          name={item.type === "plan_changed" ? "git-branch-outline" : "swap-horizontal"}
+          name={
+            item.type === "plan_changed"
+              ? "git-branch-outline"
+              : item.type === "bus_status"
+                ? "radio-outline"
+                : "swap-horizontal"
+          }
           size={22}
           color={COLORS.primary}
         />
       </View>
       <View style={styles.body}>
         <Text style={styles.message}>{item.message}</Text>
-        {item.type === "plan_changed" ? (
+        {!item.read && <Text style={styles.unreadLabel}>Unread</Text>}
+        {item.type === "plan_changed" || item.type === "bus_status" ? (
           <Text style={styles.meta}>
-            {item.isBusActive ? "Your bus is active." : "Your bus is not in active."}
+            {item.type === "bus_status"
+              ? item.message
+              : item.isBusActive
+                ? "Your bus is active."
+                : "Your bus is not active."}
           </Text>
         ) : (
           <>
-            <Text style={styles.meta}>Bus {item.oldBusNo} → Bus {item.newBusNo}</Text>
+            <Text style={styles.meta}>Bus {getDisplayBusNumber(item.oldPreview)} → Bus {getDisplayBusNumber(item.newPreview)}</Text>
             <TouchableOpacity
               style={styles.button}
               onPress={() =>
+                // Navigate using preview number — PlanDetails/ctrl will accept preview
                 navigation.navigate("PlanDetails", {
                   mode: "stopsForBus",
-                  busNo: item.newBusNo,
+                  busNo: item.newPreview,
                 })
               }
             >
@@ -69,8 +109,15 @@ export default function NotificationsScreen() {
             </TouchableOpacity>
           </>
         )}
+        <TouchableOpacity
+          accessibilityLabel="Delete notification"
+          style={styles.deleteButton}
+          onPress={() => removeNotification(item.id)}
+        >
+          <Ionicons name="trash-outline" size={19} color={COLORS.textBody} />
+        </TouchableOpacity>
       </View>
-    </View>
+    </TouchableOpacity>
   );
 
   return (
@@ -118,9 +165,12 @@ const styles = StyleSheet.create({
     padding: 14,
     marginBottom: 12,
   },
+  unreadCard: { borderLeftWidth: 4, borderLeftColor: COLORS.primary },
+  deleteButton: { paddingLeft: 10, justifyContent: "center" },
   icon: { marginRight: 12, paddingTop: 2 },
   body: { flex: 1 },
   message: { color: COLORS.textHeader, fontSize: 15, fontWeight: "600" },
+  unreadLabel: { color: COLORS.primary, fontSize: 12, fontWeight: "700", marginBottom: 2 },
   meta: { color: COLORS.textBody, marginTop: 6 },
   button: {
     alignSelf: "flex-start",

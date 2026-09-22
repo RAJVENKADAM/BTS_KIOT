@@ -36,6 +36,19 @@ const busSchema = new mongoose.Schema(
     mobile_live: {
       type: Boolean,
       default: false
+    },
+    altered_to_bus_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Bus',
+      default: null
+    },
+    altered_to_preview: {
+      type: String,
+      default: null
+    },
+    altered_at: {
+      type: Date,
+      default: null
     }
   },
   { timestamps: true }

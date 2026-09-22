@@ -5,10 +5,23 @@ const socketIo = require("socket.io");
 const { setIO } = require("./socket");
 require("dotenv").config();
 
+if (process.env.NODE_ENV === "production") {
+  const missing = ["JWT_SECRET", "MONGODB_URI"].filter(
+    (name) => !process.env[name] || process.env[name].trim().length < 1,
+  );
+  if (missing.length) {
+    throw new Error(`Missing required production configuration: ${missing.join(", ")}`);
+  }
+  if (process.env.JWT_SECRET.length < 32) {
+    throw new Error("JWT_SECRET must be at least 32 characters in production");
+  }
+}
+
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 
 const morgan = require("morgan");
+const jwt = require("jsonwebtoken");
 
 const app = express();
 
@@ -49,6 +62,24 @@ const io = socketIo(server, {
   cors: corsOptions,
 });
 
+io.use((socket, next) => {
+  const token =
+    socket.handshake.auth?.token ||
+    socket.handshake.headers.authorization?.replace(/^Bearer\s+/i, "");
+
+  if (!token || !process.env.JWT_SECRET) {
+    return next(new Error("Authentication required"));
+  }
+
+  jwt.verify(token, process.env.JWT_SECRET, (error, user) => {
+    if (error || !user?.id) {
+      return next(new Error("Invalid or expired token"));
+    }
+    socket.user = { ...user, id: String(user.id) };
+    next();
+  });
+});
+
 setIO(io);
 
 // Socket.IO handlers for bus room events.
@@ -69,7 +100,7 @@ try {
 /* ---------------- BODY PARSING ---------------- */
 app.use(
   express.json({
-    limit: "25mb",
+    limit: "1mb",
     verify: (req, res, buf) => {
       req.rawBody = buf;
     },
@@ -79,7 +110,11 @@ app.use(
     strict: false,
   })
 );
-app.use(express.urlencoded({ extended: true, limit: "25mb" }));
+app.use(express.urlencoded({
+  extended: true,
+  limit: "1mb",
+  parameterLimit: 1000,
+}));
 
 /* ---------------- ROUTES ---------------- */
 
@@ -125,7 +160,7 @@ app.use("/api/superadmin", require("./routes/superadminUsers.routes"));
 app.get("/health", (req, res) => {
   res.status(200).json({
     status: "OK",
-    message: "BTS Backend is running",
+    message: "BTMS Backend is running",
   });
 });
 
@@ -134,6 +169,9 @@ app.use("*", (req, res) => {
 });
 
 app.use((err, req, res, next) => {
+  if (err && (err.name === 'MulterError' || err.message === 'Only Excel files are allowed')) {
+    return res.status(400).json({ error: err.message || 'Invalid upload.' });
+  }
   const statusCode = err.statusCode || err.status || 500;
   const payload = {
     error: statusCode === 500 ? "Internal server error" : err.message || "Request failed",

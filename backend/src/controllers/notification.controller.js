@@ -1,4 +1,5 @@
 const Notification = require('../models/Notification');
+const mongoose = require('mongoose');
 
 async function getNotifications(req, res) {
   try {
@@ -18,9 +19,8 @@ async function getNotifications(req, res) {
         id: notification._id,
         type: notification.type,
         message: notification.message,
-        oldBusNo: notification.old_bus_no,
-        newBusNo: notification.new_bus_no,
-        planName: notification.plan_name,
+        oldPreview: notification.old_preview,
+        newPreview: notification.new_preview,
         isBusActive: notification.is_bus_active,
         read: !!notification.read_at,
         createdAt: notification.createdAt,
@@ -59,4 +59,48 @@ async function markNotificationsRead(req, res) {
   }
 }
 
-module.exports = { getNotifications, getUnreadCount, markNotificationsRead };
+async function markNotificationRead(req, res) {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, error: 'Invalid notification id.' });
+    }
+    const result = await Notification.updateOne(
+      { _id: req.params.id, user_id: req.user.id },
+      { $set: { read_at: new Date() } },
+    );
+    if (!result.matchedCount) {
+      return res.status(404).json({ success: false, error: 'Notification not found.' });
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('markNotificationRead error:', error);
+    res.status(500).json({ success: false, error: 'Failed to update notification.' });
+  }
+}
+
+async function deleteNotification(req, res) {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, error: 'Invalid notification id.' });
+    }
+    const result = await Notification.deleteOne({
+      _id: req.params.id,
+      user_id: req.user.id,
+    });
+    if (!result.deletedCount) {
+      return res.status(404).json({ success: false, error: 'Notification not found.' });
+    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('deleteNotification error:', error);
+    res.status(500).json({ success: false, error: 'Failed to delete notification.' });
+  }
+}
+
+module.exports = {
+  getNotifications,
+  getUnreadCount,
+  markNotificationsRead,
+  markNotificationRead,
+  deleteNotification,
+};

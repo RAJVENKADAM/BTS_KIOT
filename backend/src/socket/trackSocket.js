@@ -14,53 +14,82 @@ function registerTrackSocketHandlers() {
   if (!io) return;
 
   io.on("connection", (socket) => {
+    const authenticatedUserId = String(socket.user.id);
+    let locationRequests = 0;
+    let locationWindowStarted = Date.now();
+    socket.join(`user_${authenticatedUserId}`);
+
     socket.on("join-user", (userId) => {
-      if (userId) socket.join(`user_${String(userId)}`);
+      if (userId && String(userId) === authenticatedUserId) {
+        socket.join(`user_${authenticatedUserId}`);
+      }
     });
-    // Join a room for a specific bus to receive live updates
-    socket.on("join-bus", (busNo) => {
-      if (!busNo) return;
-      const room = `bus_${String(busNo).toUpperCase()}`;
-      socket.join(room);
+    // Join a room for a specific preview number to receive live updates.
+    // Use preview_ prefix to avoid exposing internal bus_no to clients.
+    socket.on("join-bus", async (previewNumber) => {
+      try {
+        if (!previewNumber) return;
+        const Bus = getBus();
+        const bus = await Bus.findOne({
+          preview_number: String(previewNumber).trim(),
+          status: "active",
+        }).select("_id").lean();
+        if (!bus) return;
+        const room = `preview_${String(previewNumber)}`;
+        socket.join(room);
+      } catch (error) {
+        console.error("join-bus error:", error.message);
+      }
     });
 
-    // Leave a room for a specific bus
-    socket.on("leave-bus", (busNo) => {
-      if (!busNo) return;
-      const room = `bus_${String(busNo).toUpperCase()}`;
+    // Leave a room for a specific preview
+    socket.on("leave-bus", (previewNumber) => {
+      if (!previewNumber) return;
+      const room = `preview_${String(previewNumber)}`;
       socket.leave(room);
     });
 
-    // Client requests the latest location for a bus straight from the DB.
-    // This avoids hitting the rate-limited GPS provider / HTTP API on refresh.
-    socket.on("request-bus-location", async (busNo) => {
-      if (!busNo) return;
+    // Client requests the latest location for a bus (search by bus_no or preview).
+    // Response payload deliberately avoids exposing internal bus_no. Returns previewNumber and location only.
+    socket.on("request-bus-location", async (busIdentifier) => {
+      if (!busIdentifier) return;
+      const now = Date.now();
+      if (now - locationWindowStarted >= 60_000) {
+        locationWindowStarted = now;
+        locationRequests = 0;
+      }
+      locationRequests += 1;
+      if (locationRequests > 30) {
+        return socket.emit("locationUpdate", {
+          previewNumber: busIdentifier,
+          error: "Too many location requests",
+        });
+      }
       try {
         const Bus = getBus();
         const BusLiveLocation = getBusLiveLocation();
 
         // Resolve bus by bus_no first, then by preview_number.
         let bus = await Bus.findOne({
-          bus_no: String(busNo).trim().toUpperCase(),
+          bus_no: String(busIdentifier).trim().toUpperCase(),
         });
         if (!bus) {
           bus = await Bus.findOne({
-            preview_number: { $in: [busNo, String(busNo)] },
+            preview_number: { $in: [busIdentifier, String(busIdentifier)] },
           });
         }
         if (!bus) {
           return socket.emit("locationUpdate", {
-            busNo,
+            previewNumber: busIdentifier,
             error: "Bus not found",
           });
         }
 
         const location = await BusLiveLocation.findOne({ bus_id: bus._id });
 
+        // Privacy: do NOT send internal bus_no. Use previewNumber only.
         const payload = {
-          busNo: bus.bus_no,
-          bus_no: bus.bus_no,
-          previewNumber: bus.preview_number,
+          previewNumber: bus.preview_number ?? null,
           latitude: location ? location.latitude : null,
           longitude: location ? location.longitude : null,
           speed: location ? location.speed : 0,
@@ -78,7 +107,7 @@ function registerTrackSocketHandlers() {
         socket.emit("locationUpdate", payload);
       } catch (err) {
         console.error("request-bus-location error:", err.message);
-        socket.emit("locationUpdate", { busNo, error: err.message });
+        socket.emit("locationUpdate", { error: err.message });
       }
     });
   });

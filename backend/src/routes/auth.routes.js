@@ -1,11 +1,19 @@
 const express = require('express');
 const { login, getProfile, logout, deleteUserAccount, verifyToken, verifyTokenPublic } = require('../controllers/auth.controller');
 const { authenticateToken } = require('../middleware/auth');
+const rateLimit = require('express-rate-limit');
 
 const router = express.Router();
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many login attempts. Please try again later.' },
+});
 
 // Public routes
-router.post('/login', login);
+router.post('/login', loginLimiter, login);
 
 // Verify endpoint uses the PUBLIC handler (no authenticateToken middleware).
 // It returns 200 { valid: false } for invalid/expired tokens instead of a bare 403,

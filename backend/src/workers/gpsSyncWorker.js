@@ -1,5 +1,6 @@
 const Bus = require("../models/Bus");
 const BusLiveLocation = require("../models/BusLiveLocation");
+const User = require("../models/User");
 const gpsService = require("../services/gpsService");
 const { getIO } = require("../socket");
 
@@ -43,6 +44,7 @@ class GpsSyncWorker {
       Number(process.env.GPS_PROVIDER_TIMEOUT_MS) || 10000;
 
     this.syncLock = false;
+    this.interval = null;
   }
 
   start() {
@@ -59,11 +61,19 @@ class GpsSyncWorker {
     );
 
     // interval loop
-    setInterval(() => {
+    this.interval = setInterval(() => {
       this.runCycle().catch((e) =>
         console.error("gpsSyncWorker cycle failed:", e),
       );
     }, this.syncIntervalMs);
+  }
+
+  stop() {
+    if (this.interval) {
+      clearInterval(this.interval);
+      this.interval = null;
+    }
+    this.started = false;
   }
 
   async runCycle() {
@@ -80,6 +90,17 @@ class GpsSyncWorker {
       const buses = await Bus.find({ status: "active" }).select(
         "_id gps_device_id reg_no bus_no preview_number",
       );
+      const assignedUsers = await User.find({
+        role: "student",
+        is_active: true,
+        bus_no: { $nin: [null, ""] },
+      }).select("_id bus_no").lean();
+      const usersByBus = new Map();
+      assignedUsers.forEach((user) => {
+        const key = String(user.bus_no).trim().toUpperCase();
+        if (!usersByBus.has(key)) usersByBus.set(key, []);
+        usersByBus.get(key).push(String(user._id));
+      });
 
       console.log(`GPS Sync Started - buses=${buses.length}`);
 
@@ -163,30 +184,50 @@ class GpsSyncWorker {
         try {
           const freshDoc = await BusLiveLocation.findOne({ bus_id: busId });
           const io = getIO();
-          if (io && bus.bus_no) {
-            const busNo = bus.bus_no;
-            io.to(`bus_${String(busNo).toUpperCase()}`).emit("locationUpdate", {
-              busNo,
-              bus_no: busNo,
-              previewNumber: bus.preview_number,
-              latitude: freshDoc ? freshDoc.latitude : null,
-              longitude: freshDoc ? freshDoc.longitude : null,
-              speed: freshDoc ? freshDoc.speed : 0,
-              status: freshDoc && freshDoc.is_online ? "online" : "offline",
-              source: freshDoc && freshDoc.source ? freshDoc.source : "offline",
-              is_online: !!(freshDoc && freshDoc.is_online),
-              lastSuccessfulGpsUpdate: freshDoc
-                ? freshDoc.lastSuccessfulGpsUpdate
-                : null,
-              lastUpdated: freshDoc
-                ? freshDoc.lastSuccessfulGpsUpdate || freshDoc.updatedAt
-                : null,
-            });
+
+        // Build a privacy-preserving payload: never expose internal bus_no to general sockets.
+        const publicPayload = {
+          previewNumber: bus.preview_number || null,
+          latitude: freshDoc ? freshDoc.latitude : null,
+          longitude: freshDoc ? freshDoc.longitude : null,
+          speed: freshDoc ? freshDoc.speed : 0,
+          status: freshDoc && freshDoc.is_online ? "online" : "offline",
+          source: freshDoc && freshDoc.source ? freshDoc.source : "offline",
+          is_online: !!(freshDoc && freshDoc.is_online),
+          lastSuccessfulGpsUpdate: freshDoc
+            ? freshDoc.lastSuccessfulGpsUpdate
+            : null,
+          lastUpdated: freshDoc
+            ? freshDoc.lastSuccessfulGpsUpdate || freshDoc.updatedAt
+            : null,
+        };
+
+        if (io) {
+          // Emit to public preview room only if preview number exists.
+          if (bus.preview_number != null) {
+            const room = `preview_${String(bus.preview_number)}`;
+            io.to(room).emit("locationUpdate", publicPayload);
           }
+
+          // Emit to every active student assigned to this bus.
+          const assignedUserIds = usersByBus.get(String(bus.bus_no).toUpperCase()) || [];
+          assignedUserIds.forEach((userId) => {
+            io.to(`user_${userId}`).emit("locationUpdate", publicPayload);
+          });
+
+          // Preserve support for a location document explicitly tied to a user.
+          if (freshDoc && freshDoc.user_id) {
+            try {
+              io.to(`user_${String(freshDoc.user_id)}`).emit("locationUpdate", publicPayload);
+            } catch (userEmitErr) {
+              console.error("Failed to emit location to user room:", userEmitErr?.message || userEmitErr);
+            }
+          }
+        }
         } catch (emitErr) {
-          console.error(
-            `locationUpdate emit failed for ${regNo}: ${emitErr?.message || emitErr}`,
-          );
+        console.error(
+          `locationUpdate emit failed for ${regNo}: ${emitErr?.message || emitErr}`,
+        );
         }
       }
 

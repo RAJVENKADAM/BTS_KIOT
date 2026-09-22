@@ -11,7 +11,7 @@ const HOST = process.env.HOST || '0.0.0.0';
  */
 app.set('trust proxy', 1);
 
-server.listen(PORT, HOST, () => {
+const httpServer = server.listen(PORT, HOST, () => {
   console.log(`Server is running on http://${HOST}:${PORT}`);
   console.log(`Accessible at: http://localhost:${PORT}`);
   console.log(`Mobile access: http://${HOST}:${PORT} (ensure same WiFi network)`);
@@ -19,3 +19,25 @@ server.listen(PORT, HOST, () => {
 
   // DB-dependent services are started by app.js
 });
+
+async function shutdown(signal) {
+  console.log(`Received ${signal}; shutting down gracefully.`);
+  try {
+    const gpsSyncWorker = require('./src/workers/gpsSyncWorker');
+    gpsSyncWorker.stop();
+  } catch (error) {
+    console.error('Failed to stop GPS worker:', error.message);
+  }
+
+  await new Promise((resolve) => httpServer.close(resolve));
+  try {
+    const mongoose = require('mongoose');
+    await mongoose.disconnect();
+  } catch (error) {
+    console.error('Failed to close MongoDB:', error.message);
+  }
+  process.exit(0);
+}
+
+process.once('SIGINT', () => shutdown('SIGINT'));
+process.once('SIGTERM', () => shutdown('SIGTERM'));

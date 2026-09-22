@@ -11,6 +11,7 @@ import React, {
   useRef,
 } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as SecureStore from "expo-secure-store";
 import { API_BASE_URL } from "../api/api";
 import { isNetworkError } from "../utils/errorHandler";
 
@@ -33,6 +34,37 @@ export const AuthProvider = ({ children }) => {
 
   const isLoggingOut = useRef(false);
   const verifyIntervalRef = useRef(null);
+  const sessionGenerationRef = useRef(0);
+
+  const readToken = async () => {
+    try {
+      const secureToken = await SecureStore.getItemAsync("btms_token");
+      if (secureToken) return secureToken;
+    } catch (error) {
+      console.warn("Secure token storage unavailable:", error?.message);
+    }
+    // One-time migration for sessions created by older builds.
+    return AsyncStorage.getItem("token");
+  };
+
+  const writeToken = async (value) => {
+    try {
+      await SecureStore.setItemAsync("btms_token", value, {
+        keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+      });
+      await AsyncStorage.removeItem("token");
+    } catch (error) {
+      console.warn("Secure token storage unavailable; using compatibility storage:", error?.message);
+      await AsyncStorage.setItem("token", value);
+    }
+  };
+
+  const clearAuthStorage = async () => {
+    await Promise.allSettled([
+      SecureStore.deleteItemAsync("btms_token"),
+      AsyncStorage.multiRemove(["token", "user"]),
+    ]);
+  };
 
   // LOAD AUTH DATA
   useEffect(() => {
@@ -49,6 +81,7 @@ export const AuthProvider = ({ children }) => {
       return;
     }
 
+    const generation = ++sessionGenerationRef.current;
     const verifySession = async () => {
       try {
         const response = await fetch(`${API_BASE_URL}/api/auth/verify`, {
@@ -61,7 +94,8 @@ export const AuthProvider = ({ children }) => {
           console.log(
             "Session invalid — token rejected by server. Logging out.",
           );
-          await AsyncStorage.multiRemove(["token", "user"]);
+          if (generation !== sessionGenerationRef.current) return;
+          await clearAuthStorage();
           setToken(null);
           setUser(null);
           return;
@@ -72,7 +106,8 @@ export const AuthProvider = ({ children }) => {
           console.log(
             "Session invalid — account deactivated or token expired. Logging out.",
           );
-          await AsyncStorage.multiRemove(["token", "user"]);
+          if (generation !== sessionGenerationRef.current) return;
+          await clearAuthStorage();
           setToken(null);
           setUser(null);
         }
@@ -94,7 +129,7 @@ export const AuthProvider = ({ children }) => {
   // LOAD FROM STORAGE — validates token with backend before restoring session
   const loadAuthData = async () => {
     try {
-      const storedToken = await AsyncStorage.getItem("token");
+      const storedToken = await readToken();
       const storedUser = await AsyncStorage.getItem("user");
 
       if (storedToken && storedUser) {
@@ -110,14 +145,14 @@ export const AuthProvider = ({ children }) => {
           // Clear the session and send the user to the login screen.
           if (!verifyRes.ok) {
             console.log("Stored token rejected on startup — clearing session.");
-            await AsyncStorage.multiRemove(["token", "user"]);
+            await clearAuthStorage();
             return;
           }
 
           const verifyData = await verifyRes.json();
 
           if (verifyData.deactivated === true || verifyData.valid === false) {
-            await AsyncStorage.multiRemove(["token", "user"]);
+            await clearAuthStorage();
             return;
           }
 
@@ -179,7 +214,13 @@ export const AuthProvider = ({ children }) => {
           };
         }
 
-        await AsyncStorage.setItem("token", data.token);
+        if (typeof data.user.role !== "string" || typeof data.user.is_active !== "boolean") {
+          return { success: false, error: "Invalid account data returned by server" };
+        }
+        if (!data.user.is_active && data.user.role.toLowerCase() !== "superadmin") {
+          return { success: false, error: "Account deactivated. Contact admin." };
+        }
+        await writeToken(data.token);
         await AsyncStorage.setItem("user", JSON.stringify(data.user));
 
         setToken(data.token);
@@ -212,6 +253,7 @@ export const AuthProvider = ({ children }) => {
     }
 
     isLoggingOut.current = true;
+    sessionGenerationRef.current += 1;
 
     try {
       if (token) {
@@ -228,13 +270,13 @@ export const AuthProvider = ({ children }) => {
         }
       }
 
-      await AsyncStorage.multiRemove(["token", "user"]);
+      await clearAuthStorage();
 
       setToken(null);
       setUser(null);
     } catch (error) {
       try {
-        await AsyncStorage.multiRemove(["token", "user"]);
+        await clearAuthStorage();
       } catch {}
 
       setToken(null);
@@ -279,7 +321,7 @@ export const AuthProvider = ({ children }) => {
       }
 
       if (response.ok) {
-        await AsyncStorage.multiRemove(["token", "user"]);
+        await clearAuthStorage();
         setToken(null);
         setUser(null);
 

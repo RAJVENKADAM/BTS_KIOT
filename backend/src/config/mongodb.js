@@ -6,8 +6,12 @@ const mongoose = require('mongoose');
  * inject DB_NAME (default: bts_db) before the query string.
  */
 function buildMongoURI() {
-  const uri = process.env.MONGODB_URI || 'mongodb+srv://rajvenkadam_db_user:...';
+  const uri = process.env.MONGODB_URI;
   const dbName = process.env.DB_NAME || 'bts_db';
+
+  if (!uri || !uri.trim()) {
+    throw new Error('MONGODB_URI is required');
+  }
 
   // Check if URI already has a database name (path between host and ?)
   // Pattern: hosts/DBNAME? or hosts/DBNAME (no query)
@@ -16,6 +20,7 @@ function buildMongoURI() {
   if (hasDbName) return uri;
 
   // Inject database name before query parameters
+  if (uri.endsWith('/')) return `${uri}${dbName}`;
   return uri.replace('/?', `/${dbName}?`);
 }
 

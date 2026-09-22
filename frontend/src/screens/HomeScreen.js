@@ -272,6 +272,16 @@ const HomeScreen = () => {
         setIsBusFound(true);
         setRoutesData((prev) => prev);
 
+        if (data?.alteration?.isAltered) {
+          setTrackingError(data.alteration.message);
+          setLocationStatus("offline");
+          setIsOffline(true);
+          setBusData({ ...data, alteration: data.alteration });
+          setLastGoodLocation(null);
+          setNoBusFound(false);
+          return;
+        }
+
         if (data?.notActiveMessage) {
           setTrackingError(data?.notActiveMessage);
           setLocationStatus("offline");
@@ -353,24 +363,26 @@ const HomeScreen = () => {
   }, [isAdmin]);
 
   useEffect(() => {
-    if (!socket || !selectedBusNo) return;
-    socket.emit("join-bus", selectedBusNo);
+    if (!socket || (!selectedBusNo && !selectedPreviewNumber)) return;
+    // Join preview-based room (prefer previewNumber for privacy)
+    const roomId = selectedPreviewNumber || selectedBusNo;
+    socket.emit("join-bus", roomId);
     return () => {
-      socket.emit("leave-bus", selectedBusNo);
+      socket.emit("leave-bus", roomId);
     };
-  }, [socket, selectedBusNo]);
+  }, [socket, selectedBusNo, selectedPreviewNumber]);
 
   useEffect(() => {
     if (!socket || !user?.id) return;
     socket.emit("join-user", user.id);
     const handleNotification = (notification) => {
       setUnreadNotifications((count) => count + 1);
-      if (
-        notification?.type === "bus_altered" &&
-        notification.newBusNo &&
-        user
-      ) {
-        updateUserData({ ...user, bus_no: notification.newBusNo });
+      // Notification may contain preview fields (newPreview) for privacy.
+      if (notification?.type === "bus_altered" && user) {
+        const newAssigned = notification.newBusNo || notification.newPreview;
+        if (newAssigned) {
+          updateUserData({ ...user, bus_no: newAssigned });
+        }
       }
     };
     socket.on("notification", handleNotification);
@@ -380,15 +392,15 @@ const HomeScreen = () => {
   useEffect(() => {
     if (!socket) return;
     const handleBusUpdate = (data) => {
-      if (data?.actionType !== "PLAN_CHANGED" || !data.activePlan) return;
-      const nextPlan = normalizePlanName(data.activePlan);
-      setGlobalPlan(nextPlan);
-      if (selectedBusNo) {
-        busApi
-          .getBusRoutes(token, selectedBusNo)
-          .then(setRoutesData)
-          .catch((error) => console.error("Failed to refresh bus plan:", error));
-      }
+      if (data?.actionType !== "PLAN_CHANGED") return;
+      // Backend no longer broadcasts the activePlan to all clients for privacy.
+      // Refresh the active plan from the API (superadmin will receive the plan name;
+      // regular users will receive a null and won't see it).
+      loadGlobalActivePlan().then((nextPlan) => {
+        if (nextPlan && selectedPreviewNumber) {
+          busApi.getBusRoutes(token, selectedPreviewNumber).then(setRoutesData).catch((error) => console.error("Failed to refresh bus plan:", error));
+        }
+      });
     };
     socket.on("bus-update", handleBusUpdate);
     return () => socket.off("bus-update", handleBusUpdate);
@@ -680,6 +692,17 @@ const HomeScreen = () => {
         (data.busNo || data.bus_no || data.busNumber)
       );
 
+      if (data?.alteration?.isAltered) {
+        setTrackingError(data.alteration.message);
+        setBusData(data);
+        setLastGoodLocation(null);
+        setLocationStatus("offline");
+        setIsOffline(true);
+        setNoBusFound(false);
+        setIsBusFound(true);
+        return;
+      }
+
       if (data?.notActiveMessage) {
         setTrackingError(data.notActiveMessage);
         setBusData({ ...data, source: data?.source || "gps" });
@@ -775,6 +798,18 @@ const HomeScreen = () => {
           token,
           String(busNo).toUpperCase(),
         );
+        if (data?.alteration?.isAltered) {
+          setTrackingError(data.alteration.message);
+          setBusData(data);
+          setLastGoodLocation(null);
+          setLocationStatus("offline");
+          setIsOffline(true);
+          setNoBusFound(false);
+          setIsBusFound(true);
+          setPlanViewMode("stopsForBus");
+          setShowPlanInSheet(true);
+          return;
+        }
         if (data?.notActiveMessage) {
           setTrackingError(data.notActiveMessage);
           setBusData({

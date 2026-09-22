@@ -7,7 +7,15 @@ export const API_BASE_URL = "https://bts-kiot.onrender.com";
 
 export const healthCheck = async () => {
   try {
-    const res = await fetch(`${API_BASE_URL}/health`);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    let res;
+    try {
+      res = await fetch(`${API_BASE_URL}/health`, { signal: controller.signal });
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (!res.ok) throw new Error(`Health check failed (${res.status})`);
     const rawText = await res.text();
     return rawText ? JSON.parse(rawText) : {};
   } catch (err) {

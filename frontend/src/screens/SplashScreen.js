@@ -53,7 +53,7 @@ export default function SplashScreen() {
 
         {/* Title */}
         <Animated.View style={{ opacity: fadeAnim, alignItems: 'center' }}>
-          <Header style={styles.title}>BTS App</Header>
+          <Header style={styles.title}>BTMS App</Header>
           <Subtitle style={styles.subtitle}>Bus Tracking System</Subtitle>
         </Animated.View>
 

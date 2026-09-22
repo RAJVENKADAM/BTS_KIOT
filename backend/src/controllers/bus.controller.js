@@ -32,6 +32,40 @@ function buildNotActiveMessage(activePlan) {
   return `This bus is not in the active global plan (${activePlan}).`;
 }
 
+async function notifyAssignedUsersOfBusStatus(bus, status) {
+  const users = await User.find({
+    bus_no: new RegExp(`^${escapeRegExp(bus.bus_no)}$`, "i"),
+    role: "student",
+    is_active: true,
+  }).select("_id");
+
+  if (!users.length) return;
+  const message =
+    status === "active"
+      ? `Your bus ${bus.preview_number ?? ""} is active now.`
+      : `Your bus ${bus.preview_number ?? ""} is inactive now.`;
+  const notifications = users.map((user) => ({
+    user_id: user._id,
+    type: "bus_status",
+    message,
+    new_preview: bus.preview_number ?? null,
+    is_bus_active: status === "active",
+  }));
+  await Notification.insertMany(notifications);
+
+  const io = getIO();
+  if (io) {
+    users.forEach((user) => {
+      io.to(`user_${String(user._id)}`).emit("notification", {
+        type: "bus_status",
+        message,
+        previewNumber: bus.preview_number ?? null,
+        isBusActive: status === "active",
+      });
+    });
+  }
+}
+
 // ================= SHARED HELPERS =================
 /**
  * Find a bus by EITHER its bus_no OR its preview_number.
@@ -185,9 +219,25 @@ async function getAllBuses(req, res) {
       };
     });
 
+    // Privacy: remove internal identifiers for non-superadmin users
+    const isSuperadmin = req.user && String(req.user.role || '').toLowerCase() === 'superadmin';
+    const safeBuses = isSuperadmin
+      ? enrichedBuses
+      : enrichedBuses.map((b) => ({
+          previewNumber: b.previewNumber,
+          status: b.status,
+          mobileLive: b.mobileLive,
+          latitude: b.latitude,
+          longitude: b.longitude,
+          speed: b.speed,
+          isOnline: b.isOnline,
+          lastUpdated: b.lastUpdated,
+          source: b.source,
+        }));
+
     res.status(200).json({
-      buses: enrichedBuses,
-      count: enrichedBuses.length,
+      buses: safeBuses,
+      count: safeBuses.length,
     });
   } catch (error) {
     console.error("GET ALL BUSES ERROR:", error);
@@ -232,11 +282,26 @@ async function getBusesForPlan(req, res) {
       };
     });
 
+    // Privacy: hide bus_no and plan details for non-superadmin users
+    const isSuperadmin = req.user && String(req.user.role || '').toLowerCase() === 'superadmin';
+    const safeResponse = isSuperadmin
+      ? response
+      : response.map((b) => ({
+          previewNumber: b.previewNumber,
+          status: b.status,
+          latitude: b.latitude,
+          longitude: b.longitude,
+          speed: b.speed,
+          isOnline: b.isOnline,
+          lastUpdated: b.lastUpdated,
+          source: b.source,
+        }));
+
     res.status(200).json({
       success: true,
-      plan: targetPlan,
-      buses: response,
-      count: response.length,
+      plan: isSuperadmin ? targetPlan : null,
+      buses: safeResponse,
+      count: safeResponse.length,
     });
   } catch (error) {
     console.error("GET BUSES FOR PLAN ERROR:", error);
@@ -270,10 +335,17 @@ async function activateBus(req, res) {
   try {
     const { busNo } = req.params;
 
-    await Bus.updateOne({ bus_no: busNo.toUpperCase() }, { status: "active" });
+    const bus = await Bus.findOneAndUpdate(
+      { bus_no: busNo.toUpperCase() },
+      { status: "active" },
+      { new: true },
+    );
+    if (!bus) return res.status(404).json({ error: "Bus not found" });
+    await notifyAssignedUsersOfBusStatus(bus, "active");
 
     res.json({ message: "Bus activated" });
   } catch (error) {
+    console.error("activateBus error:", error);
     res.status(500).json({ error: error.message });
   }
 }
@@ -283,13 +355,17 @@ async function deactivateBus(req, res) {
   try {
     const { busNo } = req.params;
 
-    await Bus.updateOne(
+    const bus = await Bus.findOneAndUpdate(
       { bus_no: busNo.toUpperCase() },
       { status: "inactive" },
+      { new: true },
     );
+    if (!bus) return res.status(404).json({ error: "Bus not found" });
+    await notifyAssignedUsersOfBusStatus(bus, "inactive");
 
     res.json({ message: "Bus deactivated" });
   } catch (error) {
+    console.error("deactivateBus error:", error);
     res.status(500).json({ error: error.message });
   }
 }
@@ -340,10 +416,15 @@ async function updatePlan(req, res) {
 async function getGlobalActivePlan(req, res) {
   try {
     const activePlan = await getCurrentGlobalPlan();
+
+    // Only superadmin may see the actual plan name. Regular users receive a
+    // response that indicates the plan is intentionally hidden for privacy.
+    const isSuperadmin = req.user && String(req.user.role || '').toLowerCase() === 'superadmin';
+
     res.json({
       success: true,
-      activePlan,
-      planNames: DEFAULT_PLAN_NAMES,
+      activePlan: isSuperadmin ? activePlan : null,
+      planNames: isSuperadmin ? DEFAULT_PLAN_NAMES : [],
     });
   } catch (error) {
     console.error("getGlobalActivePlan error:", error);
@@ -395,8 +476,8 @@ async function setGlobalActivePlan(req, res) {
         user_id: student._id,
         type: "plan_changed",
         message: isBusActive
-          ? `Plan changed to ${normalized}. Your bus is active.`
-          : `Plan changed to ${normalized}. Your bus is not in active.`,
+          ? "Your bus is active after the latest route update."
+          : "Your bus is not active after the latest route update.",
         plan_name: normalized,
         is_bus_active: isBusActive,
       };
@@ -407,12 +488,14 @@ async function setGlobalActivePlan(req, res) {
 
     const io = getIO();
     if (io) {
-      io.emit("bus-update", { actionType: "PLAN_CHANGED", activePlan: normalized });
+      // Do not broadcast the active plan value to all connected clients (privacy).
+      // Send per-user notifications without including the plan name. Admin UIs should fetch
+      // the global plan via the protected API (superadmin only).
+      io.emit("bus-update", { actionType: "PLAN_CHANGED" });
       planNotifications.forEach((notification) => {
         io.to(`user_${String(notification.user_id)}`).emit("notification", {
           type: notification.type,
           message: notification.message,
-          planName: notification.plan_name,
           isBusActive: notification.is_bus_active,
         });
       });
@@ -447,6 +530,14 @@ async function alterBus(req, res) {
       return res.status(400).json({ success: false, error: 'The new bus is not active.' });
     }
 
+    if (sourceBus.altered_to_bus_id) {
+      return res.status(409).json({
+        success: false,
+        error: 'This bus has already been altered.',
+        alteredToPreview: sourceBus.altered_to_preview,
+      });
+    }
+
     const sourceIdentifiers = [sourceBus.bus_no];
     if (sourceBus.preview_number != null) {
       sourceIdentifiers.push(String(sourceBus.preview_number));
@@ -461,30 +552,46 @@ async function alterBus(req, res) {
       is_active: true,
     }).select('_id bus_no');
 
-    const message = `Your bus is altered with ${targetBus.bus_no}.`;
+    // Use preview numbers for user-facing messages. Keep internal bus_no stored for audit.
+    const previewMessage = `Your bus has been altered to ${targetBus.preview_number ?? 'a different bus'}.`;
+
     const notifications = users.map((user) => ({
       user_id: user._id,
       type: 'bus_altered',
-      message,
+      message: previewMessage,
       old_bus_no: sourceBus.bus_no,
       new_bus_no: targetBus.bus_no,
+      old_preview: sourceBus.preview_number ?? null,
+      new_preview: targetBus.preview_number ?? null,
     }));
+
     if (notifications.length) await Notification.insertMany(notifications);
+
     if (users.length) {
+      // Update the user's assigned bus_no internally (admin-facing). The frontend for students
+      // should continue to identify buses by preview numbers; the stored bus_no remains an internal value.
       await User.updateMany(
         { _id: { $in: users.map((user) => user._id) } },
         { $set: { bus_no: targetBus.bus_no } },
       );
     }
 
+    sourceBus.status = "inactive";
+    sourceBus.altered_to_bus_id = targetBus._id;
+    sourceBus.altered_to_preview = targetBus.preview_number ?? null;
+    sourceBus.altered_at = new Date();
+    await sourceBus.save();
+
     const io = getIO();
     if (io) {
       users.forEach((user) => {
+        // Emit a privacy-preserving notification: include preview numbers only so the student
+        // can be informed without revealing internal bus numbers.
         io.to(`user_${user._id.toString()}`).emit('notification', {
           type: 'bus_altered',
-          message,
-          oldBusNo: sourceBus.bus_no,
-          newBusNo: targetBus.bus_no,
+          message: previewMessage,
+          oldPreview: sourceBus.preview_number ?? null,
+          newPreview: targetBus.preview_number ?? null,
         });
       });
     }
@@ -532,17 +639,18 @@ async function getBusRoutes(req, res) {
       plan_name: activePlan,
     });
 
+    const isSuperadmin = req.user && String(req.user.role || '').toLowerCase() === 'superadmin';
     res.json({
       success: true,
-      busNo: bus.bus_no,
+      busNo: isSuperadmin ? bus.bus_no : String(bus.preview_number ?? bus.bus_no),
       previewNumber: bus.preview_number,
-      activePlan,
+      activePlan: isSuperadmin ? activePlan : null,
       isBusActiveInCurrentPlan: !!isBusActiveInCurrentPlan,
-      notActiveMessage: isBusActiveInCurrentPlan
-        ? null
-        : buildNotActiveMessage(activePlan),
-      planNames: Object.keys(plansMap),
-      plans: plansMap,
+      notActiveMessage: isSuperadmin
+        ? (isBusActiveInCurrentPlan ? null : buildNotActiveMessage(activePlan))
+        : null,
+      planNames: isSuperadmin ? Object.keys(plansMap) : [],
+      plans: isSuperadmin ? plansMap : {},
     });
   } catch (error) {
     console.error("getBusRoutes error:", error);
@@ -664,6 +772,14 @@ async function getLiveLocation(req, res) {
       });
     }
 
+    const alteration = bus.altered_to_bus_id
+      ? {
+          isAltered: true,
+          message: `This bus has been altered. Please search bus ${bus.altered_to_preview ?? "the new preview number"}.`,
+          newPreview: bus.altered_to_preview ?? null,
+        }
+      : null;
+
     const location = await BusLiveLocation.findOne({ bus_id: bus._id });
     const activePlan = await getCurrentGlobalPlan();
     const isBusActiveInCurrentPlan = await BusRoute.exists({
@@ -671,25 +787,27 @@ async function getLiveLocation(req, res) {
       plan_name: activePlan,
     });
 
-    // ⚠️ Frontend validation: busApi.getBusLocation() rejects responses whose
-    // busNo doesn't match the requested value. When the user searched by a
-    // preview number, return the preview number as busNo so the validation
-    // passes, while the rest of the payload carries the real bus's data.
-    const responseBusNo = matchedByIdentifier
-      ? String(bus.preview_number ?? bus.bus_no)
-      : bus.bus_no;
+    // Privacy: only superadmin may receive internal bus_no in responses.
+    const isSuperadmin = req.user && String(req.user.role || '').toLowerCase() === 'superadmin';
 
-    // Always return the bus_no that was requested for frontend validation
+    // Choose the bus identifier to return to the client: previewNumber for regular users
+    // and bus_no for superadmin.
+    const clientBusIdentifier = isSuperadmin
+      ? (matchedByIdentifier ? String(bus.preview_number ?? bus.bus_no) : bus.bus_no)
+      : String(bus.preview_number ?? bus.bus_no);
+
     const responseData = {
       success: !!location,
-      busNo: responseBusNo,
-      bus_no: responseBusNo,
+      // For privacy return only the previewNumber to regular users.
+      busNo: clientBusIdentifier,
+      // Include bus_no only for superadmin
+      ...(isSuperadmin ? { bus_no: clientBusIdentifier } : {}),
       currentPlan: null,
-      activePlan,
+      activePlan: isSuperadmin ? activePlan : null,
       isBusActiveInCurrentPlan: !!isBusActiveInCurrentPlan,
-      notActiveMessage: isBusActiveInCurrentPlan
-        ? null
-        : buildNotActiveMessage(activePlan),
+      notActiveMessage: isSuperadmin
+        ? (isBusActiveInCurrentPlan ? null : buildNotActiveMessage(activePlan))
+        : null,
       previewNumber: bus.preview_number,
       latitude: location?.latitude ?? null,
       longitude: location?.longitude ?? null,
@@ -703,6 +821,7 @@ async function getLiveLocation(req, res) {
       lastSuccessfulGpsUpdate: location?.lastSuccessfulGpsUpdate ?? null,
       lastUpdated:
         location?.lastSuccessfulGpsUpdate ?? location?.updatedAt ?? null,
+      alteration,
     };
 
     if (location) {
@@ -733,7 +852,6 @@ async function trackByPreview(req, res) {
     // Accept string or numeric preview numbers (e.g. "4" or 4).
     const bus = await Bus.findOne({
       preview_number: { $in: [previewNumber, String(previewNumber)] },
-      status: "active",
     });
 
     if (!bus) {
@@ -749,16 +867,26 @@ async function trackByPreview(req, res) {
 
     // Bus found → always return 200 with offline status if no location doc,
     // so the frontend can show the bus's plan even when GPS is offline.
+    // Privacy: return previewNumber to regular users; superadmin may receive bus_no and plan.
+    const isSuperadmin = req.user && String(req.user.role || '').toLowerCase() === 'superadmin';
+    const alteration = bus.altered_to_bus_id
+      ? {
+          isAltered: true,
+          message: `This bus has been altered. Please search bus ${bus.altered_to_preview ?? "the new preview number"}.`,
+          newPreview: bus.altered_to_preview ?? null,
+        }
+      : null;
     res.status(200).json({
       success: true,
-      busNo: bus.bus_no,
+      busNo: isSuperadmin ? bus.bus_no : String(bus.preview_number ?? bus.bus_no),
+      ...(isSuperadmin ? { bus_no: bus.bus_no } : {}),
       previewNumber: bus.preview_number,
       currentPlan: null,
-      activePlan,
+      activePlan: isSuperadmin ? activePlan : null,
       isBusActiveInCurrentPlan: !!isBusActiveInCurrentPlan,
-      notActiveMessage: isBusActiveInCurrentPlan
-        ? null
-        : buildNotActiveMessage(activePlan),
+      notActiveMessage: isSuperadmin
+        ? (isBusActiveInCurrentPlan ? null : buildNotActiveMessage(activePlan))
+        : null,
       latitude: location?.latitude ?? null,
       longitude: location?.longitude ?? null,
       speed: location?.speed ?? 0,
@@ -770,6 +898,7 @@ async function trackByPreview(req, res) {
       lastSuccessfulGpsUpdate: location?.lastSuccessfulGpsUpdate ?? null,
       lastUpdated:
         location?.lastSuccessfulGpsUpdate ?? location?.updatedAt ?? null,
+      alteration,
     });
   } catch (error) {
     console.error("trackByPreview error:", error);

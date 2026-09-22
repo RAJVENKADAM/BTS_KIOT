@@ -15,11 +15,14 @@ const router = express.Router();
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 10 * 1024 * 1024 // 10MB limit
+    fileSize: 10 * 1024 * 1024,
+    fields: 50,
+    parts: 60,
+    fieldSize: 256 * 1024,
   },
   fileFilter: (req, file, cb) => {
     if (file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
-      file.originalname.endsWith('.xlsx')) {
+      file.originalname.toLowerCase().endsWith('.xlsx')) {
       cb(null, true);
     } else {
       cb(new Error('Only Excel files are allowed'));

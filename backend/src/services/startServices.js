@@ -7,7 +7,6 @@ const singleton = {
 
 async function startDbDependentServices() {
   if (singleton.started) return;
-  singleton.started = true;
 
   const ok = await waitForDbReady({
     maxAttempts: 12,
@@ -19,6 +18,8 @@ async function startDbDependentServices() {
     console.error('❌ MongoDB not ready after retries. Tracking will NOT start.');
     return;
   }
+
+  singleton.started = true;
 
   console.log('✅ MongoDB connected. Starting GPS sync scheduler...');
 

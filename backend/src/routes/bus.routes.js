@@ -14,12 +14,30 @@ const router = express.Router();
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, 'uploads/'),
   filename: (req, file, cb) => {
-    const name = Date.now() + '-' + file.originalname;
+    const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const name = Date.now() + '-' + safeName;
     cb(null, name);
   }
 });
 
-const upload = multer({ storage });
+const upload = multer({
+  storage,
+  limits: {
+    fileSize: 10 * 1024 * 1024,
+    fields: 50,
+    parts: 60,
+    fieldSize: 256 * 1024,
+  },
+  fileFilter: (req, file, cb) => {
+    if (
+      file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+      file.originalname.toLowerCase().endsWith('.xlsx')
+    ) {
+      return cb(null, true);
+    }
+    return cb(new Error('Only Excel files are allowed'));
+  },
+});
 
 /**
  * -----------------------

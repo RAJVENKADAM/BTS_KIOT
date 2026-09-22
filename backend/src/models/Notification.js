@@ -10,7 +10,7 @@ const notificationSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ['bus_altered', 'plan_changed'],
+      enum: ['bus_altered', 'plan_changed', 'bus_status'],
       required: true,
     },
     message: {
@@ -18,11 +18,21 @@ const notificationSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    // Internal bus numbers (kept for admin/audit purposes). Prefer preview fields for user-facing notifications.
     old_bus_no: {
       type: String,
       default: null,
     },
     new_bus_no: {
+      type: String,
+      default: null,
+    },
+    // New preview fields: safe to surface to end users.
+    old_preview: {
+      type: String,
+      default: null,
+    },
+    new_preview: {
       type: String,
       default: null,
     },
@@ -43,5 +53,6 @@ const notificationSchema = new mongoose.Schema(
 );
 
 notificationSchema.index({ user_id: 1, createdAt: -1 });
+notificationSchema.index({ user_id: 1, read_at: 1, createdAt: -1 });
 
 module.exports = mongoose.model('Notification', notificationSchema);

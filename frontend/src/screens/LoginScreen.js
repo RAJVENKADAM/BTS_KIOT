@@ -77,7 +77,7 @@ export default function LoginScreen() {
           showsVerticalScrollIndicator={false}
         >
           <View style={styles.header}>
-            <Header>Welcome To BTS</Header>
+            <Header>Welcome To BTMS</Header>
             <Subtitle>Sign in to continue your progress</Subtitle>
           </View>
 

@@ -39,7 +39,6 @@ export default function OSMMap({ busData, buses = [] }) {
 
     const singlePayload = {
       type: "BUS_LOCATION",
-      busNo: busData.busNo ?? busData.bus_no ?? "single",
       previewNumber: busData.previewNumber ?? busData.preview_number,
       latitude: busData.latitude,
       longitude: busData.longitude,
@@ -53,6 +52,7 @@ export default function OSMMap({ busData, buses = [] }) {
 <html>
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data: https://*.tile.openstreetmap.org; connect-src 'none';" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
@@ -158,7 +158,6 @@ export default function OSMMap({ busData, buses = [] }) {
 
       var map = L.map('map', {
         zoomControl: false,
-        rotate: true,
         minZoom: minZoom,
         maxBounds: worldBounds,
         maxBoundsViscosity: 1.0
@@ -322,11 +321,17 @@ function upsertBusMarker(key, lat, lng, offline) {
       style={{ flex: 1, width: "100%", height: "100%" }}
       javaScriptEnabled
       domStorageEnabled
-      originWhitelist={["*"]}
+      originWhitelist={["about:blank", "https://unpkg.com", "https://*.tile.openstreetmap.org"]}
       automaticallyAdjustContentInsets={false}
       scalesPageToFit={false}
       renderLoading={() => null}
-      onShouldStartLoadWithRequest={() => true}
+      onShouldStartLoadWithRequest={(request) =>
+        request.url === "about:blank" ||
+        request.url.startsWith("https://unpkg.com/") ||
+        request.url.startsWith("https://a.tile.openstreetmap.org/") ||
+        request.url.startsWith("https://b.tile.openstreetmap.org/") ||
+        request.url.startsWith("https://c.tile.openstreetmap.org/")
+      }
     />
   );
 }

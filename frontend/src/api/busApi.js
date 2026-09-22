@@ -33,7 +33,8 @@ export const busApi = {
     const data = await parseJsonResponse(response);
 
     // Validate that the response belongs to the requested bus
-    const returnedBusNo = data.busNo ?? data.bus_no ?? data.busNumber;
+    const returnedBusNo =
+      data.previewNumber ?? data.busNo ?? data.bus_no ?? data.busNumber;
     const normalizedRequested = String(busNo || "")
       .toUpperCase()
       .trim();
