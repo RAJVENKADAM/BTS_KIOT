@@ -14,6 +14,9 @@ function registerTrackSocketHandlers() {
   if (!io) return;
 
   io.on("connection", (socket) => {
+    socket.on("join-user", (userId) => {
+      if (userId) socket.join(`user_${String(userId)}`);
+    });
     // Join a room for a specific bus to receive live updates
     socket.on("join-bus", (busNo) => {
       if (!busNo) return;

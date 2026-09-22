@@ -2,6 +2,8 @@ const Bus = require("../models/Bus");
 const BusRoute = require("../models/BusRoute");
 const BusLiveLocation = require("../models/BusLiveLocation");
 const AppSetting = require("../models/AppSetting");
+const User = require("../models/User");
+const Notification = require("../models/Notification");
 const { getIO } = require("../socket");
 
 const GLOBAL_ACTIVE_PLAN_KEY = "global_active_plan";
@@ -363,6 +365,8 @@ async function setGlobalActivePlan(req, res) {
       { upsert: true, new: true, setDefaultsOnInsert: true },
     );
 
+    const io = getIO();
+    if (io) io.emit("bus-update", { actionType: "PLAN_CHANGED", activePlan: normalized });
     res.json({
       success: true,
       message: "Global active plan updated successfully",
@@ -372,6 +376,64 @@ async function setGlobalActivePlan(req, res) {
   } catch (error) {
     console.error("setGlobalActivePlan error:", error);
     res.status(500).json({ success: false, error: error.message });
+  }
+}
+
+async function alterBus(req, res) {
+  try {
+    const sourceBus = await findBusByIdentifier(req.params.busNo);
+    const targetBus = await findBusByIdentifier(req.body?.newBusNo);
+
+    if (!sourceBus) {
+      return res.status(404).json({ success: false, error: 'Source bus not found.' });
+    }
+    if (!targetBus) {
+      return res.status(404).json({ success: false, error: 'New bus not found.' });
+    }
+    if (sourceBus._id.equals(targetBus._id)) {
+      return res.status(400).json({ success: false, error: 'Choose a different bus.' });
+    }
+    if (targetBus.status !== 'active') {
+      return res.status(400).json({ success: false, error: 'The new bus is not active.' });
+    }
+
+    const users = await User.find({
+      bus_no: { $regex: `^${sourceBus.bus_no}$`, $options: 'i' },
+      role: 'student',
+      is_active: true,
+    }).select('_id');
+
+    const message = `Your bus is altered with ${targetBus.bus_no}.`;
+    const notifications = users.map((user) => ({
+      user_id: user._id,
+      type: 'bus_altered',
+      message,
+      old_bus_no: sourceBus.bus_no,
+      new_bus_no: targetBus.bus_no,
+    }));
+    if (notifications.length) await Notification.insertMany(notifications);
+
+    const io = getIO();
+    if (io) {
+      users.forEach((user) => {
+        io.to(`user_${user._id.toString()}`).emit('notification', {
+          type: 'bus_altered',
+          message,
+          oldBusNo: sourceBus.bus_no,
+          newBusNo: targetBus.bus_no,
+        });
+      });
+    }
+
+    res.json({
+      success: true,
+      sourceBusNo: sourceBus.bus_no,
+      newBusNo: targetBus.bus_no,
+      notifiedStudents: users.length,
+    });
+  } catch (error) {
+    console.error('alterBus error:', error);
+    res.status(500).json({ success: false, error: 'Failed to alter the bus.' });
   }
 }
 
@@ -669,4 +731,5 @@ module.exports = {
   getPlans,
   getLiveLocation,
   trackByPreview,
+  alterBus,
 };

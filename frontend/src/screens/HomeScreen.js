@@ -67,6 +67,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import BottomSheet, { BottomSheetView } from "@gorhom/bottom-sheet";
 import { isNetworkError, getErrorMessage } from "../utils/errorHandler";
 import { getDisplayBusNumber } from "../utils/busDisplay";
+import notificationApi from "../api/notificationApi";
 
 const KIOT_LAT = 11.554528;
 const KIOT_LNG = 78.019759;
@@ -105,6 +106,7 @@ const HomeScreen = () => {
   const [locationStatus, setLocationStatus] = useState("idle");
   const [markerStatus, setMarkerStatus] = useState("moving");
   const [isOffline, setIsOffline] = useState(false);
+  const [unreadNotifications, setUnreadNotifications] = useState(0);
 
   // Routes and panel states consolidated inside Bottom Sheet
   const [routesData, setRoutesData] = useState(null);
@@ -357,6 +359,41 @@ const HomeScreen = () => {
       socket.emit("leave-bus", selectedBusNo);
     };
   }, [socket, selectedBusNo]);
+
+  useEffect(() => {
+    if (!socket || !user?.id) return;
+    socket.emit("join-user", user.id);
+    const handleNotification = () => {
+      setUnreadNotifications((count) => count + 1);
+    };
+    socket.on("notification", handleNotification);
+    return () => socket.off("notification", handleNotification);
+  }, [socket, user?.id]);
+
+  useEffect(() => {
+    if (!socket) return;
+    const handleBusUpdate = (data) => {
+      if (data?.actionType !== "PLAN_CHANGED" || !data.activePlan) return;
+      const nextPlan = normalizePlanName(data.activePlan);
+      setGlobalPlan(nextPlan);
+      if (selectedBusNo) {
+        busApi
+          .getBusRoutes(token, selectedBusNo)
+          .then(setRoutesData)
+          .catch((error) => console.error("Failed to refresh bus plan:", error));
+      }
+    };
+    socket.on("bus-update", handleBusUpdate);
+    return () => socket.off("bus-update", handleBusUpdate);
+  }, [socket, token, selectedBusNo, normalizePlanName]);
+
+  useEffect(() => {
+    if (!token || isAdmin) return;
+    notificationApi
+      .getAll(token)
+      .then((data) => setUnreadNotifications(data.unreadCount || 0))
+      .catch((error) => console.error("Failed to load notification count:", error));
+  }, [token, isAdmin]);
 
   useEffect(() => {
     if (!selectedBusNo || !token) return;
@@ -1017,6 +1054,20 @@ const HomeScreen = () => {
     );
     return (
       <View style={styles.busCard}>
+        {displayBusData.notActiveMessage && (
+          <View style={styles.inactivePlanBanner}>
+            <Ionicons
+              name="information-circle-outline"
+              size={17}
+              color="#92400E"
+            />
+            <Text style={styles.inactivePlanText}>
+              {isAdmin
+                ? displayBusData.notActiveMessage
+                : "Bus is not in active."}
+            </Text>
+          </View>
+        )}
         <View style={styles.cardHeader}>
           <Text style={styles.busNumber}>Bus {displayBusLabel}</Text>
           <View
@@ -1079,28 +1130,34 @@ const HomeScreen = () => {
             </Text>
           </View>
         )}
-        <TouchableOpacity
-          style={styles.planChip}
-          onPress={() => {
-            if (!selectedBusNo && !selectedPreviewNumber) {
-              // Navigate to PlanDetails page for the active global plan
-              navigation.navigate("PlanDetails", { mode: "activePlan", plan: globalPlan });
-              return;
-            }
-            // If a bus is selected, navigate to the stops view for that bus
-            navigation.navigate("PlanDetails", {
-              mode: "stopsForBus",
-              previewNumber: selectedPreviewNumber,
-              busNo: selectedBusNo,
-            });
-          }}
-          activeOpacity={0.7}
-        >
-          <Ionicons name="map-outline" size={16} color={COLORS.primary} />
-          <Text style={styles.planChipLabel}>Current Plan</Text>
-          <Text style={styles.planChipValue}>{currentPlan}</Text>
-          <Ionicons name="chevron-forward" size={16} color={COLORS.primary} />
-        </TouchableOpacity>
+        {isAdmin ? (
+          <TouchableOpacity
+            style={styles.planChip}
+            onPress={() => {
+              if (!selectedBusNo && !selectedPreviewNumber) {
+                navigation.navigate("PlanDetails", { mode: "activePlan", plan: globalPlan });
+                return;
+              }
+              navigation.navigate("PlanDetails", {
+                mode: "stopsForBus",
+                previewNumber: selectedPreviewNumber,
+                busNo: selectedBusNo,
+              });
+            }}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="map-outline" size={16} color={COLORS.primary} />
+            <Text style={styles.planChipLabel}>Current Plan</Text>
+            <Text style={styles.planChipValue}>{currentPlan}</Text>
+            <Ionicons name="chevron-forward" size={16} color={COLORS.primary} />
+          </TouchableOpacity>
+        ) : (
+          <Text style={styles.studentPlanInfo}>
+            {routesData?.isBusActiveInCurrentPlan
+              ? `Bus is active in ${currentPlan}.`
+              : "Bus is not in active."}
+          </Text>
+        )}
         {!hasPlanStops && isAdmin && (
           <Text style={styles.planEmptyHint}>
             Go to Organize → Buses → Edit Routes to upload a routes Excel.
@@ -1179,15 +1236,37 @@ const HomeScreen = () => {
             <Ionicons name="refresh" size={18} color="#fff" />
           </TouchableOpacity>
 
-          <TouchableOpacity
-            style={styles.planButton}
-            onPress={() => navigation.navigate("PlanDetails", { mode: "activePlan", plan: globalPlan })}
-            activeOpacity={0.7}
-          >
-            <Text style={styles.planButtonText}>
-              {globalPlan?.replace("PLAN ", "") || "A"}
-            </Text>
-          </TouchableOpacity>
+            {isAdmin && (
+              <TouchableOpacity
+                style={styles.planButton}
+                onPress={() => navigation.navigate("PlanDetails", { mode: "activePlan", plan: globalPlan })}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.planButtonText}>
+                  {globalPlan?.replace("PLAN ", "") || "A"}
+                </Text>
+              </TouchableOpacity>
+            )}
+
+            {!isAdmin && (
+              <TouchableOpacity
+                style={styles.notificationButton}
+                onPress={() => {
+                  setUnreadNotifications(0);
+                  navigation.navigate("Notifications");
+                }}
+                activeOpacity={0.7}
+              >
+                <Ionicons name="notifications-outline" size={19} color="#fff" />
+                {unreadNotifications > 0 && (
+                  <View style={styles.notificationBadge}>
+                    <Text style={styles.notificationBadgeText}>
+                      {unreadNotifications > 9 ? "9+" : unreadNotifications}
+                    </Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            )}
 
           {isAdmin && (
             <TouchableOpacity
@@ -1484,6 +1563,43 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "800",
   },
+  notificationButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: COLORS.primary,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  notificationBadge: {
+    position: "absolute",
+    right: -3,
+    top: -4,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    paddingHorizontal: 3,
+    backgroundColor: COLORS.error,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  notificationBadgeText: { color: "#fff", fontSize: 9, fontWeight: "700" },
+  studentPlanInfo: {
+    color: COLORS.textBody,
+    fontSize: 14,
+    fontWeight: "600",
+    paddingVertical: 8,
+  },
+  inactivePlanBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: "#FEF3C7",
+    borderRadius: 8,
+    padding: 9,
+    marginBottom: 10,
+  },
+  inactivePlanText: { flex: 1, color: "#92400E", fontWeight: "600" },
   refreshSpin: {
     // Simple static style for the refresh icon while a refresh is in progress.
     // (A real rotation animation would use RN Animated; kept minimal here.)

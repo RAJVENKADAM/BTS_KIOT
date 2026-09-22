@@ -78,6 +78,13 @@ router.put(
   BusController.updateBusDetails
 );
 
+router.post(
+  '/alter-bus/:busNo',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  BusController.alterBus
+);
+
 // Any authenticated user can fetch plans + stops for a bus (Home screen)
 router.get(
   '/routes/:busNo',

@@ -61,6 +61,8 @@ export default function AddBusesScreen() {
   // Bus options modal
   const [showOptionsModal, setShowOptionsModal] = useState(false);
   const [selectedBus, setSelectedBus] = useState(null);
+  const [showAlterModal, setShowAlterModal] = useState(false);
+  const [alteringBus, setAlteringBus] = useState(false);
 
   // Edit details modal
   const [showEditDetailsModal, setShowEditDetailsModal] = useState(false);
@@ -283,6 +285,27 @@ export default function AddBusesScreen() {
       Alert.alert("Failed", getErrorMessage(e, "Could not update the routes."));
     } finally {
       setSavingRoutes(false);
+    }
+  };
+
+  const openAlterBus = () => {
+    setShowOptionsModal(false);
+    setShowAlterModal(true);
+  };
+
+  const handleAlterBus = async (targetBus) => {
+    setAlteringBus(true);
+    try {
+      const result = await busApi.alterBus(token, selectedBus.busNo, targetBus.busNo);
+      setShowAlterModal(false);
+      Alert.alert(
+        "Bus altered",
+        `Students assigned to ${result.sourceBusNo} were notified about ${result.newBusNo}.`,
+      );
+    } catch (e) {
+      Alert.alert("Failed", getErrorMessage(e, "Could not alter the bus."));
+    } finally {
+      setAlteringBus(false);
     }
   };
 
@@ -548,6 +571,14 @@ export default function AddBusesScreen() {
             </TouchableOpacity>
 
             <TouchableOpacity
+              style={styles.optionButton}
+              onPress={openAlterBus}
+            >
+              <Ionicons name="swap-horizontal-outline" size={20} color={COLORS.primary} />
+              <Text style={styles.optionText}>Alter Bus</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
               style={[styles.optionButton, styles.deleteButton]}
               onPress={handleDeleteBus}
             >
@@ -562,6 +593,49 @@ export default function AddBusesScreen() {
               style={styles.closeTouch}
             >
               <Text style={styles.closeText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ================= ALTER BUS MODAL ================= */}
+      <Modal
+        transparent
+        animationType="fade"
+        visible={showAlterModal}
+        onRequestClose={() => setShowAlterModal(false)}
+      >
+        <View style={styles.overlay}>
+          <View style={styles.modalBox}>
+            <Text style={styles.header}>Alter Bus</Text>
+            <Text style={styles.subHeader}>
+              Select the new bus for {getDisplayBusNumber(selectedBus)}
+            </Text>
+            <FlatList
+              data={buses.filter((bus) => bus.busNo !== selectedBus?.busNo)}
+              keyExtractor={(item) => String(item.busNo)}
+              renderItem={({ item }) => (
+                <TouchableOpacity
+                  style={styles.optionButton}
+                  onPress={() => handleAlterBus(item)}
+                  disabled={alteringBus}
+                >
+                  <Ionicons name="bus-outline" size={20} color={COLORS.primary} />
+                  <Text style={styles.optionText}>
+                    Bus {getDisplayBusNumber(item)} ({item.busNo})
+                  </Text>
+                </TouchableOpacity>
+              )}
+              ListEmptyComponent={
+                <Text style={styles.emptyText}>No other active buses available.</Text>
+              }
+            />
+            {alteringBus && <ActivityIndicator color={COLORS.primary} />}
+            <TouchableOpacity
+              onPress={() => setShowAlterModal(false)}
+              style={styles.closeTouch}
+            >
+              <Text style={styles.closeText}>Cancel</Text>
             </TouchableOpacity>
           </View>
         </View>

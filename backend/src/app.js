@@ -114,6 +114,7 @@ app.use(async (req, res, next) => {
 });
 
 app.use("/api/auth", require("./routes/auth.routes"));
+app.use("/api/notifications", require("./routes/notification.routes"));
 app.use("/api/organize", require("./routes/organize.routes"));
 app.use("/api/excel-management", require("./routes/excelManagement.routes"));
 app.use("/api/bus", require("./routes/bus.routes"));
@@ -147,4 +148,3 @@ app.use((err, req, res, next) => {
 });
 
 module.exports = { app, server };
-

@@ -206,6 +206,20 @@ export const busApi = {
 
     return data;
   },
+
+  alterBus: async (token, busNo, newBusNo) => {
+    return fetchJson(
+      `${API_BASE_URL}/api/bus/alter-bus/${encodeURIComponent(busNo)}`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ newBusNo }),
+      },
+    );
+  },
 };
 
 // Export for convenience
