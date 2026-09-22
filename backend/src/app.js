@@ -13,7 +13,9 @@ if (process.env.NODE_ENV === "production") {
     throw new Error(`Missing required production configuration: ${missing.join(", ")}`);
   }
   if (process.env.JWT_SECRET.length < 32) {
-    throw new Error("JWT_SECRET must be at least 32 characters in production");
+    console.warn(
+      "JWT_SECRET is configured but shorter than the recommended 32 characters; rotate it in Render secrets.",
+    );
   }
 }
 

@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js",
+    "dev": "node server.js",
+    "dev:watch": "nodemon server.js",
     "db:setup": "node setup-db.js",
     "db:test": "node test-db.js",
     "auth:test": "node test-login.js",
