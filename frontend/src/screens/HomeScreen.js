@@ -276,7 +276,6 @@ const HomeScreen = () => {
         setRoutesData((prev) => prev);
 
         if (
-          !data?.alteration?.isAltered &&
           (data?.isBusActiveInCurrentPlan === false || data?.notActiveMessage)
         ) {
           setTrackingError("Your bus is inactive.");
@@ -445,6 +444,7 @@ const HomeScreen = () => {
       if (!data || data.error) return;
       const selected = selectedBusNoRef.current;
       if (!selected) return;
+      if (busData?.isBusActiveInCurrentPlan === false) return;
       const incomingBusNo =
         data.busNo ?? data.bus_no ?? data.busNumber ?? data.previewNumber;
       if (!incomingBusNo) return;
@@ -734,7 +734,6 @@ const HomeScreen = () => {
       );
 
       if (
-        !data?.alteration?.isAltered &&
         (data?.isBusActiveInCurrentPlan === false || data?.notActiveMessage)
       ) {
         setTrackingError("Your bus is inactive.");
@@ -748,7 +747,7 @@ const HomeScreen = () => {
         return;
       }
 
-      if (!data?.alteration?.isAltered && data?.isBusActiveInCurrentPlan === false) {
+      if (data?.isBusActiveInCurrentPlan === false) {
         setTrackingError("Your bus is inactive.");
         setBusData(hasValidCoords ? { ...data, _isOffline: true } : null);
         setLastGoodLocation(hasValidCoords ? { ...data, _isOffline: true } : null);
@@ -859,7 +858,6 @@ const HomeScreen = () => {
           return;
         }
         if (
-          !data?.alteration?.isAltered &&
           (data?.isBusActiveInCurrentPlan === false || data?.notActiveMessage)
         ) {
             setTrackingError("Your bus is inactive.");
@@ -958,7 +956,6 @@ const HomeScreen = () => {
         setIsBusFound(true);
 
         if (
-          !data?.alteration?.isAltered &&
           (data?.isBusActiveInCurrentPlan === false || data?.notActiveMessage)
         ) {
           setTrackingError("Your bus is inactive.");
@@ -1044,7 +1041,6 @@ const HomeScreen = () => {
         setTrackingError(data?.alteration?.message || null);
 
         if (
-          !data?.alteration?.isAltered &&
           (data?.isBusActiveInCurrentPlan === false || data?.notActiveMessage)
         ) {
           setTrackingError("Your bus is inactive.");
@@ -1228,7 +1224,7 @@ const HomeScreen = () => {
     const hasPlanContext = !!(routesData || globalPlan || isBusFound);
     if (!hasPlanContext) return null;
 
-    const currentPlan = globalPlan || "PLAN A";
+    const currentPlan = routesData?.activePlan || globalPlan || "PLAN A";
     const hasPlanStops =
       routesData?.hasStops === true || !!routesData?.planNames?.length;
     const isOfflineMode = isOffline || !displayBusData;
@@ -1309,11 +1305,25 @@ const HomeScreen = () => {
             <Ionicons name="chevron-forward" size={16} color={COLORS.primary} />
           </TouchableOpacity>
         ) : (
-          <Text style={styles.studentPlanInfo}>
-            {routesData?.isBusActiveInCurrentPlan
-              ? `Bus is active in ${currentPlan}.`
-              : "Bus is not in active."}
-          </Text>
+          <TouchableOpacity
+            style={styles.studentPlanInfo}
+            onPress={() =>
+              navigation.navigate("PlanDetails", {
+                mode: "stopsForBus",
+                previewNumber: selectedPreviewNumber,
+                busNo: selectedBusNo,
+                plan: currentPlan,
+              })
+            }
+            activeOpacity={0.75}
+          >
+            <Text style={styles.studentPlanInfoText}>
+              {routesData?.isBusActiveInCurrentPlan
+                ? `Bus is active in ${currentPlan}.`
+                : `Bus is inactive in ${currentPlan}.`}
+            </Text>
+            <Text style={styles.studentPlanAction}>View stops in {currentPlan}</Text>
+          </TouchableOpacity>
         )}
         {!hasPlanStops && isAdmin && (
           <Text style={styles.planEmptyHint}>
@@ -1332,6 +1342,7 @@ const HomeScreen = () => {
     selectedBusNo,
     selectedPreviewNumber,
     trackingError,
+    navigation,
   ]);
 
   return (
@@ -1745,10 +1756,18 @@ const styles = StyleSheet.create({
   },
   notificationBadgeText: { color: "#fff", fontSize: 9, fontWeight: "700" },
   studentPlanInfo: {
+    paddingVertical: 8,
+  },
+  studentPlanInfoText: {
     color: COLORS.textBody,
     fontSize: 14,
     fontWeight: "600",
-    paddingVertical: 8,
+  },
+  studentPlanAction: {
+    color: COLORS.primary,
+    fontSize: 13,
+    fontWeight: "700",
+    marginTop: 5,
   },
   inactivePlanBanner: {
     flexDirection: "row",

@@ -715,13 +715,11 @@ async function getBusRoutes(req, res) {
       success: true,
       busNo: isSuperadmin ? bus.bus_no : String(bus.preview_number ?? bus.bus_no),
       previewNumber: bus.preview_number,
-      activePlan: isSuperadmin ? activePlan : null,
+      activePlan,
       isBusActiveInCurrentPlan: !!isBusActiveInCurrentPlan,
-      notActiveMessage: isSuperadmin
-        ? (isBusActiveInCurrentPlan ? null : buildNotActiveMessage(activePlan))
-        : null,
-      planNames: isSuperadmin ? Object.keys(plansMap) : [],
-      plans: isSuperadmin ? plansMap : {},
+      notActiveMessage: isBusActiveInCurrentPlan ? null : buildNotActiveMessage(activePlan),
+      planNames: Object.keys(plansMap),
+      plans: plansMap,
       stops: plansMap[activePlanKey] || [],
       hasStops: (plansMap[activePlanKey] || []).length > 0,
     });
@@ -850,14 +848,14 @@ async function getLiveLocation(req, res) {
     const location = await BusLiveLocation.findOne({ bus_id: effectiveBus._id });
     const activePlan = await getCurrentGlobalPlan();
     const activeStops = await BusRoute.find({
-      bus_id: effectiveBus._id,
+      bus_id: bus._id,
       plan_name: new RegExp(`^${escapeRegExp(activePlan)}$`, "i"),
     })
       .sort({ stop_order: 1 })
       .select("stop_name stop_order")
       .lean();
     const isBusActiveInCurrentPlan = await BusRoute.exists({
-      bus_id: effectiveBus._id,
+      bus_id: bus._id,
       plan_name: new RegExp(`^${escapeRegExp(activePlan)}$`, "i"),
     });
 
@@ -876,12 +874,10 @@ async function getLiveLocation(req, res) {
       busNo: clientBusIdentifier,
       // Include bus_no only for superadmin
       ...(isSuperadmin ? { bus_no: clientBusIdentifier } : {}),
-      currentPlan: null,
-      activePlan: isSuperadmin ? activePlan : null,
+      currentPlan: activePlan,
+      activePlan,
       isBusActiveInCurrentPlan: !!isBusActiveInCurrentPlan,
-      notActiveMessage: isSuperadmin
-        ? (isBusActiveInCurrentPlan ? null : buildNotActiveMessage(activePlan))
-        : null,
+      notActiveMessage: isBusActiveInCurrentPlan ? null : buildNotActiveMessage(activePlan),
       previewNumber: bus.preview_number,
       effectivePreviewNumber: effectiveBus.preview_number,
       effectiveBusNo: effectiveBus.bus_no,
@@ -941,8 +937,8 @@ async function trackByPreview(req, res) {
     const location = await BusLiveLocation.findOne({ bus_id: effectiveBus._id });
     const activePlan = await getCurrentGlobalPlan();
     const isBusActiveInCurrentPlan = await BusRoute.exists({
-      bus_id: effectiveBus._id,
-      plan_name: activePlan,
+      bus_id: bus._id,
+      plan_name: new RegExp(`^${escapeRegExp(activePlan)}$`, "i"),
     });
 
     // Bus found → always return 200 with offline status if no location doc,
@@ -956,12 +952,10 @@ async function trackByPreview(req, res) {
       previewNumber: bus.preview_number,
       effectivePreviewNumber: effectiveBus.preview_number,
       effectiveBusNo: effectiveBus.bus_no,
-      currentPlan: null,
-      activePlan: isSuperadmin ? activePlan : null,
+      currentPlan: activePlan,
+      activePlan,
       isBusActiveInCurrentPlan: !!isBusActiveInCurrentPlan,
-      notActiveMessage: isSuperadmin
-        ? (isBusActiveInCurrentPlan ? null : buildNotActiveMessage(activePlan))
-        : null,
+      notActiveMessage: isBusActiveInCurrentPlan ? null : buildNotActiveMessage(activePlan),
       latitude: location?.latitude ?? null,
       longitude: location?.longitude ?? null,
       speed: location?.speed ?? 0,
