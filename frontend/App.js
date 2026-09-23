@@ -13,6 +13,7 @@ import LoginScreen from './src/screens/LoginScreen';
 import OrganizeScreen from './src/screens/OrganizeScreen';
 import ProfileScreen from './src/screens/ProfileScreen';
 import NotificationsScreen from './src/screens/NotificationsScreen';
+import PlanDetailsScreen from './src/screens/PlanDetailsScreen';
 
 const Stack = createStackNavigator();
 
@@ -34,7 +35,7 @@ function AppNavigator() {
           <Stack.Screen name="Organize" component={OrganizeScreen} />
           <Stack.Screen name="Profile" component={ProfileScreen} />
           <Stack.Screen name="Notifications" component={NotificationsScreen} />
-          <Stack.Screen name="PlanDetails" component={require('./src/screens/PlanDetailsScreen').default} />
+          <Stack.Screen name="PlanDetails" component={PlanDetailsScreen} />
         </>
       ) : (
         <Stack.Screen name="Login" component={LoginScreen} />

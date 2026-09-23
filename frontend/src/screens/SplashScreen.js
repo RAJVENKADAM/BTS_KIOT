@@ -42,9 +42,7 @@ export default function SplashScreen() {
         >
           <View style={styles.logoCircle}>
             <Image
-              source={{
-                uri: 'https://cdn-icons-png.flaticon.com/512/159/159657.png',
-              }}
+              source={require('../../assets/icon.png')}
               style={styles.logo}
               resizeMode="contain"
             />

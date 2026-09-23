@@ -21,11 +21,7 @@
       "package": "com.rajvenkadam.bustracking",
       "permissions": [
         "ACCESS_FINE_LOCATION",
-        "ACCESS_COARSE_LOCATION",
-        "ACCESS_BACKGROUND_LOCATION",
-        "FOREGROUND_SERVICE",
-        "android.permission.ACCESS_COARSE_LOCATION",
-        "android.permission.ACCESS_FINE_LOCATION"
+        "ACCESS_COARSE_LOCATION"
       ]
     },
     "web": {
@@ -33,7 +29,6 @@
     },
     "plugins": [
       "expo-location",
-      "expo-font",
       "expo-sharing",
       [
         "expo-splash-screen",
@@ -49,11 +44,11 @@
         {
           "android": {
             "compileSdkVersion": 36,
-            "targetSdkVersion": 36,
-            "buildToolsVersion": "35.0.0"
+            "targetSdkVersion": 36
           }
         }
-      ]
+      ],
+      "expo-secure-store"
     ],
     "extra": {
       "eas": {
