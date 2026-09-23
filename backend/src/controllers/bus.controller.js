@@ -869,7 +869,9 @@ async function getLiveLocation(req, res) {
       : String(bus.preview_number ?? bus.bus_no);
 
     const responseData = {
-      success: !!location,
+      // A database bus is a successful lookup even when GPS has no record yet.
+      // The client must be able to show its inactive plan and available-bus options.
+      success: true,
       // For privacy return only the previewNumber to regular users.
       busNo: clientBusIdentifier,
       // Include bus_no only for superadmin

@@ -622,6 +622,10 @@ const HomeScreen = () => {
         )
         .sort((a, b) => a.distance - b.distance);
       setNearbyBuses(result);
+      setPlanBuses(result);
+      setPlanViewMode("activePlan");
+      setShowPlanInSheet(true);
+      bottomSheetRef.current?.snapToIndex?.(1);
     } catch (error) {
       setTrackingError(error.message);
       setNearbyBuses([]);
@@ -1483,6 +1487,18 @@ const HomeScreen = () => {
                   <Text style={styles.sheetSubLabel}>
                     List of buses in active plan
                   </Text>
+                  <TouchableOpacity
+                    style={styles.sheetNearbyButton}
+                    onPress={findNearbyBuses}
+                    disabled={loadingNearbyBuses}
+                  >
+                    <Ionicons name="navigate-outline" size={16} color="#fff" />
+                    <Text style={styles.sheetNearbyButtonText}>
+                      {loadingNearbyBuses
+                        ? "Finding nearby buses..."
+                        : "Show nearest active buses"}
+                    </Text>
+                  </TouchableOpacity>
                 </View>
                 <TouchableOpacity onPress={closeAllOverlayPanels}>
                   <Ionicons name="close" size={24} color={COLORS.textBody} />
@@ -1509,15 +1525,19 @@ const HomeScreen = () => {
                   showsVerticalScrollIndicator={true}
                 >
                   {planBuses.map((bus, idx) => (
-                    <TouchableOpacity
+                    <View
                       key={`${bus.previewNumber ?? bus.busNo ?? bus.bus_no ?? "bus"}-${idx}`}
                       style={styles.planBusRow}
-                      onPress={() => handleOpenPlanBus(bus.previewNumber)}
                     >
-                      <Text style={styles.planBusNumber}>
-                        Bus {getDisplayBusNumber(bus)}
-                      </Text>
-                    </TouchableOpacity>
+                      <Text style={styles.planBusNumber}>Bus {getDisplayBusNumber(bus)}</Text>
+                      <TouchableOpacity
+                        style={styles.planStopsButton}
+                        onPress={() => handleOpenPlanBus(bus.previewNumber || bus.busNo)}
+                      >
+                        <Ionicons name="map-outline" size={15} color={COLORS.primary} />
+                        <Text style={styles.planStopsButtonText}>View stops</Text>
+                      </TouchableOpacity>
+                    </View>
                   ))}
                 </ScrollView>
               )}
@@ -2124,6 +2144,34 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "700",
     color: COLORS.textHeader,
+  },
+  sheetNearbyButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    gap: 6,
+    marginTop: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 8,
+    backgroundColor: COLORS.primary,
+  },
+  sheetNearbyButtonText: { color: "#fff", fontSize: 12, fontWeight: "700" },
+  planStopsButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    alignSelf: "flex-start",
+    marginTop: 8,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+    borderRadius: 7,
+    backgroundColor: "#E8F0FE",
+  },
+  planStopsButtonText: {
+    color: COLORS.primary,
+    fontSize: 12,
+    fontWeight: "700",
   },
   planBusMeta: {
     fontSize: 12,

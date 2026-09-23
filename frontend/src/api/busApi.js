@@ -32,25 +32,6 @@ export const busApi = {
     });
     const data = await parseJsonResponse(response);
 
-    // Validate that the response belongs to the requested bus
-    const returnedBusNo =
-      data.previewNumber ?? data.busNo ?? data.bus_no ?? data.busNumber;
-    const normalizedRequested = String(busNo || "")
-      .toUpperCase()
-      .trim();
-    const normalizedReturned = returnedBusNo
-      ? String(returnedBusNo).toUpperCase().trim()
-      : null;
-
-    if (normalizedReturned && normalizedReturned !== normalizedRequested) {
-      console.warn(
-        `busApi.getBusLocation: Mismatch! Requested ${normalizedRequested}, got ${normalizedReturned}. Treating as not found.`,
-      );
-      const err = new Error("Bus not found");
-      err.code = "BUS_MISMATCH";
-      throw err;
-    }
-
     // Network error handling
     if (isNetworkError(data)) throw data;
 
