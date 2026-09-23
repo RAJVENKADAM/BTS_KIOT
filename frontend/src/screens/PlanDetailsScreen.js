@@ -12,6 +12,20 @@ import { useAuth } from "../context/AuthContext";
 import busApi from "../api/busApi";
 import { COLORS } from "../theme";
 import { getDisplayBusNumber } from "../utils/busDisplay";
+import * as Location from "expo-location";
+
+const distanceBetween = (lat1, lng1, lat2, lng2) => {
+  if (![lat1, lng1, lat2, lng2].every(Number.isFinite)) return null;
+  const radius = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLng / 2) ** 2;
+  return radius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+};
 
 export default function PlanDetailsScreen({ route, navigation }) {
   const {
@@ -19,19 +33,23 @@ export default function PlanDetailsScreen({ route, navigation }) {
     plan: initialPlan,
     previewNumber,
     busNo,
+    showNearby = false,
   } = route.params || {};
   const { token } = useAuth();
   const [loading, setLoading] = useState(true);
   const [items, setItems] = useState([]);
   const [error, setError] = useState(null);
   const [planName, setPlanName] = useState(initialPlan || "PLAN A");
+  const [nearbyMode, setNearbyMode] = useState(showNearby);
+  const [nearbyMessage, setNearbyMessage] = useState("");
 
   const loadActivePlanBuses = useCallback(
     async (plan) => {
       try {
         setLoading(true);
         setError(null);
-        const p = plan || planName || "PLAN A";
+        const global = await busApi.getGlobalActivePlan(token);
+        const p = global?.activePlan || plan || "PLAN A";
         const data = await busApi.getBusesForPlan(token, p);
         let buses = data?.buses || data?.data || [];
 
@@ -51,8 +69,60 @@ export default function PlanDetailsScreen({ route, navigation }) {
         setLoading(false);
       }
     },
-    [token, planName],
+    [token],
   );
+
+  const loadNearbyBuses = useCallback(async () => {
+    setNearbyMode(true);
+    setLoading(true);
+    setError(null);
+    setNearbyMessage("");
+    try {
+      const global = await busApi.getGlobalActivePlan(token);
+      const p = global?.activePlan || "PLAN A";
+      const data = await busApi.getBusesForPlan(token, p);
+      let buses = data?.buses || [];
+      try {
+        const permission = await Location.requestForegroundPermissionsAsync();
+        if (permission.status !== "granted") {
+          throw new Error("permission");
+        }
+        const position = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Balanced,
+        });
+        buses = buses
+          .map((bus) => ({
+            ...bus,
+            distance: distanceBetween(
+              position.coords.latitude,
+              position.coords.longitude,
+              Number(bus.latitude),
+              Number(bus.longitude),
+            ),
+          }))
+          .sort((a, b) => {
+            if (a.distance == null) return 1;
+            if (b.distance == null) return -1;
+            return a.distance - b.distance;
+          });
+        setNearbyMessage(
+          buses.some((bus) => bus.distance != null)
+            ? "Nearest active buses are listed first."
+            : "Bus GPS locations are unavailable, so all active-plan buses are shown.",
+        );
+      } catch {
+        setNearbyMessage(
+          "Your location or bus GPS could not be fetched, so all active-plan buses are shown.",
+        );
+      }
+      setItems(buses);
+      setPlanName(p);
+    } catch {
+      setError("Failed to load active-plan buses.");
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
 
   const loadStopsForBus = useCallback(
     async (busIdentifier) => {
@@ -88,7 +158,8 @@ export default function PlanDetailsScreen({ route, navigation }) {
   useEffect(() => {
     navigation.setOptions({ headerShown: false });
     if (mode === "activePlan") {
-      loadActivePlanBuses(initialPlan);
+      if (showNearby) loadNearbyBuses();
+      else loadActivePlanBuses(initialPlan);
     } else if (mode === "stopsForBus") {
       loadStopsForBus(busNo || previewNumber);
     }
@@ -99,6 +170,8 @@ export default function PlanDetailsScreen({ route, navigation }) {
     busNo,
     loadActivePlanBuses,
     loadStopsForBus,
+    showNearby,
+    loadNearbyBuses,
   ]);
 
   return (
@@ -121,6 +194,18 @@ export default function PlanDetailsScreen({ route, navigation }) {
               ? "List of buses in this plan"
               : `Stops for ${getDisplayBusNumber({ previewNumber, busNo })}`}
           </Text>
+          {mode === "activePlan" && (
+            <TouchableOpacity
+              style={styles.nearbyButton}
+              onPress={loadNearbyBuses}
+              disabled={loading}
+            >
+              <Ionicons name="navigate-outline" size={15} color="#fff" />
+              <Text style={styles.nearbyButtonText}>
+                {nearbyMode ? "Refresh nearest buses" : "Nearby active buses"}
+              </Text>
+            </TouchableOpacity>
+          )}
         </View>
       </View>
 
@@ -142,26 +227,40 @@ export default function PlanDetailsScreen({ route, navigation }) {
           <ScrollView>
             {mode === "activePlan" ? (
               <View style={styles.gridContainer}>
+                {!!nearbyMessage && (
+                  <Text style={styles.nearbyMessage}>{nearbyMessage}</Text>
+                )}
                 {items.map((it, idx) => (
-                  <TouchableOpacity
+                  <View
                     key={idx}
                     style={styles.gridItem}
-                    onPress={() => {
-                      const targetBusNo =
-                        it.busNo ||
-                        it.bus_no ||
-                        it.previewNumber ||
-                        it.preview_number;
-                      navigation.push("PlanDetails", {
-                        mode: "stopsForBus",
-                        busNo: targetBusNo,
-                      });
-                    }}
                   >
                     <Text style={styles.gridItemText}>
                       {getDisplayBusNumber(it)}
                     </Text>
-                  </TouchableOpacity>
+                    {it.distance != null && (
+                      <Text style={styles.distanceText}>
+                        {it.distance.toFixed(1)} km
+                      </Text>
+                    )}
+                    <TouchableOpacity
+                      style={styles.stopsButton}
+                      onPress={() => {
+                        const targetBusNo =
+                          it.busNo ||
+                          it.bus_no ||
+                          it.previewNumber ||
+                          it.preview_number;
+                        navigation.push("PlanDetails", {
+                          mode: "stopsForBus",
+                          busNo: targetBusNo,
+                          plan: planName,
+                        });
+                      }}
+                    >
+                      <Text style={styles.stopsButtonText}>View stops</Text>
+                    </TouchableOpacity>
+                  </View>
                 ))}
               </View>
             ) : (
@@ -199,6 +298,34 @@ const styles = StyleSheet.create({
   backBtn: { marginRight: 8, padding: 6 },
   title: { fontSize: 18, fontWeight: "700", color: COLORS.textHeader },
   subtitle: { fontSize: 12, color: COLORS.textBody, marginTop: 2 },
+  nearbyButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    alignSelf: "flex-start",
+    marginTop: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: 8,
+    backgroundColor: COLORS.primary,
+  },
+  nearbyButtonText: { color: "#fff", fontSize: 12, fontWeight: "700" },
+  nearbyMessage: {
+    width: "100%",
+    color: COLORS.textBody,
+    fontSize: 12,
+    marginBottom: 8,
+    textAlign: "center",
+  },
+  distanceText: { color: COLORS.textBody, fontSize: 11, marginTop: 4 },
+  stopsButton: {
+    marginTop: 7,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 6,
+    backgroundColor: "#E8F0FE",
+  },
+  stopsButtonText: { color: COLORS.primary, fontSize: 11, fontWeight: "700" },
   content: { flex: 1, padding: 16 },
   centered: { alignItems: "center", justifyContent: "center", paddingTop: 24 },
   loadingText: { marginTop: 8, color: COLORS.textBody },

@@ -457,14 +457,11 @@ async function getGlobalActivePlan(req, res) {
   try {
     const activePlan = await getCurrentGlobalPlan();
 
-    // Only superadmin may see the actual plan name. Regular users receive a
-    // response that indicates the plan is intentionally hidden for privacy.
     const isSuperadmin = req.user && String(req.user.role || '').toLowerCase() === 'superadmin';
-
     res.json({
       success: true,
-      activePlan: isSuperadmin ? activePlan : null,
-      planNames: isSuperadmin ? DEFAULT_PLAN_NAMES : [],
+      activePlan,
+      planNames: DEFAULT_PLAN_NAMES,
     });
   } catch (error) {
     console.error("getGlobalActivePlan error:", error);

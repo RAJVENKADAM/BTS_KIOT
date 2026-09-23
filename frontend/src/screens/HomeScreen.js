@@ -1250,43 +1250,6 @@ const HomeScreen = () => {
             </Text>
           </View>
         )}
-        {isOfflineMode && !isAdmin && (
-          <View style={styles.busDiscoveryActions}>
-            <TouchableOpacity
-              style={styles.discoveryButton}
-              onPress={openActivePlanInSheet}
-            >
-              <Ionicons name="bus-outline" size={16} color={COLORS.primary} />
-              <Text style={styles.discoveryButtonText}>
-                Available buses in current plan
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.discoveryButton}
-              onPress={findNearbyBuses}
-              disabled={loadingNearbyBuses}
-            >
-              <Ionicons name="navigate-outline" size={16} color={COLORS.primary} />
-              <Text style={styles.discoveryButtonText}>
-                {loadingNearbyBuses ? "Finding nearby buses..." : "Nearby buses"}
-              </Text>
-            </TouchableOpacity>
-            {nearbyBuses.map((bus) => (
-              <TouchableOpacity
-                key={String(bus.previewNumber || bus.busNo)}
-                style={styles.nearbyBusRow}
-                onPress={() => handleSearch(String(bus.previewNumber || bus.busNo))}
-              >
-                <Text style={styles.nearbyBusName}>
-                  Bus {bus.previewNumber || bus.busNo}
-                </Text>
-                <Text style={styles.nearbyBusDistance}>
-                  {bus.distance.toFixed(1)} km · {bus.isOnline ? "Online" : "Offline"}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        )}
         {isAdmin ? (
           <TouchableOpacity
             style={styles.planChip}
@@ -1348,6 +1311,53 @@ const HomeScreen = () => {
     trackingError,
     navigation,
   ]);
+
+  const inactiveBusActions = (
+    <View style={styles.inactiveBusActions}>
+      <Text style={styles.inactiveBusActionsTitle}>
+        Find another bus
+      </Text>
+      <TouchableOpacity
+        style={styles.availableBusesButton}
+        onPress={async () => {
+          const latestPlan = await loadGlobalActivePlan();
+          navigation.navigate("PlanDetails", {
+            mode: "activePlan",
+            plan: latestPlan,
+          });
+        }}
+        activeOpacity={0.8}
+      >
+        <Ionicons name="bus-outline" size={18} color="#fff" />
+        <Text style={styles.availableBusesButtonText}>
+          Available buses in current plan
+        </Text>
+      </TouchableOpacity>
+      <TouchableOpacity
+        style={styles.nearbyBusesButton}
+        onPress={async () => {
+          const latestPlan = await loadGlobalActivePlan();
+          navigation.navigate("PlanDetails", {
+            mode: "activePlan",
+            plan: latestPlan,
+            showNearby: true,
+          });
+        }}
+        disabled={loadingNearbyBuses}
+        activeOpacity={0.8}
+      >
+        <Ionicons name="navigate-outline" size={18} color={COLORS.primary} />
+        <Text style={styles.nearbyBusesButtonText}>
+          {loadingNearbyBuses ? "Finding nearby active buses..." : "Find nearby active buses"}
+        </Text>
+      </TouchableOpacity>
+      {nearbyBuses.length > 0 && (
+        <Text style={styles.nearbyResultsHint}>
+          Nearby active buses are shown in nearest-first order.
+        </Text>
+      )}
+    </View>
+  );
 
   return (
     <View style={styles.container}>
@@ -1487,18 +1497,6 @@ const HomeScreen = () => {
                   <Text style={styles.sheetSubLabel}>
                     List of buses in active plan
                   </Text>
-                  <TouchableOpacity
-                    style={styles.sheetNearbyButton}
-                    onPress={findNearbyBuses}
-                    disabled={loadingNearbyBuses}
-                  >
-                    <Ionicons name="navigate-outline" size={16} color="#fff" />
-                    <Text style={styles.sheetNearbyButtonText}>
-                      {loadingNearbyBuses
-                        ? "Finding nearby buses..."
-                        : "Show nearest active buses"}
-                    </Text>
-                  </TouchableOpacity>
                 </View>
                 <TouchableOpacity onPress={closeAllOverlayPanels}>
                   <Ionicons name="close" size={24} color={COLORS.textBody} />
@@ -1601,6 +1599,8 @@ const HomeScreen = () => {
                   <Text style={styles.sheetSubLabel}>
                     {isAdmin
                       ? "search for bus to view time location"
+                      : selectedBusNo || selectedPreviewNumber
+                      ? `tracking bus ${displayBusLabel}`
                       : assignedBusDisplay === "—"
                         ? "no bus assigned"
                         : `tracking your bus ${assignedBusDisplay}`}
@@ -1615,8 +1615,9 @@ const HomeScreen = () => {
                       {trackingError}
                     </Text>
                     <Text style={[styles.infoText, styles.subInfoText]}>
-                      Showing KIOT campus location.
+                      Bus is inactive in the current plan.
                     </Text>
+                    {!isAdmin && inactiveBusActions}
                   </View>
                 ) : error ? (
                   <Text style={[styles.infoText, styles.errorText]}>
@@ -1799,6 +1800,59 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   inactivePlanText: { flex: 1, color: "#92400E", fontWeight: "600" },
+  inactiveBusActions: {
+    marginTop: 18,
+    padding: 14,
+    borderRadius: 12,
+    backgroundColor: "#F8FAFC",
+    borderWidth: 1,
+    borderColor: "#E2E8F0",
+  },
+  inactiveBusActionsTitle: {
+    color: COLORS.textHeader,
+    fontSize: 15,
+    fontWeight: "800",
+    marginBottom: 10,
+  },
+  availableBusesButton: {
+    minHeight: 44,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    borderRadius: 9,
+    paddingHorizontal: 12,
+    backgroundColor: COLORS.primary,
+  },
+  availableBusesButtonText: {
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "800",
+  },
+  nearbyBusesButton: {
+    minHeight: 44,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    borderRadius: 9,
+    marginTop: 8,
+    paddingHorizontal: 12,
+    backgroundColor: "#E8F0FE",
+    borderWidth: 1,
+    borderColor: COLORS.primary,
+  },
+  nearbyBusesButtonText: {
+    color: COLORS.primary,
+    fontSize: 13,
+    fontWeight: "800",
+  },
+  nearbyResultsHint: {
+    color: COLORS.textBody,
+    fontSize: 12,
+    marginTop: 9,
+    textAlign: "center",
+  },
   busDiscoveryActions: {
     marginTop: 10,
     gap: 6,
