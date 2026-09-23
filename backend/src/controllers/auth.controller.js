@@ -257,6 +257,3 @@ module.exports = {
   verifyToken,
   verifyTokenPublic
 };
-    const assignedBus = user.bus_no
-      ? await Bus.findOne({ bus_no: user.bus_no }).select('preview_number').lean()
-      : null;

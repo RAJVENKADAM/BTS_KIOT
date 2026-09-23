@@ -84,15 +84,6 @@ async function deleteNotification(req, res) {
       return res.status(400).json({ success: false, error: 'Invalid notification id.' });
     }
 
-    async function deleteAllNotifications(req, res) {
-      try {
-        await Notification.deleteMany({ user_id: req.user.id });
-        res.json({ success: true });
-      } catch (error) {
-        console.error('deleteAllNotifications error:', error);
-        res.status(500).json({ success: false, error: 'Failed to delete messages.' });
-      }
-    }
     const result = await Notification.deleteOne({
       _id: req.params.id,
       user_id: req.user.id,
@@ -104,6 +95,16 @@ async function deleteNotification(req, res) {
   } catch (error) {
     console.error('deleteNotification error:', error);
     res.status(500).json({ success: false, error: 'Failed to delete notification.' });
+  }
+}
+
+async function deleteAllNotifications(req, res) {
+  try {
+    await Notification.deleteMany({ user_id: req.user.id });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('deleteAllNotifications error:', error);
+    res.status(500).json({ success: false, error: 'Failed to delete messages.' });
   }
 }
 
