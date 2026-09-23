@@ -325,6 +325,7 @@ const HomeScreen = () => {
           setLastGoodLocation(nextBusData);
           setLocationStatus("live");
           setIsOffline(false);
+          setTrackingError(null);
           setMarkerStatus("moving");
           setNoBusFound(false);
           const statusFromAPI = data.busState;
@@ -479,12 +480,16 @@ const HomeScreen = () => {
         speed: data.speed ?? 0,
         source: data.source || "gps",
         _isOffline: !live,
+        notActiveMessage: live ? null : (data.notActiveMessage ?? null),
+        alteration: data.alteration ?? null,
       };
 
       setBusData(nextBusData);
       setLastGoodLocation(nextBusData);
       setLocationStatus(live ? "live" : "offline");
       setIsOffline(!live);
+      setMarkerStatus(live ? "moving" : "offline");
+      setTrackingError(live ? null : (data.notActiveMessage ?? null));
       setNoBusFound(false);
       setIsBusFound(true);
     };
@@ -753,6 +758,8 @@ const HomeScreen = () => {
         setLastGoodLocation(nextBusData);
         setLocationStatus("live");
         setIsOffline(false);
+        setMarkerStatus("moving");
+        setTrackingError(null);
         setNoBusFound(false);
         setIsBusFound(true);
         const statusFromAPI = data.busState;
@@ -892,6 +899,7 @@ const HomeScreen = () => {
     setLocationStatus("loading");
     setIsBusSearchAttempted(true);
     setIsOffline(false);
+    setMarkerStatus("moving");
     setBusData(null);
     setLastGoodLocation(null);
     setIsBusFound(false);
@@ -947,6 +955,7 @@ const HomeScreen = () => {
           });
           setLocationStatus("offline");
           setIsOffline(true);
+          setMarkerStatus("offline");
         } else {
           const nextBusData = {
             ...data,

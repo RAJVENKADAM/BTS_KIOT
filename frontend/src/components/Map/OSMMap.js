@@ -93,6 +93,16 @@ export default function OSMMap({ busData, buses = [], markerStatus = "moving" })
       box-shadow: 0 1px 5px rgba(15, 23, 42, .45);
       box-sizing: border-box;
     }
+    .bus-waiting,
+    .bus-offline {
+      position: relative;
+      width: 16px;
+      height: 16px;
+      border-radius: 999px;
+      border: 3px solid #fff;
+      box-shadow: 0 1px 5px rgba(15, 23, 42, .45);
+      box-sizing: border-box;
+    }
     .bus-waiting { background: #facc15; }
     .bus-offline { background: #dc2626; }
   </style>

@@ -532,29 +532,10 @@ async function alterBus(req, res) {
       return res.status(404).json({ success: false, error: 'New bus not found.' });
     }
 
-    async function restoreAlteredBus(req, res) {
-      try {
-        const bus = await findBusByIdentifier(req.params.busNo);
-        if (!bus) return res.status(404).json({ success: false, error: "Bus not found." });
-        if (!bus.altered_to_bus_id) {
-          return res.status(400).json({ success: false, error: "This bus is not altered." });
-        }
-        bus.status = "active";
-        bus.altered_to_bus_id = null;
-        bus.altered_to_preview = null;
-        bus.altered_at = null;
-        await bus.save();
-        const io = getIO();
-        if (io) io.emit("bus-update", { actionType: "BUS_RESTORED", previewNumber: bus.preview_number });
-        res.json({ success: true, message: `Bus ${bus.preview_number ?? ""} restored.`, previewNumber: bus.preview_number });
-      } catch (error) {
-        console.error("restoreAlteredBus error:", error);
-        res.status(500).json({ success: false, error: "Failed to restore altered bus." });
-      }
-    }
     if (sourceBus._id.equals(targetBus._id)) {
       return res.status(400).json({ success: false, error: 'Choose a different bus.' });
     }
+
     if (targetBus.status !== 'active') {
       return res.status(400).json({ success: false, error: 'The new bus is not active.' });
     }
@@ -634,6 +615,42 @@ async function alterBus(req, res) {
   } catch (error) {
     console.error('alterBus error:', error);
     res.status(500).json({ success: false, error: 'Failed to alter the bus.' });
+  }
+}
+
+async function restoreAlteredBus(req, res) {
+  try {
+    const bus = await findBusByIdentifier(req.params.busNo);
+    if (!bus) {
+      return res.status(404).json({ success: false, error: "Bus not found." });
+    }
+    if (!bus.altered_to_bus_id) {
+      return res.status(400).json({ success: false, error: "This bus is not altered." });
+    }
+
+    bus.status = "active";
+    bus.altered_to_bus_id = null;
+    bus.altered_to_preview = null;
+    bus.altered_at = null;
+    await bus.save();
+
+    const io = getIO();
+    if (io) {
+      io.emit("bus-update", {
+        actionType: "BUS_RESTORED",
+        previewNumber: bus.preview_number,
+      });
+    }
+    return res.json({
+      success: true,
+      message: `Bus ${bus.preview_number ?? ""} restored.`,
+      previewNumber: bus.preview_number,
+    });
+  } catch (error) {
+    console.error("restoreAlteredBus error:", error);
+    return res
+      .status(500)
+      .json({ success: false, error: "Failed to restore altered bus." });
   }
 }
 

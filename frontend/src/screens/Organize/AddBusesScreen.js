@@ -326,6 +326,7 @@ export default function AddBusesScreen() {
     try {
       const result = await busApi.alterBus(token, selectedBus.busNo, targetBus.busNo);
       setShowAlterModal(false);
+      await loadBuses();
       Alert.alert(
         "Bus altered",
         `Students assigned to ${result.sourceBusNo} were notified about ${result.newBusNo}.`,
@@ -433,7 +434,7 @@ export default function AddBusesScreen() {
         }}
       >
         <Text style={styles.title} numberOfLines={1}>
-          {item.previewNumber ?? ""}
+          {getDisplayBusNumber(item)}
         </Text>
         {item.isAltered && (
           <Text style={styles.alteredLabel}>
@@ -663,7 +664,12 @@ export default function AddBusesScreen() {
               Select the new bus for {getDisplayBusNumber(selectedBus)}
             </Text>
             <FlatList
-              data={buses.filter((bus) => bus.busNo !== selectedBus?.busNo)}
+              data={buses.filter(
+                (bus) =>
+                  bus.busNo !== selectedBus?.busNo &&
+                  !bus.isAltered &&
+                  bus.status !== "inactive",
+              )}
               keyExtractor={(item) => String(item.busNo)}
               renderItem={({ item }) => (
                 <TouchableOpacity
