@@ -282,10 +282,11 @@ const HomeScreen = () => {
           return;
         }
 
-        if (data?.notActiveMessage) {
-          setTrackingError(data?.notActiveMessage);
+        if (data?.isBusActiveInCurrentPlan === false || data?.notActiveMessage) {
+          setTrackingError("Your bus is inactive.");
           setLocationStatus("offline");
           setIsOffline(true);
+          setMarkerStatus("inactive");
           setBusData({
             ...data,
             busNo: data.busNo || data.bus_no || assignedBusNo,
@@ -312,6 +313,7 @@ const HomeScreen = () => {
           }
           setLocationStatus("offline");
           setIsOffline(true);
+          setMarkerStatus("offline");
           setNoBusFound(false);
         } else {
           const nextBusData = {
@@ -323,6 +325,7 @@ const HomeScreen = () => {
           setLastGoodLocation(nextBusData);
           setLocationStatus("live");
           setIsOffline(false);
+          setMarkerStatus("moving");
           setNoBusFound(false);
           const statusFromAPI = data.busState;
           const statusFromCoordinates = detectBusStatus(
@@ -379,9 +382,9 @@ const HomeScreen = () => {
       setUnreadNotifications((count) => count + 1);
       // Notification may contain preview fields (newPreview) for privacy.
       if (notification?.type === "bus_altered" && user) {
-        const newAssigned = notification.newBusNo || notification.newPreview;
-        if (newAssigned) {
-          updateUserData({ ...user, bus_no: newAssigned });
+        const newPreview = notification.newPreview;
+        if (newPreview) {
+          updateUserData({ ...user, previewNumber: newPreview });
         }
       }
     };
@@ -448,11 +451,9 @@ const HomeScreen = () => {
       const incomingBusNo =
         data.busNo ?? data.bus_no ?? data.busNumber ?? data.previewNumber;
       if (!incomingBusNo) return;
-      const incomingStr = String(incomingBusNo);
-      const selectedStr = String(selected);
       if (
-        incomingStr !== selectedStr &&
-        String(data.previewNumber ?? "") !== selectedStr
+        selectedPreviewNumber &&
+        String(data.previewNumber ?? "") !== String(selectedPreviewNumber)
       ) {
         return;
       }
@@ -703,14 +704,27 @@ const HomeScreen = () => {
         return;
       }
 
-      if (data?.notActiveMessage) {
-        setTrackingError(data.notActiveMessage);
+      if (data?.isBusActiveInCurrentPlan === false || data?.notActiveMessage) {
+        setTrackingError("Your bus is inactive.");
         setBusData({ ...data, source: data?.source || "gps" });
         setLastGoodLocation({ ...data, source: data?.source || "gps" });
         setLocationStatus("offline");
         setIsOffline(true);
+        setMarkerStatus("inactive");
         setNoBusFound(false);
         setIsBusFound(true);
+        return;
+      }
+
+      if (data?.isBusActiveInCurrentPlan === false) {
+        setTrackingError("Your bus is inactive.");
+        setBusData(hasValidCoords ? { ...data, _isOffline: true } : null);
+        setLastGoodLocation(hasValidCoords ? { ...data, _isOffline: true } : null);
+        setLocationStatus("offline");
+        setIsOffline(true);
+        setMarkerStatus("inactive");
+        setNoBusFound(false);
+        setIsBusFound(foundInBackend);
         return;
       }
 
@@ -810,8 +824,8 @@ const HomeScreen = () => {
           setShowPlanInSheet(true);
           return;
         }
-        if (data?.notActiveMessage) {
-          setTrackingError(data.notActiveMessage);
+        if (data?.isBusActiveInCurrentPlan === false || data?.notActiveMessage) {
+            setTrackingError("Your bus is inactive.");
           setBusData({
             ...data,
             busNo: data?.busNo || data?.bus_no || String(busNo).toUpperCase(),
@@ -822,6 +836,7 @@ const HomeScreen = () => {
           });
           setLocationStatus("offline");
           setIsOffline(true);
+          setMarkerStatus("inactive");
           setNoBusFound(false);
           setIsBusFound(true);
           setPlanViewMode("stopsForBus");
@@ -902,8 +917,8 @@ const HomeScreen = () => {
         setSelectedBusNo(nextBusNo);
         setIsBusFound(true);
 
-        if (data?.notActiveMessage) {
-          setTrackingError(data.notActiveMessage);
+        if (data?.isBusActiveInCurrentPlan === false || data?.notActiveMessage) {
+          setTrackingError("Your bus is inactive.");
           setBusData({ ...data, previewNumber: query, busNo: nextBusNo });
           setLastGoodLocation({
             ...data,
@@ -912,6 +927,7 @@ const HomeScreen = () => {
           });
           setLocationStatus("offline");
           setIsOffline(true);
+          setMarkerStatus("inactive");
           setNoBusFound(false);
           return;
         }
@@ -980,12 +996,13 @@ const HomeScreen = () => {
 
         if (currentSearch !== searchCounterRef.current) return;
 
-        if (data?.notActiveMessage) {
-          setTrackingError(data.notActiveMessage);
+        if (data?.isBusActiveInCurrentPlan === false || data?.notActiveMessage) {
+          setTrackingError("Your bus is inactive.");
           setBusData({ ...data, source: data?.source || "gps" });
           setLastGoodLocation({ ...data, source: data?.source || "gps" });
           setLocationStatus("offline");
           setIsOffline(true);
+          setMarkerStatus("inactive");
           setNoBusFound(false);
           return;
         }
@@ -1152,7 +1169,8 @@ const HomeScreen = () => {
     if (!hasPlanContext) return null;
 
     const currentPlan = globalPlan || "PLAN A";
-    const hasPlanStops = !!routesData?.planNames?.length;
+    const hasPlanStops =
+      routesData?.hasStops === true || !!routesData?.planNames?.length;
     const isOfflineMode = isOffline || !displayBusData;
     return (
       <View style={styles.planCard}>
@@ -1167,7 +1185,7 @@ const HomeScreen = () => {
               {trackingError
                 ? trackingError
                 : routesData && !hasPlanStops
-                  ? "No stops uploaded for this bus yet."
+                ? "No stops are available for the active plan."
                   : `Current global plan is ${currentPlan}`}
             </Text>
           </View>
@@ -1230,8 +1248,11 @@ const HomeScreen = () => {
       <View style={styles.mapBackground}>
         <OSMMap
           busData={
-            displayBusData ? { ...displayBusData, _isOffline: isOffline } : null
+            displayBusData
+              ? { ...displayBusData, _isOffline: isOffline, _markerStatus: markerStatus }
+              : null
           }
+          markerStatus={markerStatus}
           buses={[]}
         />
       </View>

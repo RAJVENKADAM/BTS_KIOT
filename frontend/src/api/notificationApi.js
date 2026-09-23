@@ -25,6 +25,11 @@ export const notificationApi = {
       method: "DELETE",
       headers: { Authorization: `Bearer ${token}` },
     }),
+  removeAll: (token) =>
+    fetchJson(`${API_BASE_URL}/api/notifications`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    }),
 };
 
 export default notificationApi;

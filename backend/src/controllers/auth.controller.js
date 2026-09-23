@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const Bus = require('../models/Bus');
 
 const login = async (req, res) => {
   try {
@@ -59,6 +60,10 @@ const login = async (req, res) => {
       { expiresIn: '24h' }
     );
 
+    const assignedBus = user.bus_no
+      ? await Bus.findOne({ bus_no: user.bus_no }).select('preview_number').lean()
+      : null;
+
     // Return user data and token
     res.status(200).json({
       message: 'Login successful',
@@ -69,6 +74,7 @@ const login = async (req, res) => {
         email: user.email,
         role: user.role,
         bus_no: user.bus_no,
+        previewNumber: assignedBus?.preview_number ?? null,
         is_active: user.is_active,
         temp_password: user.temp_password
       }
@@ -94,6 +100,10 @@ const getProfile = async (req, res) => {
       });
     }
 
+    const assignedBus = user.bus_no
+      ? await Bus.findOne({ bus_no: user.bus_no }).select('preview_number').lean()
+      : null;
+
     res.status(200).json({
       user: {
         id: user._id,
@@ -101,6 +111,7 @@ const getProfile = async (req, res) => {
         email: user.email,
         role: user.role,
         bus_no: user.bus_no,
+        previewNumber: assignedBus?.preview_number ?? null,
         is_active: user.is_active,
         temp_password: user.temp_password,
         created_at: user.createdAt
@@ -246,3 +257,6 @@ module.exports = {
   verifyToken,
   verifyTokenPublic
 };
+    const assignedBus = user.bus_no
+      ? await Bus.findOne({ bus_no: user.bus_no }).select('preview_number').lean()
+      : null;

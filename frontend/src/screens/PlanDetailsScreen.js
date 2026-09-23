@@ -61,7 +61,10 @@ export default function PlanDetailsScreen({ route, navigation }) {
         setError(null);
         const target = busNo || busIdentifier || previewNumber;
         const data = await busApi.getBusRoutes(token, target);
-        if (data?.plans) {
+        if (Array.isArray(data?.stops)) {
+          setItems(data.stops);
+          setPlanName(data.activePlan || data.currentPlan || "Current plan");
+        } else if (data?.plans) {
           const active =
             data?.activePlan || data?.currentPlan || Object.keys(data.plans)[0];
           const stops = data.plans[active] || [];

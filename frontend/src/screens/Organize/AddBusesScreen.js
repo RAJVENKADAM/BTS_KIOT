@@ -43,7 +43,8 @@ const normalizePlans = (plans) => {
 };
 
 export default function AddBusesScreen() {
-  const { token } = useAuth();
+  const { token, user } = useAuth();
+  const isSuperadmin = String(user?.role || "").toLowerCase() === "superadmin";
 
   const [buses, setBuses] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -63,6 +64,7 @@ export default function AddBusesScreen() {
   const [selectedBus, setSelectedBus] = useState(null);
   const [showAlterModal, setShowAlterModal] = useState(false);
   const [alteringBus, setAlteringBus] = useState(false);
+  const [restoringBus, setRestoringBus] = useState(false);
 
   // Edit details modal
   const [showEditDetailsModal, setShowEditDetailsModal] = useState(false);
@@ -92,7 +94,7 @@ export default function AddBusesScreen() {
       const rawText = await res.text();
       const data = rawText ? JSON.parse(rawText) : {};
       if (res.ok) {
-        const loadedBuses = data.buses || [];
+        const loadedBuses = [...(data.buses || []), ...(data.alteredBuses || [])];
         // Sort buses in ascending order by their preview number (numeric comparison with string fallback)
         loadedBuses.sort((a, b) => {
           const numA = Number(a.previewNumber);
@@ -117,6 +119,32 @@ export default function AddBusesScreen() {
       );
     }
     setLoading(false);
+  };
+
+  const handleRestoreAltered = () => {
+    if (!selectedBus?.isAltered) return;
+    Alert.alert(
+      "Restore bus",
+      `Restore bus ${getDisplayBusNumber(selectedBus)} to normal?`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Restore",
+          onPress: async () => {
+            setRestoringBus(true);
+            try {
+              await busApi.restoreAltered(token, selectedBus.busNo);
+              setShowOptionsModal(false);
+              await loadBuses();
+            } catch (error) {
+              Alert.alert("Restore failed", getErrorMessage(error, "Could not restore bus."));
+            } finally {
+              setRestoringBus(false);
+            }
+          },
+        },
+      ],
+    );
   };
 
   useEffect(() => {
@@ -407,6 +435,11 @@ export default function AddBusesScreen() {
         <Text style={styles.title} numberOfLines={1}>
           {item.previewNumber ?? ""}
         </Text>
+        {item.isAltered && (
+          <Text style={styles.alteredLabel}>
+            Altered → {item.alteredToPreview ?? "—"}
+          </Text>
+        )}
       </TouchableOpacity>
     );
   };
@@ -429,6 +462,11 @@ export default function AddBusesScreen() {
         contentContainerStyle={styles.listContainer}
         ListEmptyComponent={
           <Text style={styles.emptyText}>No buses yet. Tap + to add one.</Text>
+        }
+        ListHeaderComponent={
+          buses.some((bus) => bus.isAltered) ? (
+            <Text style={styles.alteredSectionTitle}>Altered buses</Text>
+          ) : null
         }
       />
 
@@ -577,6 +615,19 @@ export default function AddBusesScreen() {
               <Ionicons name="swap-horizontal-outline" size={20} color={COLORS.primary} />
               <Text style={styles.optionText}>Alter Bus</Text>
             </TouchableOpacity>
+
+            {isSuperadmin && selectedBus?.isAltered && (
+              <TouchableOpacity
+                style={styles.optionButton}
+                onPress={handleRestoreAltered}
+                disabled={restoringBus}
+              >
+                <Ionicons name="refresh-outline" size={20} color={COLORS.primary} />
+                <Text style={styles.optionText}>
+                  {restoringBus ? "Restoring..." : "Restore normal bus"}
+                </Text>
+              </TouchableOpacity>
+            )}
 
             <TouchableOpacity
               style={[styles.optionButton, styles.deleteButton]}
@@ -833,6 +884,13 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   title: { fontSize: 13, fontWeight: "700", color: COLORS.textHeader },
+  alteredLabel: { fontSize: 11, color: COLORS.warning || "#B45309", marginTop: 3 },
+  alteredSectionTitle: {
+    fontSize: 16,
+    fontWeight: "800",
+    color: COLORS.textHeader,
+    marginBottom: 10,
+  },
   routeFab: {
     position: "absolute",
     bottom: 90,

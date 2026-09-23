@@ -19,10 +19,27 @@ import { COLORS, SPACING, RADIUS, SHADOWS } from '../theme';
 import { Header, Subtitle, Body, MutedText } from '../components/UI/Typography';
 import Card from '../components/UI/Card';
 import { getDisplayBusNumber } from '../utils/busDisplay';
+import { API_BASE_URL } from '../api/api';
+import { fetchJson } from '../utils/errorHandler';
 
 export default function ProfileScreen() {
-  const { user, logout, loading } = useAuth();
+  const { user, logout, loading, token, updateUserData } = useAuth();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+
+  React.useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
+    fetchJson(`${API_BASE_URL}/api/auth/profile`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((data) => {
+        if (!cancelled && data?.user) updateUserData(data.user);
+      })
+      .catch((error) => console.warn('Unable to refresh profile:', error.message));
+    return () => {
+      cancelled = true;
+    };
+  }, [token, updateUserData]);
 
   if (loading) {
     return (

@@ -103,6 +103,13 @@ router.post(
   BusController.alterBus
 );
 
+router.put(
+  '/restore-altered/:busNo',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  BusController.restoreAlteredBus
+);
+
 // Any authenticated user can fetch plans + stops for a bus (Home screen)
 router.get(
   '/routes/:busNo',

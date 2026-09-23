@@ -83,6 +83,16 @@ async function deleteNotification(req, res) {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ success: false, error: 'Invalid notification id.' });
     }
+
+    async function deleteAllNotifications(req, res) {
+      try {
+        await Notification.deleteMany({ user_id: req.user.id });
+        res.json({ success: true });
+      } catch (error) {
+        console.error('deleteAllNotifications error:', error);
+        res.status(500).json({ success: false, error: 'Failed to delete messages.' });
+      }
+    }
     const result = await Notification.deleteOne({
       _id: req.params.id,
       user_id: req.user.id,
@@ -103,4 +113,5 @@ module.exports = {
   markNotificationsRead,
   markNotificationRead,
   deleteNotification,
+  deleteAllNotifications,
 };

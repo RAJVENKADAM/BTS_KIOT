@@ -9,7 +9,7 @@ import { WebView } from "react-native-webview";
 const KIOT_LAT = 11.554528;
 const KIOT_LNG = 78.019759;
 
-export default function OSMMap({ busData, buses = [] }) {
+export default function OSMMap({ busData, buses = [], markerStatus = "moving" }) {
   const webRef = useRef(null);
 
   // Push multi-bus payload + selected bus payload (legacy) to WebView
@@ -43,16 +43,17 @@ export default function OSMMap({ busData, buses = [] }) {
       latitude: busData.latitude,
       longitude: busData.longitude,
       isOffline: busData._isOffline === true,
+      markerStatus: busData._markerStatus ?? markerStatus,
     };
     webRef.current.postMessage(JSON.stringify(singlePayload));
-  }, [busData]);
+  }, [busData, markerStatus]);
 
   const html = `
 <!DOCTYPE html>
 <html>
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data: https://*.tile.openstreetmap.org; connect-src 'none';" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data: https://*.tile.openstreetmap.org; connect-src https://*.tile.openstreetmap.org;" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
@@ -60,71 +61,40 @@ export default function OSMMap({ busData, buses = [] }) {
     html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #fff; }
     #map { width: 100%; height: 100%; }
     .leaflet-container { background: transparent; }
+    .bus-marker { width: 22px; height: 22px; }
+    .college-marker {
+      width: 24px;
+      height: 24px;
+      border-radius: 50% 50% 50% 0;
+      background: #2563eb;
+      border: 3px solid #fff;
+      box-shadow: 0 2px 6px rgba(15, 23, 42, .45);
+      transform: rotate(-45deg);
+      box-sizing: border-box;
+    }
+    .college-marker::after {
+      content: '';
+      display: block;
+      width: 8px;
+      height: 8px;
+      margin: 5px;
+      border-radius: 50%;
+      background: #fff;
+    }
 
-    /* Pulsing ring for live buses (green) */
+    /* Bus status markers: green = live, yellow = waiting/stopped, red = offline/inactive. */
     .bus-pulse {
       position: relative;
       width: 16px;
       height: 16px;
       border-radius: 999px;
-      background: rgba(0, 200, 100, 0.20);
-      border: 2px solid rgba(0, 200, 100, 0.85);
-      transform: translate(-50%, -50%);
+      background: #16a34a;
+      border: 3px solid #fff;
+      box-shadow: 0 1px 5px rgba(15, 23, 42, .45);
       box-sizing: border-box;
     }
-
-    .bus-pulse:after {
-      content: '';
-      position: absolute;
-      left: 50%;
-      top: 50%;
-      width: 16px;
-      height: 16px;
-      border-radius: 999px;
-      border: 2px solid rgba(0, 200, 100, 0.60);
-      transform: translate(-50%, -50%);
-      animation: busPulse 1.2s ease-out infinite;
-    }
-
-    @keyframes busPulse {
-      0% { opacity: 0.9; transform: translate(-50%, -50%) scale(0.85); }
-      100% { opacity: 0; transform: translate(-50%, -50%) scale(2.2); }
-    }
-
-    .bus-dot {
-      position: absolute;
-      left: 50%;
-      top: 50%;
-      width: 8px;
-      height: 8px;
-      border-radius: 999px;
-      background: rgba(0, 200, 100, 0.95);
-      transform: translate(-50%, -50%);
-      box-shadow: 0 0 12px rgba(0, 200, 100, 0.55);
-    }
-
-    /* OFFLINE marker (red) — no pulse, solid red dot */
-    .bus-offline {
-      position: relative;
-      width: 16px;
-      height: 16px;
-      border-radius: 999px;
-      background: rgba(220, 38, 38, 0.15);
-      border: 2px solid rgba(220, 38, 38, 0.85);
-      transform: translate(-50%, -50%);
-      box-sizing: border-box;
-    }
-
-    .bus-offline-dot {
-      position: absolute;
-      left: 50%;
-      top: 50%;
-      width: 8px;
-      height: 8px;
-      border-radius: 999px;
-      background: rgba(220, 38, 38, 0.95);
-      transform: translate(-50%, -50%);
-    }
+    .bus-waiting { background: #facc15; }
+    .bus-offline { background: #dc2626; }
   </style>
 </head>
 <body>
@@ -181,8 +151,16 @@ export default function OSMMap({ busData, buses = [] }) {
         maxZoom: 19
       }).addTo(map);
 
-      // College marker (static)
-      L.marker([initialLat, initialLng]).addTo(map).bindPopup("KIOT College");
+      // College location marker (static and independent from bus markers).
+      var collegeIcon = L.divIcon({
+        className: '',
+        html: '<div class="college-marker"></div>',
+        iconSize: [24, 24],
+        iconAnchor: [12, 24]
+      });
+      L.marker([initialLat, initialLng], { icon: collegeIcon })
+        .addTo(map)
+        .bindPopup("KIOT College");
 
       // Registry for bus markers (key -> marker)
       var busMarkers = {};
@@ -191,37 +169,40 @@ export default function OSMMap({ busData, buses = [] }) {
         return typeof x === 'number' && isFinite(x);
       }
 
-      function busIconHtml(offline) {
-        if (offline) {
-          return '<div class="bus-offline"><div class="bus-offline-dot"></div></div>';
-        }
-        return '<div class="bus-pulse"><div class="bus-dot"></div></div>';
+      function busIconHtml(offline, status) {
+        var className = offline || status === 'inactive' || status === 'offline'
+          ? 'bus-offline'
+          : (status === 'waiting' || status === 'stopped' ? 'bus-waiting' : 'bus-pulse');
+        return '<div class="bus-marker ' + className + '"></div>';
       }
 
-      function createBusMarker(offline) {
+      function createBusMarker(offline, status) {
         var icon = L.divIcon({
           className: '',
-          html: busIconHtml(offline),
-          iconSize: [16, 16],
-          iconAnchor: [8, 8],
+          html: busIconHtml(offline, status),
+          iconSize: [22, 22],
+          iconAnchor: [11, 11],
         });
 
         var m = L.marker([initialLat, initialLng], { icon: icon, interactive: false });
         m.addTo(map);
         m._isOffline = !!offline;
+        m._status = status;
         return m;
       }
 
-function upsertBusMarker(key, lat, lng, offline) {
-        if (!isFiniteNumber(lat) || !isFiniteNumber(lng)) return;
-        var marker = busMarkers[key];
-        if (!marker) {
-          busMarkers[key] = createBusMarker(offline);
-          marker = busMarkers[key];
-        } else if (!!marker._isOffline !== !!offline) {
-          // Offline state changed — recreate marker with correct icon
+function upsertBusMarker(key, lat, lng, offline, status) {
+  lat = Number(lat);
+  lng = Number(lng);
+  if (!isFiniteNumber(lat) || !isFiniteNumber(lng)) return;
+  var marker = busMarkers[key];
+  if (!marker) {
+    busMarkers[key] = createBusMarker(offline, status);
+    marker = busMarkers[key];
+  } else if (!!marker._isOffline !== !!offline || marker._status !== status) {
+    // Status changed — recreate marker with the correct color.
           map.removeLayer(marker);
-          busMarkers[key] = createBusMarker(offline);
+          busMarkers[key] = createBusMarker(offline, status);
           marker = busMarkers[key];
         }
         marker.setLatLng([lat, lng]);
@@ -259,7 +240,7 @@ function upsertBusMarker(key, lat, lng, offline) {
               if (!b) return;
               var key = (b.busNo || b.bus_no || b.previewNumber || b.preview_number || '').toString();
               if (!key) return;
-              upsertBusMarker(key, b.latitude, b.longitude);
+              upsertBusMarker(key, b.latitude, b.longitude, b.isOffline === true, b.markerStatus || b.status);
             });
             return;
           }
@@ -269,9 +250,15 @@ function upsertBusMarker(key, lat, lng, offline) {
           if (data.type === 'BUS_LOCATION') {
             clearAllBusMarkers();
             var keySingle = (data.busNo || data.bus_no || data.previewNumber || data.preview_number || 'single').toString();
-            upsertBusMarker(keySingle, data.latitude, data.longitude, data.isOffline);
+            upsertBusMarker(
+              keySingle,
+              data.latitude,
+              data.longitude,
+              data.isOffline,
+              data.markerStatus || data.status
+            );
             // Focus strictly on the bus location
-            focusMap(data.latitude, data.longitude);
+            focusMap(Number(data.latitude), Number(data.longitude));
             return;
           }
         } catch (e) {

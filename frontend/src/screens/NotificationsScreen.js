@@ -1,6 +1,7 @@
 import React, { useCallback, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   StyleSheet,
   Text,
@@ -12,11 +13,12 @@ import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import { useAuth } from "../context/AuthContext";
 import notificationApi from "../api/notificationApi";
 import { COLORS } from "../theme";
-import { getDisplayBusNumber } from "../utils/busDisplay";
+import { useBus } from "../context/BusContext";
 
 export default function NotificationsScreen() {
   const { token } = useAuth();
   const navigation = useNavigation();
+  const { getSocket } = useBus();
   const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -44,15 +46,22 @@ export default function NotificationsScreen() {
     }
   };
 
-  const removeNotification = async (id) => {
+  const removeAllNotifications = async () => {
+    Alert.alert("Delete all messages", "Delete every message from your inbox?", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: async () => {
     try {
-      await notificationApi.remove(token, id);
-      setNotifications((items) =>
-        items.filter((item) => String(item.id) !== String(id)),
-      );
+      await notificationApi.removeAll(token);
+      setNotifications([]);
     } catch (error) {
       console.error("Failed to delete notification:", error);
     }
+        },
+      },
+    ]);
   };
 
   useFocusEffect(
@@ -61,61 +70,37 @@ export default function NotificationsScreen() {
     }, [loadNotifications]),
   );
 
+  React.useEffect(() => {
+    const socket = getSocket();
+    if (!socket) return undefined;
+    const handleNotification = (notification) => {
+      if (!notification?.message) return;
+      const liveItem = {
+        ...notification,
+        id: notification.id || `live-${Date.now()}-${Math.random()}`,
+        read: false,
+        createdAt: notification.createdAt || new Date().toISOString(),
+      };
+      setNotifications((items) => {
+        if (notification.id && items.some((item) => String(item.id) === String(notification.id))) {
+          return items;
+        }
+        return [liveItem, ...items];
+      });
+    };
+    socket.on("notification", handleNotification);
+    return () => socket.off("notification", handleNotification);
+  }, [getSocket]);
+
   const renderItem = ({ item }) => (
     <TouchableOpacity
       style={[styles.card, !item.read && styles.unreadCard]}
       activeOpacity={0.85}
       onPress={() => !item.read && markRead(item.id)}
     >
-      <View style={styles.icon}>
-        <Ionicons
-          name={
-            item.type === "plan_changed"
-              ? "git-branch-outline"
-              : item.type === "bus_status"
-                ? "radio-outline"
-                : "swap-horizontal"
-          }
-          size={22}
-          color={COLORS.primary}
-        />
-      </View>
       <View style={styles.body}>
         <Text style={styles.message}>{item.message}</Text>
         {!item.read && <Text style={styles.unreadLabel}>Unread</Text>}
-        {item.type === "plan_changed" || item.type === "bus_status" ? (
-          <Text style={styles.meta}>
-            {item.type === "bus_status"
-              ? item.message
-              : item.isBusActive
-                ? "Your bus is active."
-                : "Your bus is not active."}
-          </Text>
-        ) : (
-          <>
-            <Text style={styles.meta}>Bus {getDisplayBusNumber(item.oldPreview)} → Bus {getDisplayBusNumber(item.newPreview)}</Text>
-            <TouchableOpacity
-              style={styles.button}
-              onPress={() =>
-                // Navigate using preview number — PlanDetails/ctrl will accept preview
-                navigation.navigate("PlanDetails", {
-                  mode: "stopsForBus",
-                  busNo: item.newPreview,
-                })
-              }
-            >
-              <Text style={styles.buttonText}>See stoppings</Text>
-              <Ionicons name="arrow-forward" size={15} color="#fff" />
-            </TouchableOpacity>
-          </>
-        )}
-        <TouchableOpacity
-          accessibilityLabel="Delete notification"
-          style={styles.deleteButton}
-          onPress={() => removeNotification(item.id)}
-        >
-          <Ionicons name="trash-outline" size={19} color={COLORS.textBody} />
-        </TouchableOpacity>
       </View>
     </TouchableOpacity>
   );
@@ -126,8 +111,15 @@ export default function NotificationsScreen() {
         <TouchableOpacity onPress={() => navigation.goBack()}>
           <Ionicons name="arrow-back" size={24} color={COLORS.textHeader} />
         </TouchableOpacity>
-        <Text style={styles.title}>Notifications</Text>
-        <View style={{ width: 24 }} />
+        <Text style={styles.title}>Messages</Text>
+        <TouchableOpacity
+          accessibilityLabel="Delete all messages"
+          style={styles.deleteAllButton}
+          onPress={removeAllNotifications}
+          disabled={!notifications.length}
+        >
+          <Text style={styles.deleteAllText}>Delete all</Text>
+        </TouchableOpacity>
       </View>
       {loading ? (
         <ActivityIndicator style={{ marginTop: 40 }} color={COLORS.primary} />
@@ -166,7 +158,8 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   unreadCard: { borderLeftWidth: 4, borderLeftColor: COLORS.primary },
-  deleteButton: { paddingLeft: 10, justifyContent: "center" },
+  deleteAllButton: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6, backgroundColor: "#FEF2F2" },
+  deleteAllText: { color: COLORS.error, fontSize: 12, fontWeight: "700" },
   icon: { marginRight: 12, paddingTop: 2 },
   body: { flex: 1 },
   message: { color: COLORS.textHeader, fontSize: 15, fontWeight: "600" },

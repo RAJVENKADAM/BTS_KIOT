@@ -9,5 +9,6 @@ router.get('/unread-count', authenticateToken, NotificationController.getUnreadC
 router.put('/read', authenticateToken, NotificationController.markNotificationsRead);
 router.put('/:id/read', authenticateToken, NotificationController.markNotificationRead);
 router.delete('/:id', authenticateToken, NotificationController.deleteNotification);
+router.delete('/', authenticateToken, NotificationController.deleteAllNotifications);
 
 module.exports = router;

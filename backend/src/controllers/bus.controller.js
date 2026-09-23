@@ -42,8 +42,8 @@ async function notifyAssignedUsersOfBusStatus(bus, status) {
   if (!users.length) return;
   const message =
     status === "active"
-      ? `Your bus ${bus.preview_number ?? ""} is active now.`
-      : `Your bus ${bus.preview_number ?? ""} is inactive now.`;
+      ? `Bus ${bus.preview_number ?? ""} is active now.`
+      : `Bus ${bus.preview_number ?? ""} is inactive now.`;
   const notifications = users.map((user) => ({
     user_id: user._id,
     type: "bus_status",
@@ -185,7 +185,7 @@ async function updateBusNumber(req, res) {
 // ================= GET ALL BUSES WITH LIVE GPS =================
 async function getAllBuses(req, res) {
   try {
-    const buses = await Bus.find({ status: "active" }).sort({
+    const buses = await Bus.find({}).sort({
       preview_number: 1,
       bus_no: 1,
     });
@@ -216,6 +216,9 @@ async function getAllBuses(req, res) {
         lastUpdated:
           location?.lastSuccessfulGpsUpdate ?? location?.updatedAt ?? null,
         source: location?.source ?? "offline",
+        alteredToPreview: bus.altered_to_preview ?? null,
+        alteredAt: bus.altered_at ?? null,
+        isAltered: !!bus.altered_to_bus_id,
       };
     });
 
@@ -235,8 +238,12 @@ async function getAllBuses(req, res) {
           source: b.source,
         }));
 
+    const alteredBuses = safeBuses.filter((bus) => bus.isAltered);
+    const normalBuses = safeBuses.filter((bus) => !bus.isAltered);
     res.status(200).json({
-      buses: safeBuses,
+      // Keep `buses` for existing clients while exposing an explicit altered section.
+      buses: normalBuses,
+      alteredBuses,
       count: safeBuses.length,
     });
   } catch (error) {
@@ -466,7 +473,7 @@ async function setGlobalActivePlan(req, res) {
       }
     });
     const activeBusIds = new Set(
-      (await BusRoute.find({ plan_name: normalized }).distinct("bus_id"))
+      (await BusRoute.find({ plan_name: new RegExp(`^${escapeRegExp(normalized)}$`, "i") }).distinct("bus_id"))
         .map((id) => String(id)),
     );
     const planNotifications = students.map((student) => {
@@ -476,8 +483,8 @@ async function setGlobalActivePlan(req, res) {
         user_id: student._id,
         type: "plan_changed",
         message: isBusActive
-          ? "Your bus is active after the latest route update."
-          : "Your bus is not active after the latest route update.",
+          ? `Bus ${bus?.preview_number ?? ""} is active now.`
+          : `Bus ${bus?.preview_number ?? ""} is inactive now.`,
         plan_name: normalized,
         is_bus_active: isBusActive,
       };
@@ -520,8 +527,30 @@ async function alterBus(req, res) {
     if (!sourceBus) {
       return res.status(404).json({ success: false, error: 'Source bus not found.' });
     }
+
     if (!targetBus) {
       return res.status(404).json({ success: false, error: 'New bus not found.' });
+    }
+
+    async function restoreAlteredBus(req, res) {
+      try {
+        const bus = await findBusByIdentifier(req.params.busNo);
+        if (!bus) return res.status(404).json({ success: false, error: "Bus not found." });
+        if (!bus.altered_to_bus_id) {
+          return res.status(400).json({ success: false, error: "This bus is not altered." });
+        }
+        bus.status = "active";
+        bus.altered_to_bus_id = null;
+        bus.altered_to_preview = null;
+        bus.altered_at = null;
+        await bus.save();
+        const io = getIO();
+        if (io) io.emit("bus-update", { actionType: "BUS_RESTORED", previewNumber: bus.preview_number });
+        res.json({ success: true, message: `Bus ${bus.preview_number ?? ""} restored.`, previewNumber: bus.preview_number });
+      } catch (error) {
+        console.error("restoreAlteredBus error:", error);
+        res.status(500).json({ success: false, error: "Failed to restore altered bus." });
+      }
     }
     if (sourceBus._id.equals(targetBus._id)) {
       return res.status(400).json({ success: false, error: 'Choose a different bus.' });
@@ -553,7 +582,7 @@ async function alterBus(req, res) {
     }).select('_id bus_no');
 
     // Use preview numbers for user-facing messages. Keep internal bus_no stored for audit.
-    const previewMessage = `Your bus has been altered to ${targetBus.preview_number ?? 'a different bus'}.`;
+    const previewMessage = `Bus ${sourceBus.preview_number ?? ''} altered with bus ${targetBus.preview_number ?? 'a different bus'}.`;
 
     const notifications = users.map((user) => ({
       user_id: user._id,
@@ -634,9 +663,12 @@ async function getBusRoutes(req, res) {
     }
 
     const activePlan = await getCurrentGlobalPlan();
+    const activePlanKey = Object.keys(plansMap).find(
+      (name) => name.toUpperCase() === activePlan.toUpperCase(),
+    );
     const isBusActiveInCurrentPlan = await BusRoute.exists({
       bus_id: bus._id,
-      plan_name: activePlan,
+      plan_name: new RegExp(`^${escapeRegExp(activePlan)}$`, "i"),
     });
 
     const isSuperadmin = req.user && String(req.user.role || '').toLowerCase() === 'superadmin';
@@ -651,6 +683,8 @@ async function getBusRoutes(req, res) {
         : null,
       planNames: isSuperadmin ? Object.keys(plansMap) : [],
       plans: isSuperadmin ? plansMap : {},
+      stops: plansMap[activePlanKey] || [],
+      hasStops: (plansMap[activePlanKey] || []).length > 0,
     });
   } catch (error) {
     console.error("getBusRoutes error:", error);
@@ -782,9 +816,16 @@ async function getLiveLocation(req, res) {
 
     const location = await BusLiveLocation.findOne({ bus_id: bus._id });
     const activePlan = await getCurrentGlobalPlan();
+    const activeStops = await BusRoute.find({
+      bus_id: bus._id,
+      plan_name: new RegExp(`^${escapeRegExp(activePlan)}$`, "i"),
+    })
+      .sort({ stop_order: 1 })
+      .select("stop_name stop_order")
+      .lean();
     const isBusActiveInCurrentPlan = await BusRoute.exists({
       bus_id: bus._id,
-      plan_name: activePlan,
+      plan_name: new RegExp(`^${escapeRegExp(activePlan)}$`, "i"),
     });
 
     // Privacy: only superadmin may receive internal bus_no in responses.
@@ -822,6 +863,8 @@ async function getLiveLocation(req, res) {
       lastUpdated:
         location?.lastSuccessfulGpsUpdate ?? location?.updatedAt ?? null,
       alteration,
+      stops: activeStops,
+      hasStops: activeStops.length > 0,
     };
 
     if (location) {
@@ -925,4 +968,5 @@ module.exports = {
   getLiveLocation,
   trackByPreview,
   alterBus,
+  restoreAlteredBus,
 };

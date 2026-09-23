@@ -153,6 +153,12 @@ export const busApi = {
     return data;
   },
 
+  restoreAltered: async (token, busNo) =>
+    fetchJson(`${API_BASE_URL}/api/bus/restore-altered/${encodeURIComponent(busNo)}`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${token}` },
+    }),
+
   setGlobalActivePlan: async (token, plan) => {
     const data = await fetchJson(`${API_BASE_URL}/api/bus/global-plan`, {
       method: "PUT",
