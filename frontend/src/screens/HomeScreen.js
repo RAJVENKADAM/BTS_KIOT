@@ -1209,6 +1209,22 @@ const HomeScreen = () => {
               )}
             </View>
           </View>
+          <TouchableOpacity
+            style={styles.liveStopsButton}
+            onPress={() =>
+              navigation.navigate("PlanDetails", {
+                mode: "stopsForBus",
+                previewNumber: selectedPreviewNumber,
+                busNo: selectedBusNo,
+                plan: displayBusData?.activePlan || globalPlan,
+              })
+            }
+            activeOpacity={0.8}
+          >
+            <Text style={styles.liveStopsButtonText}>
+              View stops
+            </Text>
+          </TouchableOpacity>
         </View>
       </View>
     );
@@ -1222,6 +1238,10 @@ const HomeScreen = () => {
     findNearbyBuses,
     loadingNearbyBuses,
     nearbyBuses,
+    navigation,
+    selectedPreviewNumber,
+    selectedBusNo,
+    globalPlan,
   ]);
 
   const planCardContent = React.useMemo(() => {
@@ -1328,7 +1348,6 @@ const HomeScreen = () => {
         }}
         activeOpacity={0.8}
       >
-        <Ionicons name="bus-outline" size={18} color="#fff" />
         <Text style={styles.availableBusesButtonText}>
           Available buses in current plan
         </Text>
@@ -1346,7 +1365,6 @@ const HomeScreen = () => {
         disabled={loadingNearbyBuses}
         activeOpacity={0.8}
       >
-        <Ionicons name="navigate-outline" size={18} color={COLORS.primary} />
         <Text style={styles.nearbyBusesButtonText}>
           {loadingNearbyBuses ? "Finding nearby active buses..." : "Find nearby active buses"}
         </Text>
@@ -1816,10 +1834,8 @@ const styles = StyleSheet.create({
   },
   availableBusesButton: {
     minHeight: 44,
-    flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    gap: 8,
     borderRadius: 9,
     paddingHorizontal: 12,
     backgroundColor: COLORS.primary,
@@ -1828,13 +1844,12 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontSize: 13,
     fontWeight: "800",
+    textAlign: "center",
   },
   nearbyBusesButton: {
     minHeight: 44,
-    flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    gap: 8,
     borderRadius: 9,
     marginTop: 8,
     paddingHorizontal: 12,
@@ -1846,12 +1861,27 @@ const styles = StyleSheet.create({
     color: COLORS.primary,
     fontSize: 13,
     fontWeight: "800",
+    textAlign: "center",
   },
   nearbyResultsHint: {
     color: COLORS.textBody,
     fontSize: 12,
     marginTop: 9,
     textAlign: "center",
+  },
+  liveStopsButton: {
+    alignSelf: "stretch",
+    alignItems: "center",
+    justifyContent: "center",
+    minHeight: 40,
+    marginTop: 12,
+    borderRadius: 8,
+    backgroundColor: "#E8F0FE",
+  },
+  liveStopsButtonText: {
+    color: COLORS.primary,
+    fontSize: 13,
+    fontWeight: "800",
   },
   busDiscoveryActions: {
     marginTop: 10,

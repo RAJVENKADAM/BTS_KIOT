@@ -200,7 +200,6 @@ export default function PlanDetailsScreen({ route, navigation }) {
               onPress={loadNearbyBuses}
               disabled={loading}
             >
-              <Ionicons name="navigate-outline" size={15} color="#fff" />
               <Text style={styles.nearbyButtonText}>
                 {nearbyMode ? "Refresh nearest buses" : "Nearby active buses"}
               </Text>
@@ -297,11 +296,9 @@ const styles = StyleSheet.create({
   },
   backBtn: { marginRight: 8, padding: 6 },
   title: { fontSize: 18, fontWeight: "700", color: COLORS.textHeader },
-  subtitle: { fontSize: 12, color: COLORS.textBody, marginTop: 2 },
+  subtitle: { fontSize: 12, color: COLORS.textBody, marginTop: 3, lineHeight: 17 },
   nearbyButton: {
-    flexDirection: "row",
     alignItems: "center",
-    gap: 6,
     alignSelf: "flex-start",
     marginTop: 8,
     paddingHorizontal: 10,
@@ -319,6 +316,7 @@ const styles = StyleSheet.create({
   },
   distanceText: { color: COLORS.textBody, fontSize: 11, marginTop: 4 },
   stopsButton: {
+    alignSelf: "stretch",
     marginTop: 7,
     paddingHorizontal: 8,
     paddingVertical: 5,
@@ -334,22 +332,28 @@ const styles = StyleSheet.create({
   gridContainer: {
     flexDirection: "row",
     flexWrap: "wrap",
-    justifyContent: "space-between",
     justifyContent: "center",
     alignItems: "center",
-    gap: 10,
+    gap: 12,
+    paddingBottom: 20,
   },
   gridItem: {
-    width: "18%", // Roughly 100% / 5 minus a little gap space
-    aspectRatio: 1,
-    justifyContent: "center",
+    width: "30%",
+    minHeight: 116,
+    justifyContent: "flex-start",
     alignItems: "center",
     borderRadius: 8,
     backgroundColor: COLORS.white,
+    padding: 12,
     marginBottom: 10,
     elevation: 1,
   },
-  gridItemText: { color: COLORS.textHeader, fontWeight: "600", fontSize: 14 },
+  gridItemText: {
+    color: COLORS.textHeader,
+    fontWeight: "700",
+    fontSize: 15,
+    textAlign: "center",
+  },
   row: {
     paddingVertical: 14,
     paddingHorizontal: 12,
