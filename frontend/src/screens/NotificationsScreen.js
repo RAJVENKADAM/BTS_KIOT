@@ -100,6 +100,16 @@ export default function NotificationsScreen() {
     >
       <View style={styles.body}>
         <Text style={styles.message}>{item.message}</Text>
+        {!!item.createdAt && (
+          <Text style={styles.meta}>
+            {new Intl.DateTimeFormat("en-IN", {
+              timeZone: "Asia/Kolkata",
+              hour: "numeric",
+              minute: "2-digit",
+              hour12: true,
+            }).format(new Date(item.createdAt))}
+          </Text>
+        )}
         {!item.read && <Text style={styles.unreadLabel}>Unread</Text>}
       </View>
     </TouchableOpacity>

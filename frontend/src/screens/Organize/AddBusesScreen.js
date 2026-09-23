@@ -454,7 +454,7 @@ export default function AddBusesScreen() {
     <View style={styles.container}>
       <FlatList
         key="bus-grid-5-columns"
-        data={buses}
+        data={buses.filter((bus) => !bus.isAltered)}
         renderItem={renderBus}
         keyExtractor={(i, idx) =>
           i?.id?.toString() || i?.busNo?.toString() || idx.toString()
@@ -465,8 +465,22 @@ export default function AddBusesScreen() {
           <Text style={styles.emptyText}>No buses yet. Tap + to add one.</Text>
         }
         ListHeaderComponent={
+          <Text style={styles.alteredSectionTitle}>Normal buses</Text>
+        }
+        ListFooterComponent={
           buses.some((bus) => bus.isAltered) ? (
-            <Text style={styles.alteredSectionTitle}>Altered buses</Text>
+            <View style={styles.alteredSection}>
+              <Text style={styles.alteredSectionTitle}>Altered buses</Text>
+              <View style={styles.alteredGrid}>
+                {buses
+                  .filter((bus) => bus.isAltered)
+                  .map((bus, index) => (
+                    <View key={String(bus.busNo || index)} style={styles.alteredGridItem}>
+                      {renderBus({ item: bus, index })}
+                    </View>
+                  ))}
+              </View>
+            </View>
           ) : null
         }
       />
@@ -667,8 +681,7 @@ export default function AddBusesScreen() {
               data={buses.filter(
                 (bus) =>
                   bus.busNo !== selectedBus?.busNo &&
-                  !bus.isAltered &&
-                  bus.status !== "inactive",
+                  bus.busNo !== selectedBus?.busNo,
               )}
               keyExtractor={(item) => String(item.busNo)}
               renderItem={({ item }) => (
@@ -896,6 +909,19 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     color: COLORS.textHeader,
     marginBottom: 10,
+  },
+  alteredSection: {
+    marginTop: 18,
+    paddingTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: "#E5E7EB",
+  },
+  alteredGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+  },
+  alteredGridItem: {
+    marginRight: GAP,
   },
   routeFab: {
     position: "absolute",

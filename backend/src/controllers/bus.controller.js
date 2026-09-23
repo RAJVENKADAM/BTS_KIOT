@@ -87,6 +87,39 @@ async function findBusByIdentifier(identifier) {
   return bus;
 }
 
+async function resolveEffectiveBus(bus) {
+  const visited = new Set();
+  let effectiveBus = bus;
+  let depth = 0;
+
+  while (effectiveBus?.altered_to_bus_id && depth < 20) {
+    const currentId = String(effectiveBus._id);
+    if (visited.has(currentId)) break;
+    visited.add(currentId);
+
+    const nextBus = await Bus.findById(effectiveBus.altered_to_bus_id);
+    if (!nextBus) break;
+    effectiveBus = nextBus;
+    depth += 1;
+  }
+
+  return effectiveBus;
+}
+
+function buildAlterationDetails(sourceBus, effectiveBus) {
+  if (!sourceBus || String(sourceBus._id) === String(effectiveBus?._id)) {
+    return null;
+  }
+
+  return {
+    isAltered: true,
+    message: `Your bus ${sourceBus.preview_number ?? sourceBus.bus_no} is altered. Showing bus ${effectiveBus.preview_number ?? effectiveBus.bus_no} location until it is restored.`,
+    newPreview: effectiveBus.preview_number ?? null,
+    effectiveBusNo: effectiveBus.bus_no,
+    effectivePreview: effectiveBus.preview_number ?? null,
+  };
+}
+
 // ================= UPLOAD BUS ROUTES =================
 async function uploadBusRoutes(req, res) {
   try {
@@ -535,18 +568,16 @@ async function alterBus(req, res) {
     if (sourceBus._id.equals(targetBus._id)) {
       return res.status(400).json({ success: false, error: 'Choose a different bus.' });
     }
-
-    if (targetBus.status !== 'active') {
-      return res.status(400).json({ success: false, error: 'The new bus is not active.' });
-    }
-
-    if (sourceBus.altered_to_bus_id) {
-      return res.status(409).json({
+    const targetEffectiveBus = await resolveEffectiveBus(targetBus);
+    if (sourceBus._id.equals(targetEffectiveBus._id)) {
+      return res.status(400).json({
         success: false,
-        error: 'This bus has already been altered.',
-        alteredToPreview: sourceBus.altered_to_preview,
+        error: 'This alteration would create a circular bus chain.',
       });
     }
+
+    // A bus may be used by multiple altered buses, and an altered bus may
+    // itself be selected as the source or target of another alteration.
 
     const sourceIdentifiers = [sourceBus.bus_no];
     if (sourceBus.preview_number != null) {
@@ -576,15 +607,6 @@ async function alterBus(req, res) {
     }));
 
     if (notifications.length) await Notification.insertMany(notifications);
-
-    if (users.length) {
-      // Update the user's assigned bus_no internally (admin-facing). The frontend for students
-      // should continue to identify buses by preview numbers; the stored bus_no remains an internal value.
-      await User.updateMany(
-        { _id: { $in: users.map((user) => user._id) } },
-        { $set: { bus_no: targetBus.bus_no } },
-      );
-    }
 
     sourceBus.status = "inactive";
     sourceBus.altered_to_bus_id = targetBus._id;
@@ -823,25 +845,19 @@ async function getLiveLocation(req, res) {
       });
     }
 
-    const alteration = bus.altered_to_bus_id
-      ? {
-          isAltered: true,
-          message: `This bus has been altered. Please search bus ${bus.altered_to_preview ?? "the new preview number"}.`,
-          newPreview: bus.altered_to_preview ?? null,
-        }
-      : null;
-
-    const location = await BusLiveLocation.findOne({ bus_id: bus._id });
+    const effectiveBus = await resolveEffectiveBus(bus);
+    const alteration = buildAlterationDetails(bus, effectiveBus);
+    const location = await BusLiveLocation.findOne({ bus_id: effectiveBus._id });
     const activePlan = await getCurrentGlobalPlan();
     const activeStops = await BusRoute.find({
-      bus_id: bus._id,
+      bus_id: effectiveBus._id,
       plan_name: new RegExp(`^${escapeRegExp(activePlan)}$`, "i"),
     })
       .sort({ stop_order: 1 })
       .select("stop_name stop_order")
       .lean();
     const isBusActiveInCurrentPlan = await BusRoute.exists({
-      bus_id: bus._id,
+      bus_id: effectiveBus._id,
       plan_name: new RegExp(`^${escapeRegExp(activePlan)}$`, "i"),
     });
 
@@ -867,6 +883,8 @@ async function getLiveLocation(req, res) {
         ? (isBusActiveInCurrentPlan ? null : buildNotActiveMessage(activePlan))
         : null,
       previewNumber: bus.preview_number,
+      effectivePreviewNumber: effectiveBus.preview_number,
+      effectiveBusNo: effectiveBus.bus_no,
       latitude: location?.latitude ?? null,
       longitude: location?.longitude ?? null,
       speed: location?.speed ?? 0,
@@ -918,10 +936,12 @@ async function trackByPreview(req, res) {
       return res.status(404).json({ error: "No bus found for preview number" });
     }
 
-    const location = await BusLiveLocation.findOne({ bus_id: bus._id });
+    const effectiveBus = await resolveEffectiveBus(bus);
+    const alteration = buildAlterationDetails(bus, effectiveBus);
+    const location = await BusLiveLocation.findOne({ bus_id: effectiveBus._id });
     const activePlan = await getCurrentGlobalPlan();
     const isBusActiveInCurrentPlan = await BusRoute.exists({
-      bus_id: bus._id,
+      bus_id: effectiveBus._id,
       plan_name: activePlan,
     });
 
@@ -929,18 +949,13 @@ async function trackByPreview(req, res) {
     // so the frontend can show the bus's plan even when GPS is offline.
     // Privacy: return previewNumber to regular users; superadmin may receive bus_no and plan.
     const isSuperadmin = req.user && String(req.user.role || '').toLowerCase() === 'superadmin';
-    const alteration = bus.altered_to_bus_id
-      ? {
-          isAltered: true,
-          message: `This bus has been altered. Please search bus ${bus.altered_to_preview ?? "the new preview number"}.`,
-          newPreview: bus.altered_to_preview ?? null,
-        }
-      : null;
     res.status(200).json({
       success: true,
       busNo: isSuperadmin ? bus.bus_no : String(bus.preview_number ?? bus.bus_no),
       ...(isSuperadmin ? { bus_no: bus.bus_no } : {}),
       previewNumber: bus.preview_number,
+      effectivePreviewNumber: effectiveBus.preview_number,
+      effectiveBusNo: effectiveBus.bus_no,
       currentPlan: null,
       activePlan: isSuperadmin ? activePlan : null,
       isBusActiveInCurrentPlan: !!isBusActiveInCurrentPlan,
