@@ -11,7 +11,9 @@ export const healthCheck = async () => {
     const timeout = setTimeout(() => controller.abort(), 10000);
     let res;
     try {
-      res = await fetch(`${API_BASE_URL}/health`, { signal: controller.signal });
+      res = await fetch(`${API_BASE_URL}/health`, {
+        signal: controller.signal,
+      });
     } finally {
       clearTimeout(timeout);
     }

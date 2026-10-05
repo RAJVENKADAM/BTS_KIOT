@@ -94,7 +94,10 @@ export default function AddBusesScreen() {
       const rawText = await res.text();
       const data = rawText ? JSON.parse(rawText) : {};
       if (res.ok) {
-        const loadedBuses = [...(data.buses || []), ...(data.alteredBuses || [])];
+        const loadedBuses = [
+          ...(data.buses || []),
+          ...(data.alteredBuses || []),
+        ];
         // Sort buses in ascending order by their preview number (numeric comparison with string fallback)
         loadedBuses.sort((a, b) => {
           const numA = Number(a.previewNumber);
@@ -137,7 +140,10 @@ export default function AddBusesScreen() {
               setShowOptionsModal(false);
               await loadBuses();
             } catch (error) {
-              Alert.alert("Restore failed", getErrorMessage(error, "Could not restore bus."));
+              Alert.alert(
+                "Restore failed",
+                getErrorMessage(error, "Could not restore bus."),
+              );
             } finally {
               setRestoringBus(false);
             }
@@ -324,7 +330,11 @@ export default function AddBusesScreen() {
   const handleAlterBus = async (targetBus) => {
     setAlteringBus(true);
     try {
-      const result = await busApi.alterBus(token, selectedBus.busNo, targetBus.busNo);
+      const result = await busApi.alterBus(
+        token,
+        selectedBus.busNo,
+        targetBus.busNo,
+      );
       setShowAlterModal(false);
       await loadBuses();
       Alert.alert(
@@ -438,7 +448,7 @@ export default function AddBusesScreen() {
         </Text>
         {item.isAltered && (
           <Text style={styles.alteredLabel}>
-            Altered → {item.alteredToPreview ?? "—"}
+            Alt by {item.alteredToPreview ?? "—"}
           </Text>
         )}
       </TouchableOpacity>
@@ -475,7 +485,10 @@ export default function AddBusesScreen() {
                 {buses
                   .filter((bus) => bus.isAltered)
                   .map((bus, index) => (
-                    <View key={String(bus.busNo || index)} style={styles.alteredGridItem}>
+                    <View
+                      key={String(bus.busNo || index)}
+                      style={styles.alteredGridItem}
+                    >
                       {renderBus({ item: bus, index })}
                     </View>
                   ))}
@@ -627,7 +640,11 @@ export default function AddBusesScreen() {
               style={styles.optionButton}
               onPress={openAlterBus}
             >
-              <Ionicons name="swap-horizontal-outline" size={20} color={COLORS.primary} />
+              <Ionicons
+                name="swap-horizontal-outline"
+                size={20}
+                color={COLORS.primary}
+              />
               <Text style={styles.optionText}>Alter Bus</Text>
             </TouchableOpacity>
 
@@ -637,7 +654,11 @@ export default function AddBusesScreen() {
                 onPress={handleRestoreAltered}
                 disabled={restoringBus}
               >
-                <Ionicons name="refresh-outline" size={20} color={COLORS.primary} />
+                <Ionicons
+                  name="refresh-outline"
+                  size={20}
+                  color={COLORS.primary}
+                />
                 <Text style={styles.optionText}>
                   {restoringBus ? "Restoring..." : "Restore normal bus"}
                 </Text>
@@ -690,14 +711,20 @@ export default function AddBusesScreen() {
                   onPress={() => handleAlterBus(item)}
                   disabled={alteringBus}
                 >
-                  <Ionicons name="bus-outline" size={20} color={COLORS.primary} />
+                  <Ionicons
+                    name="bus-outline"
+                    size={20}
+                    color={COLORS.primary}
+                  />
                   <Text style={styles.optionText}>
                     Bus {getDisplayBusNumber(item)} ({item.busNo})
                   </Text>
                 </TouchableOpacity>
               )}
               ListEmptyComponent={
-                <Text style={styles.emptyText}>No other active buses available.</Text>
+                <Text style={styles.emptyText}>
+                  No other active buses available.
+                </Text>
               }
             />
             {alteringBus && <ActivityIndicator color={COLORS.primary} />}
@@ -903,7 +930,11 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   title: { fontSize: 13, fontWeight: "700", color: COLORS.textHeader },
-  alteredLabel: { fontSize: 11, color: COLORS.warning || "#B45309", marginTop: 3 },
+  alteredLabel: {
+    fontSize: 11,
+    color: COLORS.warning || "#B45309",
+    marginTop: 3,
+  },
   alteredSectionTitle: {
     fontSize: 16,
     fontWeight: "800",

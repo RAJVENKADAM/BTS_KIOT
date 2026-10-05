@@ -13,3 +13,5 @@ web-build/
 template-files/*
 .expo/
 android/app/build/
+android/
+ios/

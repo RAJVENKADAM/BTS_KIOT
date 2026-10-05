@@ -87,6 +87,21 @@ const calculateDistance = (lat1, lng1, lat2, lng2) => {
   return R * c;
 };
 
+const isGpsStale = (data) => {
+  if (!data) return true;
+
+  const status = String(data.status || "").toLowerCase();
+  if (status === "offline" || data.is_online === false) return true;
+  if (status !== "online" && data.is_online !== true) return true;
+
+  const lastGps = data.lastSuccessfulGpsUpdate;
+  if (!lastGps) return true;
+
+  const timestamp = Date.parse(lastGps);
+  if (!Number.isFinite(timestamp)) return true;
+  return Date.now() - timestamp > 3 * 60 * 1000;
+};
+
 const HomeScreen = () => {
   const { token, user, updateUserData } = useAuth();
   const navigation = useNavigation();
@@ -444,7 +459,13 @@ const HomeScreen = () => {
       if (!data || data.error) return;
       const selected = selectedBusNoRef.current;
       if (!selected) return;
-      if (busData?.isBusActiveInCurrentPlan === false) return;
+      if (!busData) return;
+      if (
+        busData.isBusActiveInCurrentPlan === false ||
+        busData.notActiveMessage
+      ) {
+        return;
+      }
       const incomingBusNo =
         data.busNo ?? data.bus_no ?? data.busNumber ?? data.previewNumber;
       if (!incomingBusNo) return;
@@ -455,37 +476,39 @@ const HomeScreen = () => {
         return;
       }
 
-      const hasValidCoords =
-        data.latitude != null &&
-        data.longitude != null &&
-        Number.isFinite(Number(data.latitude)) &&
-        Number.isFinite(Number(data.longitude)) &&
-        data.latitude !== "NaN" &&
-        data.longitude !== "NaN";
-
-      if (!hasValidCoords) return;
-
-      const live = data.status === "online" || data.is_online === true;
       const nextBusData = {
         ...(busData || {}),
+        ...data,
         busNo: data.busNo ?? data.bus_no ?? selected,
         bus_no: data.bus_no ?? selected,
         previewNumber: data.previewNumber ?? selectedPreviewNumber ?? undefined,
-        latitude: data.latitude,
-        longitude: data.longitude,
-        speed: data.speed ?? 0,
-        source: data.source || "gps",
-        _isOffline: !live,
-        notActiveMessage: live ? null : (data.notActiveMessage ?? null),
-        alteration: data.alteration ?? null,
+        latitude: data.latitude ?? busData?.latitude,
+        longitude: data.longitude ?? busData?.longitude,
+        speed: data.speed ?? busData?.speed ?? 0,
+        source: data.source || busData?.source || "gps",
+        isBusActiveInCurrentPlan:
+          data.isBusActiveInCurrentPlan ?? busData?.isBusActiveInCurrentPlan,
+        notActiveMessage:
+          data.notActiveMessage ?? busData?.notActiveMessage ?? null,
+        alteration: data.alteration ?? busData?.alteration ?? null,
       };
+      const inactive =
+        nextBusData.isBusActiveInCurrentPlan === false ||
+        !!nextBusData.notActiveMessage;
+      const live = !inactive && !isGpsStale(nextBusData);
 
       setBusData(nextBusData);
       setLastGoodLocation(nextBusData);
       setLocationStatus(live ? "live" : "offline");
       setIsOffline(!live);
-      setMarkerStatus(live ? "moving" : "offline");
-      setTrackingError(live ? null : (data.notActiveMessage ?? null));
+      setMarkerStatus(inactive ? "inactive" : live ? "moving" : "offline");
+      setTrackingError(
+        inactive
+          ? "Your bus is inactive."
+          : live
+            ? null
+            : "Bus is offline or no live GPS is available right now.",
+      );
       setNoBusFound(false);
       setIsBusFound(true);
     };
@@ -703,15 +726,6 @@ const HomeScreen = () => {
     return nextStatus;
   };
 
-  const isGpsStale = (data) => {
-    if (!data) return true;
-    if (data.status === "offline") return true;
-    const lastGps = data.lastSuccessfulGpsUpdate;
-    if (!lastGps) return true;
-    const ageMs = Date.now() - new Date(lastGps).getTime();
-    return ageMs > 3 * 60 * 1000;
-  };
-
   const handleRefresh = useCallback(async () => {
     if (!selectedBusNo && !selectedPreviewNumber) return;
     setLocationStatus("loading");
@@ -883,15 +897,16 @@ const HomeScreen = () => {
           return;
         }
 
-        if (
+        const hasValidCoords =
           data &&
           data.latitude != null &&
           data.longitude != null &&
           Number.isFinite(Number(data.latitude)) &&
           Number.isFinite(Number(data.longitude)) &&
           data.latitude !== "NaN" &&
-          data.longitude !== "NaN"
-        ) {
+          data.longitude !== "NaN";
+
+        if (hasValidCoords && !isGpsStale(data)) {
           setBusData({ ...data, source: data.source || "gps" });
           setLastGoodLocation({ ...data, source: data.source || "gps" });
           setLocationStatus("live");
@@ -900,10 +915,15 @@ const HomeScreen = () => {
           setNoBusFound(false);
           setIsBusFound(true);
         } else {
-          setBusData(null);
-          setLastGoodLocation(null);
+          const offlineData = hasValidCoords
+            ? { ...data, source: data.source || "gps" }
+            : null;
+          setBusData(offlineData);
+          setLastGoodLocation(offlineData);
           setLocationStatus("offline");
           setIsOffline(true);
+          setMarkerStatus("offline");
+          setTrackingError("Bus is offline or no live GPS is available right now.");
           setIsBusFound(true);
           setNoBusFound(false);
         }

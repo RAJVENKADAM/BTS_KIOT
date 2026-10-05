@@ -230,10 +230,7 @@ export default function PlanDetailsScreen({ route, navigation }) {
                   <Text style={styles.nearbyMessage}>{nearbyMessage}</Text>
                 )}
                 {items.map((it, idx) => (
-                  <View
-                    key={idx}
-                    style={styles.gridItem}
-                  >
+                  <View key={idx} style={styles.gridItem}>
                     <Text style={styles.gridItemText}>
                       {getDisplayBusNumber(it)}
                     </Text>
@@ -296,7 +293,12 @@ const styles = StyleSheet.create({
   },
   backBtn: { marginRight: 8, padding: 6 },
   title: { fontSize: 18, fontWeight: "700", color: COLORS.textHeader },
-  subtitle: { fontSize: 12, color: COLORS.textBody, marginTop: 3, lineHeight: 17 },
+  subtitle: {
+    fontSize: 12,
+    color: COLORS.textBody,
+    marginTop: 3,
+    lineHeight: 17,
+  },
   nearbyButton: {
     alignItems: "center",
     alignSelf: "flex-start",

@@ -53,7 +53,7 @@ export default function OSMMap({ busData, buses = [], markerStatus = "moving" })
 <html>
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data: https://*.tile.openstreetmap.org; connect-src https://*.tile.openstreetmap.org;" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data: https://*.tile.openstreetmap.org; connect-src https://*.tile.openstreetmap.org https://router.project-osrm.org;" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
@@ -172,6 +172,80 @@ export default function OSMMap({ busData, buses = [], markerStatus = "moving" })
         .addTo(map)
         .bindPopup("KIOT College");
 
+      var routeLayers = [];
+      var routeRequestId = 0;
+      var activeRouteBus = null;
+      var lastRequestedRoute = null;
+      var hasFocusedRoute = false;
+
+      function clearRouteLines() {
+        routeRequestId += 1;
+        routeLayers.forEach(function (layer) {
+          map.removeLayer(layer);
+        });
+        routeLayers = [];
+        lastRequestedRoute = null;
+        hasFocusedRoute = false;
+      }
+
+      function showPossibleRoutes(busKey, lat, lng) {
+        var routeKey = lat + ',' + lng;
+        if (lastRequestedRoute === routeKey) return;
+        lastRequestedRoute = routeKey;
+        var requestId = ++routeRequestId;
+        var url = 'https://router.project-osrm.org/route/v1/driving/' +
+          lng + ',' + lat + ';' + ${KIOT_LNG} + ',' + ${KIOT_LAT} +
+          '?alternatives=true&overview=full&geometries=geojson';
+
+        fetch(url)
+          .then(function (response) {
+            if (!response.ok) throw new Error('Routing service returned ' + response.status);
+            return response.json();
+          })
+          .then(function (data) {
+            if (requestId !== routeRequestId || busKey !== activeRouteBus) return;
+            if (!data || data.code !== 'Ok' || !Array.isArray(data.routes) || !data.routes.length) {
+              throw new Error('No road routes were returned');
+            }
+
+            var bounds = L.latLngBounds([[${KIOT_LAT}, ${KIOT_LNG}], [lat, lng]]);
+            routeLayers.forEach(function (layer) {
+              map.removeLayer(layer);
+            });
+            routeLayers = [];
+
+            var colors = ['#2563eb', '#f97316', '#7c3aed'];
+            data.routes.slice(0, 3).forEach(function (route, index) {
+              var coordinates = route.geometry && route.geometry.coordinates;
+              if (!Array.isArray(coordinates) || coordinates.length < 2) return;
+              var points = coordinates.map(function (point) {
+                return [point[1], point[0]];
+              });
+              var line = L.polyline(points, {
+                color: colors[index % colors.length],
+                weight: index === 0 ? 6 : 4,
+                opacity: index === 0 ? 0.9 : 0.65,
+                dashArray: index === 0 ? null : '8 8',
+                lineCap: 'round',
+                lineJoin: 'round'
+              }).addTo(map);
+              routeLayers.push(line);
+              bounds.extend(line.getBounds());
+            });
+
+            if (routeLayers.length && !hasFocusedRoute) {
+              map.fitBounds(bounds, { padding: [36, 36], maxZoom: 14 });
+              hasFocusedRoute = true;
+            }
+          })
+          .catch(function (error) {
+            if (requestId === routeRequestId) {
+              lastRequestedRoute = null;
+              console.warn('Could not load live road-route alternatives:', error.message);
+            }
+          });
+      }
+
       // Registry for bus markers (key -> marker)
       var busMarkers = {};
 
@@ -240,6 +314,8 @@ function upsertBusMarker(key, lat, lng, offline, status) {
           // Clear all bus markers (cancel search / reset / not found)
           if (data.type === 'CLEAR_MARKERS') {
             clearAllBusMarkers();
+            clearRouteLines();
+            activeRouteBus = null;
             return;
           }
 
@@ -260,6 +336,10 @@ function upsertBusMarker(key, lat, lng, offline, status) {
           if (data.type === 'BUS_LOCATION') {
             clearAllBusMarkers();
             var keySingle = (data.busNo || data.bus_no || data.previewNumber || data.preview_number || 'single').toString();
+            if (activeRouteBus !== keySingle) {
+              clearRouteLines();
+              activeRouteBus = keySingle;
+            }
             upsertBusMarker(
               keySingle,
               data.latitude,
@@ -267,8 +347,14 @@ function upsertBusMarker(key, lat, lng, offline, status) {
               data.isOffline,
               data.markerStatus || data.status
             );
-            // Focus strictly on the bus location
-            focusMap(Number(data.latitude), Number(data.longitude));
+            var busLat = Number(data.latitude);
+            var busLng = Number(data.longitude);
+            if (data.isOffline === true || data.markerStatus === 'inactive') {
+              clearRouteLines();
+            } else if (isFinite(busLat) && isFinite(busLng)) {
+              showPossibleRoutes(keySingle, busLat, busLng);
+              if (!hasFocusedRoute) focusMap(busLat, busLng);
+            }
             return;
           }
         } catch (e) {
@@ -318,13 +404,14 @@ function upsertBusMarker(key, lat, lng, offline, status) {
       style={{ flex: 1, width: "100%", height: "100%" }}
       javaScriptEnabled
       domStorageEnabled
-      originWhitelist={["about:blank", "https://unpkg.com", "https://*.tile.openstreetmap.org"]}
+      originWhitelist={["about:blank", "https://unpkg.com", "https://*.tile.openstreetmap.org", "https://router.project-osrm.org"]}
       automaticallyAdjustContentInsets={false}
       scalesPageToFit={false}
       renderLoading={() => null}
       onShouldStartLoadWithRequest={(request) =>
         request.url === "about:blank" ||
         request.url.startsWith("https://unpkg.com/") ||
+        request.url.startsWith("https://router.project-osrm.org/") ||
         request.url.startsWith("https://a.tile.openstreetmap.org/") ||
         request.url.startsWith("https://b.tile.openstreetmap.org/") ||
         request.url.startsWith("https://c.tile.openstreetmap.org/")
