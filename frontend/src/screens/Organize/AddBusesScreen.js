@@ -63,6 +63,7 @@ export default function AddBusesScreen() {
   const [showOptionsModal, setShowOptionsModal] = useState(false);
   const [selectedBus, setSelectedBus] = useState(null);
   const [showAlterModal, setShowAlterModal] = useState(false);
+  const [busChangeMode, setBusChangeMode] = useState("alter");
   const [alteringBus, setAlteringBus] = useState(false);
   const [restoringBus, setRestoringBus] = useState(false);
 
@@ -127,8 +128,8 @@ export default function AddBusesScreen() {
   const handleRestoreAltered = () => {
     if (!selectedBus?.isAltered) return;
     Alert.alert(
-      "Restore bus",
-      `Restore bus ${getDisplayBusNumber(selectedBus)} to normal?`,
+      "Restore combined bus",
+      `Stop combining bus ${getDisplayBusNumber(selectedBus)} and restore its original preview number?`,
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -322,7 +323,8 @@ export default function AddBusesScreen() {
     }
   };
 
-  const openAlterBus = () => {
+  const openAlterBus = (mode) => {
+    setBusChangeMode(mode);
     setShowOptionsModal(false);
     setShowAlterModal(true);
   };
@@ -330,7 +332,10 @@ export default function AddBusesScreen() {
   const handleAlterBus = async (targetBus) => {
     setAlteringBus(true);
     try {
-      const result = await busApi.alterBus(
+      const changeBus = busChangeMode === "combine"
+        ? busApi.combineBus
+        : busApi.alterBus;
+      const result = await changeBus(
         token,
         selectedBus.busNo,
         targetBus.busNo,
@@ -338,11 +343,19 @@ export default function AddBusesScreen() {
       setShowAlterModal(false);
       await loadBuses();
       Alert.alert(
-        "Bus altered",
-        `Students assigned to ${result.sourceBusNo} were notified about ${result.newBusNo}.`,
+        busChangeMode === "combine" ? "Buses combined" : "Bus altered",
+        `${result.message} ${result.notifiedStudents} student(s) notified.`,
       );
     } catch (e) {
-      Alert.alert("Failed", getErrorMessage(e, "Could not alter the bus."));
+      Alert.alert(
+        "Failed",
+        getErrorMessage(
+          e,
+          busChangeMode === "combine"
+            ? "Could not combine the buses."
+            : "Could not alter the bus.",
+        ),
+      );
     } finally {
       setAlteringBus(false);
     }
@@ -448,7 +461,9 @@ export default function AddBusesScreen() {
         </Text>
         {item.isAltered && (
           <Text style={styles.alteredLabel}>
-            Alt by {item.alteredToPreview ?? "—"}
+            {item.alterationType === "combine"
+              ? `Combined with ${item.alteredToPreview ?? "—"}`
+              : `Altered to ${item.alteredToPreview ?? "—"}`}
           </Text>
         )}
       </TouchableOpacity>
@@ -475,26 +490,52 @@ export default function AddBusesScreen() {
           <Text style={styles.emptyText}>No buses yet. Tap + to add one.</Text>
         }
         ListHeaderComponent={
-          <Text style={styles.alteredSectionTitle}>Normal buses</Text>
+          <Text style={styles.alteredSectionTitle}>Buses</Text>
         }
         ListFooterComponent={
-          buses.some((bus) => bus.isAltered) ? (
-            <View style={styles.alteredSection}>
-              <Text style={styles.alteredSectionTitle}>Altered buses</Text>
-              <View style={styles.alteredGrid}>
-                {buses
-                  .filter((bus) => bus.isAltered)
-                  .map((bus, index) => (
-                    <View
-                      key={String(bus.busNo || index)}
-                      style={styles.alteredGridItem}
-                    >
-                      {renderBus({ item: bus, index })}
-                    </View>
-                  ))}
-              </View>
-            </View>
-          ) : null
+          <>
+            {[
+              {
+                type: "alter",
+                title: "Altered buses",
+                description:
+                  "Only the bus location changes. The original stops, plans, and routes stay the same.",
+              },
+              {
+                type: "combine",
+                title: "Combined buses",
+                description:
+                  "The buses are merged. Users see the replacement bus location and the combined stops, plans, and routes.",
+              },
+            ].map((section) => {
+              const sectionBuses = buses.filter(
+                (bus) =>
+                  bus.isAltered &&
+                  (bus.alterationType || "alter") === section.type,
+              );
+              if (!sectionBuses.length) return null;
+              return (
+                <View key={section.type} style={styles.alteredSection}>
+                  <Text style={styles.alteredSectionTitle}>
+                    {section.title}
+                  </Text>
+                  <Text style={styles.combinedSectionDescription}>
+                    {section.description}
+                  </Text>
+                  <View style={styles.alteredGrid}>
+                    {sectionBuses.map((bus, index) => (
+                      <View
+                        key={String(bus.busNo || index)}
+                        style={styles.alteredGridItem}
+                      >
+                        {renderBus({ item: bus, index })}
+                      </View>
+                    ))}
+                  </View>
+                </View>
+              );
+            })}
+          </>
         }
       />
 
@@ -636,17 +677,44 @@ export default function AddBusesScreen() {
               </Text>
             </TouchableOpacity>
 
-            <TouchableOpacity
-              style={styles.optionButton}
-              onPress={openAlterBus}
-            >
-              <Ionicons
-                name="swap-horizontal-outline"
-                size={20}
-                color={COLORS.primary}
-              />
-              <Text style={styles.optionText}>Alter Bus</Text>
-            </TouchableOpacity>
+            {isSuperadmin &&
+              !selectedBus?.isAltered &&
+              selectedBus?.status === "active" && (
+                <>
+                  <TouchableOpacity
+                    style={styles.optionButton}
+                    onPress={() => openAlterBus("alter")}
+                  >
+                    <Ionicons
+                      name="swap-horizontal-outline"
+                      size={20}
+                      color={COLORS.primary}
+                    />
+                    <View style={styles.optionCopy}>
+                      <Text style={styles.optionText}>Alter Bus</Text>
+                      <Text style={styles.optionHint}>
+                        Change location only; keep original routes.
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.optionButton}
+                    onPress={() => openAlterBus("combine")}
+                  >
+                    <Ionicons
+                      name="git-merge-outline"
+                      size={20}
+                      color={COLORS.primary}
+                    />
+                    <View style={styles.optionCopy}>
+                      <Text style={styles.optionText}>Combine Bus</Text>
+                      <Text style={styles.optionHint}>
+                        Merge routes; use the replacement bus location.
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                </>
+              )}
 
             {isSuperadmin && selectedBus?.isAltered && (
               <TouchableOpacity
@@ -660,7 +728,7 @@ export default function AddBusesScreen() {
                   color={COLORS.primary}
                 />
                 <Text style={styles.optionText}>
-                  {restoringBus ? "Restoring..." : "Restore normal bus"}
+                  {restoringBus ? "Restoring..." : "Restore original bus"}
                 </Text>
               </TouchableOpacity>
             )}
@@ -685,7 +753,7 @@ export default function AddBusesScreen() {
         </View>
       </Modal>
 
-      {/* ================= ALTER BUS MODAL ================= */}
+      {/* ================= ALTER / COMBINE BUS MODAL ================= */}
       <Modal
         transparent
         animationType="fade"
@@ -694,15 +762,20 @@ export default function AddBusesScreen() {
       >
         <View style={styles.overlay}>
           <View style={styles.modalBox}>
-            <Text style={styles.header}>Alter Bus</Text>
+            <Text style={styles.header}>
+              {busChangeMode === "combine" ? "Combine Buses" : "Alter Bus"}
+            </Text>
             <Text style={styles.subHeader}>
-              Select the new bus for {getDisplayBusNumber(selectedBus)}
+              {busChangeMode === "combine"
+                ? "Select the replacement bus. Users will see only its location, plus the merged stops, plans, and routes from both buses. The buses can have different routes."
+                : "Select the replacement bus. Only its location will be used; this bus's original stops, plans, and routes will stay unchanged."}
             </Text>
             <FlatList
               data={buses.filter(
                 (bus) =>
                   bus.busNo !== selectedBus?.busNo &&
-                  bus.busNo !== selectedBus?.busNo,
+                  bus.status === "active" &&
+                  !bus.isAltered,
               )}
               keyExtractor={(item) => String(item.busNo)}
               renderItem={({ item }) => (
@@ -717,13 +790,13 @@ export default function AddBusesScreen() {
                     color={COLORS.primary}
                   />
                   <Text style={styles.optionText}>
-                    Bus {getDisplayBusNumber(item)} ({item.busNo})
+                    Bus {getDisplayBusNumber(item)}
                   </Text>
                 </TouchableOpacity>
               )}
               ListEmptyComponent={
                 <Text style={styles.emptyText}>
-                  No other active buses available.
+                  No other active buses available to combine with.
                 </Text>
               }
             />
@@ -931,9 +1004,18 @@ const styles = StyleSheet.create({
   },
   title: { fontSize: 13, fontWeight: "700", color: COLORS.textHeader },
   alteredLabel: {
-    fontSize: 11,
+    fontSize: 9,
     color: COLORS.warning || "#B45309",
     marginTop: 3,
+    textAlign: "center",
+    paddingHorizontal: 2,
+  },
+  combinedSectionDescription: {
+    color: COLORS.textBody,
+    fontSize: 13,
+    lineHeight: 18,
+    marginTop: -4,
+    marginBottom: 12,
   },
   alteredSectionTitle: {
     fontSize: 16,
@@ -1101,6 +1183,13 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   optionText: { fontSize: 15, color: COLORS.textHeader, fontWeight: "600" },
+  optionCopy: { flex: 1, marginLeft: 12 },
+  optionHint: {
+    color: COLORS.textBody,
+    fontSize: 12,
+    lineHeight: 17,
+    marginTop: 3,
+  },
   deleteButton: { borderColor: "#FECACA", backgroundColor: "#FEF2F2" },
   activePlanButton: { borderColor: COLORS.primary, backgroundColor: "#EEF2FF" },
 });

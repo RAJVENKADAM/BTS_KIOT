@@ -103,6 +103,13 @@ router.post(
   BusController.alterBus
 );
 
+router.post(
+  '/combine-bus/:busNo',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  BusController.combineBus
+);
+
 router.put(
   '/restore-altered/:busNo',
   authenticateToken,

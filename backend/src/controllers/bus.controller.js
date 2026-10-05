@@ -5,6 +5,7 @@ const AppSetting = require("../models/AppSetting");
 const User = require("../models/User");
 const Notification = require("../models/Notification");
 const { getIO } = require("../socket");
+const mergeBusRoutes = require("../utils/mergeBusRoutes");
 
 const GLOBAL_ACTIVE_PLAN_KEY = "global_active_plan";
 const DEFAULT_PLAN_NAMES = ["PLAN A", "PLAN B", "PLAN C", "PLAN D"];
@@ -111,13 +112,55 @@ function buildAlterationDetails(sourceBus, effectiveBus) {
     return null;
   }
 
+  const oldPreview = sourceBus.preview_number ?? "your current bus";
+  const newPreview = effectiveBus.preview_number ?? "the replacement bus";
+  const isCombined = sourceBus.alteration_type === "combine";
   return {
     isAltered: true,
-    message: `Your bus ${sourceBus.preview_number ?? sourceBus.bus_no} is altered. Showing bus ${effectiveBus.preview_number ?? effectiveBus.bus_no} location until it is restored.`,
+    alterationType: sourceBus.alteration_type || "alter",
+    message: isCombined
+      ? `Bus ${oldPreview} is combined with bus ${newPreview}. The service includes their merged stops, plans, and routes and uses bus ${newPreview}'s location.`
+      : `Bus ${oldPreview} is altered to use bus ${newPreview}'s location. Your original stops and plans are unchanged.`,
     newPreview: effectiveBus.preview_number ?? null,
-    effectiveBusNo: effectiveBus.bus_no,
     effectivePreview: effectiveBus.preview_number ?? null,
   };
+}
+
+const hasRouteForPlan = (routes, planName) =>
+  routes.some(
+    (route) => route.plan_name.toUpperCase() === planName.toUpperCase(),
+  );
+
+async function getRoutesForBus(bus) {
+  const sourceRoutes = await BusRoute.find({ bus_id: bus._id })
+    .select("plan_name stop_name stop_order")
+    .sort({ plan_name: 1, stop_order: 1 })
+    .lean();
+  if (!bus.altered_to_bus_id || bus.alteration_type !== "combine") {
+    return sourceRoutes;
+  }
+
+  const targetRoutes = await BusRoute.find({
+    bus_id: bus.altered_to_bus_id,
+  })
+    .select("plan_name stop_name stop_order")
+    .sort({ plan_name: 1, stop_order: 1 })
+    .lean();
+  return mergeBusRoutes(sourceRoutes, targetRoutes);
+}
+
+async function findStudentsAssignedToBus(bus) {
+  const identifiers = [bus.bus_no];
+  if (bus.preview_number != null) identifiers.push(String(bus.preview_number));
+  return User.find({
+    bus_no: {
+      $in: identifiers.map(
+        (identifier) => new RegExp(`^${escapeRegExp(identifier)}$`, "i"),
+      ),
+    },
+    role: "student",
+    is_active: true,
+  }).select("_id bus_no");
 }
 
 // ================= UPLOAD BUS ROUTES =================
@@ -252,6 +295,9 @@ async function getAllBuses(req, res) {
         alteredToPreview: bus.altered_to_preview ?? null,
         alteredAt: bus.altered_at ?? null,
         isAltered: !!bus.altered_to_bus_id,
+        alterationType: bus.altered_to_bus_id
+          ? bus.alteration_type || "alter"
+          : null,
       };
     });
 
@@ -549,7 +595,7 @@ async function setGlobalActivePlan(req, res) {
   }
 }
 
-async function alterBus(req, res) {
+async function changeBus(req, res, alterationType) {
   try {
     const sourceBus = await findBusByIdentifier(req.params.busNo);
     const targetBus = await findBusByIdentifier(req.body?.newBusNo);
@@ -565,37 +611,42 @@ async function alterBus(req, res) {
     if (sourceBus._id.equals(targetBus._id)) {
       return res.status(400).json({ success: false, error: 'Choose a different bus.' });
     }
-    const targetEffectiveBus = await resolveEffectiveBus(targetBus);
-    if (sourceBus._id.equals(targetEffectiveBus._id)) {
+    if (sourceBus.altered_to_bus_id) {
       return res.status(400).json({
         success: false,
-        error: 'This alteration would create a circular bus chain.',
+        error: 'Restore this bus before choosing another replacement.',
+      });
+    }
+    if (sourceBus.status !== 'active') {
+      return res.status(400).json({
+        success: false,
+        error: 'Only an active bus can be changed.',
+      });
+    }
+    if (targetBus.status !== 'active' || targetBus.altered_to_bus_id) {
+      return res.status(400).json({
+        success: false,
+        error: 'Choose an active bus that is not already altered or combined.',
+      });
+    }
+    if (!sourceBus.preview_number || !targetBus.preview_number) {
+      return res.status(400).json({
+        success: false,
+        error: 'Both buses need a preview number before they can be changed.',
       });
     }
 
-    // A bus may be used by multiple altered buses, and an altered bus may
-    // itself be selected as the source or target of another alteration.
+    const users = await findStudentsAssignedToBus(sourceBus);
 
-    const sourceIdentifiers = [sourceBus.bus_no];
-    if (sourceBus.preview_number != null) {
-      sourceIdentifiers.push(String(sourceBus.preview_number));
-    }
-    const users = await User.find({
-      bus_no: {
-        $in: sourceIdentifiers.map(
-          (identifier) => new RegExp(`^${escapeRegExp(identifier)}$`, "i"),
-        ),
-      },
-      role: 'student',
-      is_active: true,
-    }).select('_id bus_no');
-
-    // Use preview numbers for user-facing messages. Keep internal bus_no stored for audit.
-    const previewMessage = `Bus ${sourceBus.preview_number ?? ''} altered with bus ${targetBus.preview_number ?? 'a different bus'}.`;
+    const isCombined = alterationType === "combine";
+    const notificationType = isCombined ? "bus_combined" : "bus_altered";
+    const previewMessage = isCombined
+      ? `Bus ${sourceBus.preview_number} is combined with bus ${targetBus.preview_number}. The service includes their merged stops, plans, and routes and uses bus ${targetBus.preview_number}'s location.`
+      : `Bus ${sourceBus.preview_number} is altered to use bus ${targetBus.preview_number}'s location. Your stops and plans remain unchanged.`;
 
     const notifications = users.map((user) => ({
       user_id: user._id,
-      type: 'bus_altered',
+      type: notificationType,
       message: previewMessage,
       old_bus_no: sourceBus.bus_no,
       new_bus_no: targetBus.bus_no,
@@ -608,6 +659,7 @@ async function alterBus(req, res) {
     sourceBus.status = "inactive";
     sourceBus.altered_to_bus_id = targetBus._id;
     sourceBus.altered_to_preview = targetBus.preview_number ?? null;
+    sourceBus.alteration_type = alterationType;
     sourceBus.altered_at = new Date();
     await sourceBus.save();
 
@@ -617,24 +669,45 @@ async function alterBus(req, res) {
         // Emit a privacy-preserving notification: include preview numbers only so the student
         // can be informed without revealing internal bus numbers.
         io.to(`user_${user._id.toString()}`).emit('notification', {
-          type: 'bus_altered',
+          type: notificationType,
           message: previewMessage,
           oldPreview: sourceBus.preview_number ?? null,
           newPreview: targetBus.preview_number ?? null,
         });
       });
     }
+    if (io) {
+      io.emit("bus-update", {
+        actionType: isCombined ? "BUS_COMBINED" : "BUS_ALTERED",
+        oldPreview: sourceBus.preview_number,
+        newPreview: targetBus.preview_number,
+      });
+    }
 
     res.json({
       success: true,
+      message: previewMessage,
       sourceBusNo: sourceBus.bus_no,
       newBusNo: targetBus.bus_no,
+      sourcePreview: sourceBus.preview_number,
+      newPreview: targetBus.preview_number,
       notifiedStudents: users.length,
     });
   } catch (error) {
-    console.error('alterBus error:', error);
-    res.status(500).json({ success: false, error: 'Failed to alter the bus.' });
+    console.error(`${alterationType} bus error:`, error);
+    res.status(500).json({
+      success: false,
+      error: `Failed to ${alterationType} the bus.`,
+    });
   }
+}
+
+async function alterBus(req, res) {
+  return changeBus(req, res, "alter");
+}
+
+async function combineBus(req, res) {
+  return changeBus(req, res, "combine");
 }
 
 async function restoreAlteredBus(req, res) {
@@ -644,17 +717,48 @@ async function restoreAlteredBus(req, res) {
       return res.status(404).json({ success: false, error: "Bus not found." });
     }
     if (!bus.altered_to_bus_id) {
-      return res.status(400).json({ success: false, error: "This bus is not altered." });
+      return res.status(400).json({ success: false, error: "This bus is not combined." });
     }
 
+    const replacementBus = await Bus.findById(bus.altered_to_bus_id);
+    const previousPreview =
+      replacementBus?.preview_number ?? bus.altered_to_preview ?? null;
+    const alterationType = bus.alteration_type || "alter";
+    const notificationType =
+      alterationType === "combine" ? "bus_combined" : "bus_altered";
+    const users = await findStudentsAssignedToBus(bus);
     bus.status = "active";
     bus.altered_to_bus_id = null;
     bus.altered_to_preview = null;
+    bus.alteration_type = null;
     bus.altered_at = null;
     await bus.save();
 
+    const message =
+      alterationType === "combine"
+        ? `The combined service with bus ${previousPreview ?? "replacement"} has ended. Your original bus plans and stops are restored.`
+        : `The bus alteration with bus ${previousPreview ?? "replacement"} has ended. Your original bus is restored.`;
+    const notifications = users.map((user) => ({
+      user_id: user._id,
+      type: notificationType,
+      message,
+      old_bus_no: replacementBus?.bus_no ?? null,
+      new_bus_no: bus.bus_no,
+      old_preview: previousPreview,
+      new_preview: bus.preview_number ?? null,
+    }));
+    if (notifications.length) await Notification.insertMany(notifications);
+
     const io = getIO();
     if (io) {
+      users.forEach((user) => {
+        io.to(`user_${user._id.toString()}`).emit("notification", {
+          type: notificationType,
+          message,
+          oldPreview: previousPreview,
+          newPreview: bus.preview_number ?? null,
+        });
+      });
       io.emit("bus-update", {
         actionType: "BUS_RESTORED",
         previewNumber: bus.preview_number,
@@ -662,14 +766,15 @@ async function restoreAlteredBus(req, res) {
     }
     return res.json({
       success: true,
-      message: `Bus ${bus.preview_number ?? ""} restored.`,
+      message,
       previewNumber: bus.preview_number,
+      notifiedStudents: users.length,
     });
   } catch (error) {
     console.error("restoreAlteredBus error:", error);
     return res
       .status(500)
-      .json({ success: false, error: "Failed to restore altered bus." });
+      .json({ success: false, error: "Failed to restore combined bus." });
   }
 }
 
@@ -685,9 +790,7 @@ async function getBusRoutes(req, res) {
         .json({ success: false, error: `Bus ${busNo} not found` });
     }
 
-    const routes = await BusRoute.find({ bus_id: bus._id })
-      .sort({ plan_name: 1, stop_order: 1 })
-      .lean();
+    const routes = await getRoutesForBus(bus);
 
     const plansMap = {};
     for (const r of routes) {
@@ -702,10 +805,7 @@ async function getBusRoutes(req, res) {
     const activePlanKey = Object.keys(plansMap).find(
       (name) => name.toUpperCase() === activePlan.toUpperCase(),
     );
-    const isBusActiveInCurrentPlan = await BusRoute.exists({
-      bus_id: bus._id,
-      plan_name: new RegExp(`^${escapeRegExp(activePlan)}$`, "i"),
-    });
+    const isBusActiveInCurrentPlan = hasRouteForPlan(routes, activePlan);
 
     const isSuperadmin = req.user && String(req.user.role || '').toLowerCase() === 'superadmin';
     res.json({
@@ -844,17 +944,14 @@ async function getLiveLocation(req, res) {
     const alteration = buildAlterationDetails(bus, effectiveBus);
     const location = await BusLiveLocation.findOne({ bus_id: effectiveBus._id });
     const activePlan = await getCurrentGlobalPlan();
-    const activeStops = await BusRoute.find({
-      bus_id: bus._id,
-      plan_name: new RegExp(`^${escapeRegExp(activePlan)}$`, "i"),
-    })
-      .sort({ stop_order: 1 })
-      .select("stop_name stop_order")
-      .lean();
-    const isBusActiveInCurrentPlan = await BusRoute.exists({
-      bus_id: bus._id,
-      plan_name: new RegExp(`^${escapeRegExp(activePlan)}$`, "i"),
-    });
+    const routes = await getRoutesForBus(bus);
+    const activeStops = routes
+      .filter(
+        (route) =>
+          route.plan_name.toUpperCase() === activePlan.toUpperCase(),
+      )
+      .map(({ stop_name, stop_order }) => ({ stop_name, stop_order }));
+    const isBusActiveInCurrentPlan = activeStops.length > 0;
 
     // Privacy: only superadmin may receive internal bus_no in responses.
     const isSuperadmin = req.user && String(req.user.role || '').toLowerCase() === 'superadmin';
@@ -877,7 +974,7 @@ async function getLiveLocation(req, res) {
       activePlan,
       isBusActiveInCurrentPlan: !!isBusActiveInCurrentPlan,
       notActiveMessage: isBusActiveInCurrentPlan ? null : buildNotActiveMessage(activePlan),
-      previewNumber: bus.preview_number,
+      previewNumber: effectiveBus.preview_number,
       effectivePreviewNumber: effectiveBus.preview_number,
       effectiveBusNo: effectiveBus.bus_no,
       latitude: location?.latitude ?? null,
@@ -935,10 +1032,8 @@ async function trackByPreview(req, res) {
     const alteration = buildAlterationDetails(bus, effectiveBus);
     const location = await BusLiveLocation.findOne({ bus_id: effectiveBus._id });
     const activePlan = await getCurrentGlobalPlan();
-    const isBusActiveInCurrentPlan = await BusRoute.exists({
-      bus_id: bus._id,
-      plan_name: new RegExp(`^${escapeRegExp(activePlan)}$`, "i"),
-    });
+    const routes = await getRoutesForBus(bus);
+    const isBusActiveInCurrentPlan = hasRouteForPlan(routes, activePlan);
 
     // Bus found → always return 200 with offline status if no location doc,
     // so the frontend can show the bus's plan even when GPS is offline.
@@ -948,7 +1043,7 @@ async function trackByPreview(req, res) {
       success: true,
       busNo: isSuperadmin ? bus.bus_no : String(bus.preview_number ?? bus.bus_no),
       ...(isSuperadmin ? { bus_no: bus.bus_no } : {}),
-      previewNumber: bus.preview_number,
+      previewNumber: effectiveBus.preview_number,
       effectivePreviewNumber: effectiveBus.preview_number,
       effectiveBusNo: effectiveBus.bus_no,
       currentPlan: activePlan,
@@ -993,5 +1088,6 @@ module.exports = {
   getLiveLocation,
   trackByPreview,
   alterBus,
+  combineBus,
   restoreAlteredBus,
 };

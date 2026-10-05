@@ -9,7 +9,11 @@ import { WebView } from "react-native-webview";
 const KIOT_LAT = 11.554528;
 const KIOT_LNG = 78.019759;
 
-export default function OSMMap({ busData, buses = [], markerStatus = "moving" }) {
+export default function OSMMap({
+  busData,
+  buses = [],
+  markerStatus = "moving",
+}) {
   const webRef = useRef(null);
 
   // Push multi-bus payload + selected bus payload (legacy) to WebView
@@ -26,13 +30,17 @@ export default function OSMMap({ busData, buses = [], markerStatus = "moving" })
     // - Otherwise send only THIS bus's marker. The map clears all existing
     //   markers before rendering the single one (see CLEAR before upsert in
     //   the WebView JS), so only the searched bus ever shows.
-    if (
-      !busData ||
-      busData.latitude == null ||
-      busData.longitude == null ||
-      !Number.isFinite(Number(busData.latitude)) ||
-      !Number.isFinite(Number(busData.longitude))
-    ) {
+    if (!busData) {
+      webRef.current.postMessage(JSON.stringify({ type: "CLEAR_MARKERS" }));
+      return;
+    }
+
+    const hasPrimaryLocation =
+      busData.latitude != null &&
+      busData.longitude != null &&
+      Number.isFinite(Number(busData.latitude)) &&
+      Number.isFinite(Number(busData.longitude));
+    if (!hasPrimaryLocation) {
       webRef.current.postMessage(JSON.stringify({ type: "CLEAR_MARKERS" }));
       return;
     }
@@ -61,7 +69,19 @@ export default function OSMMap({ busData, buses = [], markerStatus = "moving" })
     html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #fff; }
     #map { width: 100%; height: 100%; }
     .leaflet-container { background: transparent; }
-    .bus-marker { width: 22px; height: 22px; }
+    .bus-marker { position: relative; width: 22px; height: 22px; }
+    .bus-marker-label {
+      position: absolute;
+      left: 19px;
+      top: -4px;
+      padding: 2px 5px;
+      border-radius: 8px;
+      background: #fff;
+      color: #111827;
+      font: 700 11px/14px Arial, sans-serif;
+      white-space: nowrap;
+      box-shadow: 0 1px 4px rgba(15, 23, 42, .35);
+    }
     .college-marker {
       width: 24px;
       height: 24px;
@@ -253,18 +273,30 @@ export default function OSMMap({ busData, buses = [], markerStatus = "moving" })
         return typeof x === 'number' && isFinite(x);
       }
 
-      function busIconHtml(offline, status) {
+      function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, function (character) {
+          return {
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;',
+          }[character];
+        });
+      }
+
+      function busIconHtml(offline, status, label) {
         var className = offline || status === 'inactive' || status === 'offline'
           ? 'bus-offline'
           : (status === 'waiting' || status === 'stopped' ? 'bus-waiting' : 'bus-pulse');
-        return '<div class="bus-marker ' + className + '"></div>';
+        return '<div class="bus-marker"><span class="' + className + '"></span><span class="bus-marker-label">' + escapeHtml(label) + '</span></div>';
       }
 
-      function createBusMarker(offline, status) {
+      function createBusMarker(offline, status, label) {
         var icon = L.divIcon({
           className: '',
-          html: busIconHtml(offline, status),
-          iconSize: [22, 22],
+          html: busIconHtml(offline, status, label),
+          iconSize: [100, 24],
           iconAnchor: [11, 11],
         });
 
@@ -281,12 +313,12 @@ function upsertBusMarker(key, lat, lng, offline, status) {
   if (!isFiniteNumber(lat) || !isFiniteNumber(lng)) return;
   var marker = busMarkers[key];
   if (!marker) {
-    busMarkers[key] = createBusMarker(offline, status);
+    busMarkers[key] = createBusMarker(offline, status, key);
     marker = busMarkers[key];
   } else if (!!marker._isOffline !== !!offline || marker._status !== status) {
     // Status changed — recreate marker with the correct color.
           map.removeLayer(marker);
-          busMarkers[key] = createBusMarker(offline, status);
+          busMarkers[key] = createBusMarker(offline, status, key);
           marker = busMarkers[key];
         }
         marker.setLatLng([lat, lng]);
@@ -322,6 +354,8 @@ function upsertBusMarker(key, lat, lng, offline, status) {
           // Multi-bus payload — clear stale markers first, then render each.
           if (data.type === 'BUSES_LOCATION' && Array.isArray(data.buses)) {
             clearAllBusMarkers();
+            clearRouteLines();
+            activeRouteBus = null;
             data.buses.forEach(function (b) {
               if (!b) return;
               var key = (b.busNo || b.bus_no || b.previewNumber || b.preview_number || '').toString();
@@ -335,7 +369,7 @@ function upsertBusMarker(key, lat, lng, offline, status) {
           // markers so a previously searched bus never lingers on the map.
           if (data.type === 'BUS_LOCATION') {
             clearAllBusMarkers();
-            var keySingle = (data.busNo || data.bus_no || data.previewNumber || data.preview_number || 'single').toString();
+            var keySingle = (data.previewNumber || data.preview_number || data.busNo || data.bus_no || 'single').toString();
             if (activeRouteBus !== keySingle) {
               clearRouteLines();
               activeRouteBus = keySingle;
@@ -404,7 +438,12 @@ function upsertBusMarker(key, lat, lng, offline, status) {
       style={{ flex: 1, width: "100%", height: "100%" }}
       javaScriptEnabled
       domStorageEnabled
-      originWhitelist={["about:blank", "https://unpkg.com", "https://*.tile.openstreetmap.org", "https://router.project-osrm.org"]}
+      originWhitelist={[
+        "about:blank",
+        "https://unpkg.com",
+        "https://*.tile.openstreetmap.org",
+        "https://router.project-osrm.org",
+      ]}
       automaticallyAdjustContentInsets={false}
       scalesPageToFit={false}
       renderLoading={() => null}

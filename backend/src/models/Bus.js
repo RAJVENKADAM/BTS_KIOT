@@ -46,6 +46,11 @@ const busSchema = new mongoose.Schema(
       type: String,
       default: null
     },
+    alteration_type: {
+      type: String,
+      enum: ['alter', 'combine'],
+      default: null
+    },
     altered_at: {
       type: Date,
       default: null

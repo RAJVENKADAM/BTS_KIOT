@@ -2,6 +2,24 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Bus = require('../models/Bus');
 
+const getAssignedBusPreview = async (busNo) => {
+  if (!busNo) return null;
+
+  let bus = await Bus.findOne({ bus_no: busNo })
+    .select('preview_number altered_to_bus_id')
+    .lean();
+  let depth = 0;
+  while (bus?.altered_to_bus_id && depth < 20) {
+    const nextBus = await Bus.findById(bus.altered_to_bus_id)
+      .select('preview_number altered_to_bus_id')
+      .lean();
+    if (!nextBus) break;
+    bus = nextBus;
+    depth += 1;
+  }
+  return bus?.preview_number ?? null;
+};
+
 const login = async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -60,9 +78,7 @@ const login = async (req, res) => {
       { expiresIn: '24h' }
     );
 
-    const assignedBus = user.bus_no
-      ? await Bus.findOne({ bus_no: user.bus_no }).select('preview_number').lean()
-      : null;
+    const assignedBusPreview = await getAssignedBusPreview(user.bus_no);
 
     // Return user data and token
     res.status(200).json({
@@ -74,7 +90,7 @@ const login = async (req, res) => {
         email: user.email,
         role: user.role,
         bus_no: user.bus_no,
-        previewNumber: assignedBus?.preview_number ?? null,
+        previewNumber: assignedBusPreview,
         is_active: user.is_active,
         temp_password: user.temp_password
       }
@@ -100,9 +116,7 @@ const getProfile = async (req, res) => {
       });
     }
 
-    const assignedBus = user.bus_no
-      ? await Bus.findOne({ bus_no: user.bus_no }).select('preview_number').lean()
-      : null;
+    const assignedBusPreview = await getAssignedBusPreview(user.bus_no);
 
     res.status(200).json({
       user: {
@@ -111,7 +125,7 @@ const getProfile = async (req, res) => {
         email: user.email,
         role: user.role,
         bus_no: user.bus_no,
-        previewNumber: assignedBus?.preview_number ?? null,
+        previewNumber: assignedBusPreview,
         is_active: user.is_active,
         temp_password: user.temp_password,
         created_at: user.createdAt
