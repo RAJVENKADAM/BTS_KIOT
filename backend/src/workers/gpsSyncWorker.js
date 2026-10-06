@@ -4,6 +4,26 @@ const User = require("../models/User");
 const gpsService = require("../services/gpsService");
 const { getIO } = require("../socket");
 
+const distanceMeters = (pointA, pointB) => {
+  const radians = (degrees) => (degrees * Math.PI) / 180;
+  const latitudeA = radians(Number(pointA.latitude));
+  const latitudeB = radians(Number(pointB.latitude));
+  const latitudeDelta = latitudeB - latitudeA;
+  const longitudeDelta =
+    radians(Number(pointB.longitude) - Number(pointA.longitude));
+  const haversine =
+    Math.sin(latitudeDelta / 2) ** 2 +
+    Math.cos(latitudeA) *
+      Math.cos(latitudeB) *
+      Math.sin(longitudeDelta / 2) ** 2;
+  const boundedHaversine = Math.max(0, Math.min(1, haversine));
+  return (
+    2 *
+    6371000 *
+    Math.atan2(Math.sqrt(boundedHaversine), Math.sqrt(1 - boundedHaversine))
+  );
+};
+
 async function updateOnlineStateBasedOnStaleness({ busId, staleThresholdMs }) {
   const doc = await BusLiveLocation.findOne({ bus_id: busId }).select(
     "lastSuccessfulGpsUpdate is_online",
@@ -133,6 +153,24 @@ class GpsSyncWorker {
           : null;
 
         if (location) {
+          const previousLocation = await BusLiveLocation.findOne({
+            bus_id: busId,
+          })
+            .select("latitude longitude lastSuccessfulGpsUpdate")
+            .lean();
+          const previousTimestamp = previousLocation?.lastSuccessfulGpsUpdate
+            ? new Date(previousLocation.lastSuccessfulGpsUpdate).getTime()
+            : NaN;
+          const elapsedSeconds = (now.getTime() - previousTimestamp) / 1000;
+          const hasPreviousPoint =
+            Number.isFinite(Number(previousLocation?.latitude)) &&
+            Number.isFinite(Number(previousLocation?.longitude)) &&
+            Number.isFinite(elapsedSeconds) &&
+            elapsedSeconds > 0 &&
+            elapsedSeconds <= this.staleThresholdMs / 1000;
+          const derivedSpeedKmh = hasPreviousPoint
+            ? (distanceMeters(previousLocation, location) / elapsedSeconds) * 3.6
+            : null;
           await BusLiveLocation.updateOne(
             { bus_id: busId },
             {
@@ -140,6 +178,10 @@ class GpsSyncWorker {
                 latitude: location.latitude,
                 longitude: location.longitude,
                 speed: location.speed,
+                speedKmh:
+                  derivedSpeedKmh != null && derivedSpeedKmh <= 150
+                    ? derivedSpeedKmh
+                    : null,
                 is_online: true,
                 lastSuccessfulGpsUpdate: now,
                 lastUpdated: now,
@@ -203,6 +245,8 @@ class GpsSyncWorker {
         };
 
         if (io) {
+          io.to(`master_${String(busId)}`).emit("locationUpdate", publicPayload);
+
           // Emit to public preview room only if preview number exists.
           if (bus.preview_number != null) {
             const room = `preview_${String(bus.preview_number)}`;

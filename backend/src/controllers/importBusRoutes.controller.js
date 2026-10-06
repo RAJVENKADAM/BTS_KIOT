@@ -1,5 +1,8 @@
 const Bus = require('../models/Bus');
 const BusRoute = require('../models/BusRoute');
+const StopMaster = require('../models/StopMaster');
+const { randomUUID } = require("node:crypto");
+const normalizeStopNameKey = require("../utils/normalizeStopName");
 
 function isNonEmptyString(v) {
   return typeof v === 'string' && v.trim().length > 0;
@@ -90,34 +93,19 @@ async function importBusRoutes(req, res) {
 
     const gps_device_id = isNonEmptyString(gpsId) ? gpsId : deviceId;
 
-    // Upsert bus first
-    const busFilter = { bus_no: normalizedBusNoValue };
-    const busUpdate = {
-      $set: {
-        bus_name: busNo,
-        gps_device_id,
-        reg_no: regNo || null,
-        preview_number: previewNumber || null,
-        status: 'active',
-      },
-    };
-
-    await Bus.findOneAndUpdate(busFilter, busUpdate, { upsert: true, new: true });
-    const bus = await Bus.findOne({ bus_no: normalizedBusNoValue });
-    if (!bus) throw new Error('Bus upsert failed');
-
     // Validate and normalize route rows
     const normalizedStops = allStops.map((row, idx) => {
       try {
         const plan_name = normalizePlanName(row.plan_name);
         const stop_name = normalizeStopName(row.stop_name);
         const stop_order = normalizeStopOrder(row.stop_order);
+        const stopId = row.stopId || row.stop_id || null;
 
         if (!plan_name) throw new Error('Invalid plan_name');
         if (!stop_name) throw new Error('Invalid stop_name');
-        if (stop_order === null) throw new Error('Invalid stop_order');
+        if (stop_order === null || stop_order < 1) throw new Error('Invalid stop_order');
 
-        return { ok: true, idx, value: { bus_id: bus._id, plan_name, stop_name, stop_order } };
+        return { ok: true, idx, value: { plan_name, stop_name, stop_order, stopId } };
       } catch (e) {
         return { ok: false, idx, error: e.message || 'Validation error' };
       }
@@ -138,13 +126,71 @@ async function importBusRoutes(req, res) {
       return res.status(400).json({ success: false, summary, error: 'All route rows failed validation' });
     }
 
+    const masterStops = await StopMaster.find({})
+      .select("stopId name")
+      .lean();
+    const stopsByName = new Map();
+    const stopsById = new Map(masterStops.map((stop) => [stop.stopId, stop]));
+    masterStops.forEach((stop) => {
+      const key = normalizeStopNameKey(stop.name);
+      stopsByName.set(key, [...(stopsByName.get(key) || []), stop]);
+    });
+    const pendingStopsByName = new Map();
+    const resolvedStops = [];
+    for (const row of good) {
+      let stop = row.stopId ? stopsById.get(String(row.stopId)) : null;
+      if (!stop) {
+        const matches = stopsByName.get(normalizeStopNameKey(row.stop_name)) || [];
+        if (matches.length > 1) {
+          return res.status(400).json({
+            success: false,
+            error: `Stop "${row.stop_name}" matches multiple Stop Master names; rename the duplicate entries before importing this route.`,
+          });
+        }
+        stop = matches[0];
+      }
+
+      if (!stop) {
+        const key = normalizeStopNameKey(row.stop_name);
+        stop = pendingStopsByName.get(key);
+        if (!stop) {
+          stop = await StopMaster.create({
+            stopId: `STOP-${randomUUID()}`,
+            name: row.stop_name.trim().replace(/\s+/g, " "),
+            source: "EXISTING_STOP",
+            status: "PENDING",
+          });
+          pendingStopsByName.set(key, stop);
+        }
+      }
+      resolvedStops.push({ ...row, stopId: stop.stopId, stop_name: stop.name });
+    }
+
+    const busFilter = { bus_no: normalizedBusNoValue };
+    const busUpdate = {
+      $set: {
+        bus_name: busNo,
+        gps_device_id,
+        reg_no: regNo || null,
+        preview_number: previewNumber || null,
+        status: 'active',
+      },
+    };
+    await Bus.findOneAndUpdate(busFilter, busUpdate, { upsert: true, new: true });
+    const bus = await Bus.findOne({ bus_no: normalizedBusNoValue });
+    if (!bus) throw new Error('Bus upsert failed');
+    const goodWithBus = resolvedStops.map((row) => ({
+      ...row,
+      bus_id: bus._id,
+    }));
+
     // If replaceRoutes is set, remove existing routes so edits fully replace old data.
     if (replaceRoutes) {
       await BusRoute.deleteMany({ bus_id: bus._id });
     }
 
     // Bus created/updated with no routes → success (routes can be added later).
-    if (!good.length) {
+    if (!goodWithBus.length) {
       return res.status(200).json({
         success: true,
         busNo: normalizedBusNoValue,
@@ -154,28 +200,28 @@ async function importBusRoutes(req, res) {
     }
 
     // Existing routes for upsert comparison
-    const existing = await BusRoute.find({ bus_id: bus._id, plan_name: { $in: Array.from(new Set(good.map((g) => g.plan_name))) } }).lean();
+    const existing = await BusRoute.find({ bus_id: bus._id, plan_name: { $in: Array.from(new Set(goodWithBus.map((g) => g.plan_name))) } }).lean();
     const existingKeyToRow = new Map(
       existing.map((r) => [buildRouteKey(bus._id.toString(), r.plan_name, r.stop_order), r])
     );
 
     const ops = [];
 
-    for (const row of good) {
+    for (const row of goodWithBus) {
       const key = buildRouteKey(bus._id.toString(), row.plan_name, row.stop_order);
       const cur = existingKeyToRow.get(key);
       if (!cur) {
         ops.push({
           updateOne: {
             filter: { bus_id: bus._id, plan_name: row.plan_name, stop_order: row.stop_order },
-            update: { $set: { bus_id: bus._id, plan_name: row.plan_name, stop_name: row.stop_name, stop_order: row.stop_order } },
+            update: { $set: { bus_id: bus._id, plan_name: row.plan_name, stop_name: row.stop_name, stop_order: row.stop_order, stopId: row.stopId } },
             upsert: true,
           },
         });
         continue;
       }
 
-      const unchanged = cur.stop_name === row.stop_name && cur.stop_order === row.stop_order && cur.plan_name === row.plan_name;
+      const unchanged = cur.stop_name === row.stop_name && cur.stop_order === row.stop_order && cur.plan_name === row.plan_name && cur.stopId === row.stopId;
       if (unchanged) {
         summary.unchangedRows += 1;
         continue;
@@ -184,7 +230,7 @@ async function importBusRoutes(req, res) {
       ops.push({
         updateOne: {
           filter: { bus_id: bus._id, plan_name: row.plan_name, stop_order: row.stop_order },
-          update: { $set: { stop_name: row.stop_name } },
+          update: { $set: { stop_name: row.stop_name, stopId: row.stopId } },
           upsert: false,
         },
       });
@@ -208,4 +254,3 @@ async function importBusRoutes(req, res) {
 }
 
 module.exports = { importBusRoutes };
-

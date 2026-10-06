@@ -11,9 +11,13 @@ import {
   ActivityIndicator,
   ScrollView,
   Dimensions,
+  Platform,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import * as DocumentPicker from "expo-document-picker";
+import * as FileSystem from "expo-file-system/legacy";
+import * as Sharing from "expo-sharing";
+import XLSX from "xlsx";
 import { importBusRoutesExcelJson } from "../../api/importApi";
 import { useAuth } from "../../context/AuthContext";
 import { COLORS } from "../../theme";
@@ -26,6 +30,7 @@ import {
 } from "../../utils/excelImport";
 import { getErrorMessage } from "../../utils/errorHandler";
 import { getDisplayBusNumber } from "../../utils/busDisplay";
+import { stopApi } from "../../api/stopApi";
 
 const SCREEN_WIDTH = Dimensions.get("window").width;
 // Calculate item width for exactly 5 per row with clean spacing
@@ -41,6 +46,14 @@ const normalizePlans = (plans) => {
   }
   return out;
 };
+
+const normalizeSheetHeader = (value) =>
+  String(value || "").trim().toLowerCase().replace(/[^a-z]/g, "");
+
+const expandPipeRow = (row) =>
+  row.length === 1 && String(row[0] || "").includes("|")
+    ? String(row[0]).split("|").map((cell) => cell.trim())
+    : row;
 
 export default function AddBusesScreen() {
   const { token, user } = useAuth();
@@ -58,11 +71,17 @@ export default function AddBusesScreen() {
   const [excelFileName, setExcelFileName] = useState("");
   const [parsingExcel, setParsingExcel] = useState(false);
   const [addingBus, setAddingBus] = useState(false);
+  const [coordinateSheetBusy, setCoordinateSheetBusy] = useState(false);
 
   // Bus options modal
   const [showOptionsModal, setShowOptionsModal] = useState(false);
   const [selectedBus, setSelectedBus] = useState(null);
   const [showAlterModal, setShowAlterModal] = useState(false);
+  const [showRouteChoiceModal, setShowRouteChoiceModal] = useState(false);
+  const [alterTargetBus, setAlterTargetBus] = useState(null);
+  const [alterationRoutesByPlan, setAlterationRoutesByPlan] = useState(null);
+  const [alterationExcelFileName, setAlterationExcelFileName] = useState("");
+  const [parsingAlterationExcel, setParsingAlterationExcel] = useState(false);
   const [busChangeMode, setBusChangeMode] = useState("alter");
   const [alteringBus, setAlteringBus] = useState(false);
   const [restoringBus, setRestoringBus] = useState(false);
@@ -128,8 +147,8 @@ export default function AddBusesScreen() {
   const handleRestoreAltered = () => {
     if (!selectedBus?.isAltered) return;
     Alert.alert(
-      "Restore combined bus",
-      `Stop combining bus ${getDisplayBusNumber(selectedBus)} and restore its original preview number?`,
+      "Restore original bus",
+      `End the bus change for Bus ${getDisplayBusNumber(selectedBus)} and restore its original route settings?`,
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -166,10 +185,10 @@ export default function AddBusesScreen() {
       }
     };
     loadGlobalPlan();
-  }, [token]);
+  }, [token, isSuperadmin]);
 
   // ---------- Excel parsing helpers ----------
-  const pickAndParseExcel = async (isEdit) => {
+  const pickAndParseExcel = async (isEdit, isAlteration = false) => {
     try {
       const res = await DocumentPicker.getDocumentAsync({
         type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -179,7 +198,12 @@ export default function AddBusesScreen() {
       const file = res.assets && res.assets[0];
       if (!file) return;
 
-      if (isEdit) setParsingEditExcel(true);
+      if (isAlteration) {
+        setParsingAlterationExcel(true);
+        setAlterationRoutesByPlan(null);
+        setAlterationExcelFileName("");
+      }
+      else if (isEdit) setParsingEditExcel(true);
       else setParsingExcel(true);
 
       const readResult = await readExcelFile(file);
@@ -198,7 +222,10 @@ export default function AddBusesScreen() {
         return;
       }
 
-      if (isEdit) {
+      if (isAlteration) {
+        setAlterationRoutesByPlan(plans);
+        setAlterationExcelFileName(file.name);
+      } else if (isEdit) {
         setEditRoutesByPlan(plans);
         setEditExcelFileName(file.name);
       } else {
@@ -208,7 +235,8 @@ export default function AddBusesScreen() {
     } catch (e) {
       Alert.alert("Parse Error", e?.message || "Failed to parse Excel");
     } finally {
-      if (isEdit) setParsingEditExcel(false);
+      if (isAlteration) setParsingAlterationExcel(false);
+      else if (isEdit) setParsingEditExcel(false);
       else setParsingExcel(false);
     }
   };
@@ -228,10 +256,7 @@ export default function AddBusesScreen() {
   };
 
   // ---------- Add bus ----------
-  const handleAddBus = async () => {
-    if (!busNo.trim() || !deviceId.trim()) {
-      return Alert.alert("Bus No and Device ID required");
-    }
+  const saveNewBus = async (resolvedRoutes) => {
     setAddingBus(true);
     try {
       const payload = {
@@ -239,10 +264,10 @@ export default function AddBusesScreen() {
         previewNumber: previewNumber.trim() || null,
         deviceId: deviceId.trim(),
         regNo: null,
-        routesByPlan: routesByPlan || {},
+        routesByPlan: resolvedRoutes || {},
       };
       await importBusRoutesExcelJson({ token, busPayload: payload });
-      Alert.alert("Success", "Bus added successfully");
+      Alert.alert("Success", "Bus added successfully. Stops without coordinates can be added later from the Stop Master sheet.");
       setShowAddModal(false);
       setBusNo("");
       setPreviewNumber("");
@@ -255,6 +280,13 @@ export default function AddBusesScreen() {
     } finally {
       setAddingBus(false);
     }
+  };
+
+  const handleAddBus = async () => {
+    if (!busNo.trim() || !deviceId.trim()) {
+      return Alert.alert("Bus No and Device ID required");
+    }
+    await saveNewBus(routesByPlan || {});
   };
 
   // ---------- Edit details ----------
@@ -297,10 +329,7 @@ export default function AddBusesScreen() {
     setShowEditRoutesModal(true);
   };
 
-  const handleSaveRoutes = async () => {
-    if (!editRoutesByPlan) {
-      return Alert.alert("Missing Routes", "Please upload Excel routes first");
-    }
+  const saveEditedRoutes = async (resolvedRoutes) => {
     setSavingRoutes(true);
     try {
       await importBusRoutesExcelJson({
@@ -310,7 +339,7 @@ export default function AddBusesScreen() {
           previewNumber: selectedBus.previewNumber || null,
           deviceId: selectedBus.gpsDeviceId || selectedBus.gps_device_id || "",
           regNo: selectedBus.regNo || null,
-          routesByPlan: editRoutesByPlan,
+          routesByPlan: resolvedRoutes,
           replaceRoutes: true,
         },
       });
@@ -323,13 +352,184 @@ export default function AddBusesScreen() {
     }
   };
 
-  const openAlterBus = (mode) => {
-    setBusChangeMode(mode);
-    setShowOptionsModal(false);
-    setShowAlterModal(true);
+  const handleSaveRoutes = async () => {
+    if (!editRoutesByPlan) {
+      return Alert.alert("Missing Routes", "Please upload Excel routes first");
+    }
+    await saveEditedRoutes(editRoutesByPlan);
   };
 
-  const handleAlterBus = async (targetBus) => {
+  const downloadStopCoordinateSheet = async () => {
+    setCoordinateSheetBusy(true);
+    try {
+      const data = await stopApi.getCoordinateSheet(token);
+      if (!Array.isArray(data.stops) || !data.stops.length) {
+        throw new Error(
+          "Stop Master has no stops to download. Add route stops first, then try again.",
+        );
+      }
+      const worksheet = XLSX.utils.aoa_to_sheet([
+        ["Stop Name", "X Coordinate (Longitude)", "Y Coordinate (Latitude)"],
+        ...(data.stops || []).map((stop) => [
+          stop.name,
+          stop.longitude ?? "",
+          stop.latitude ?? "",
+        ]),
+      ]);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Stop Coordinates");
+      const fileName = "stop-coordinates.xlsx";
+
+      if (Platform.OS === "web") {
+        XLSX.writeFile(workbook, fileName, { bookType: "xlsx" });
+        return;
+      }
+      const base64 = XLSX.write(workbook, {
+        bookType: "xlsx",
+        type: "base64",
+      });
+      const mimeType =
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+      if (
+        Platform.OS === "android" &&
+        FileSystem.StorageAccessFramework?.requestDirectoryPermissionsAsync
+      ) {
+        const permission =
+          await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
+        if (!permission.granted) {
+          Alert.alert("Download cancelled", "No folder was selected.");
+          return;
+        }
+        const savedFileUri =
+          await FileSystem.StorageAccessFramework.createFileAsync(
+            permission.directoryUri,
+            "stop-coordinates",
+            mimeType,
+          );
+        await FileSystem.writeAsStringAsync(savedFileUri, base64, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        Alert.alert(
+          "Download complete",
+          "Saved stop-coordinates.xlsx to the folder you selected.",
+        );
+        return;
+      }
+
+      const outputDirectory =
+        FileSystem.cacheDirectory || FileSystem.documentDirectory;
+      if (!outputDirectory) {
+        throw new Error("Could not access local storage for the Excel file.");
+      }
+      const fileUri = `${outputDirectory}${fileName}`;
+      await FileSystem.writeAsStringAsync(fileUri, base64, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      if (!(await Sharing.isAvailableAsync())) {
+        throw new Error(
+          `The Excel file was created at ${fileUri}, but sharing is not available on this device.`,
+        );
+      }
+      await Sharing.shareAsync(fileUri, {
+        mimeType,
+        dialogTitle: "Download Stop Master coordinates",
+      });
+      Alert.alert(
+        "Stop sheet ready",
+        `The Excel file contains ${data.stops.length} unique stops. Save or share stop-coordinates.xlsx to continue.`,
+      );
+    } catch (error) {
+      Alert.alert(
+        "Download failed",
+        getErrorMessage(error, "Could not download the Stop Master sheet."),
+      );
+    } finally {
+      setCoordinateSheetBusy(false);
+    }
+  };
+
+  const pickAndUploadStopCoordinateSheet = async () => {
+    setCoordinateSheetBusy(true);
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        copyToCacheDirectory: true,
+      });
+      if (result.canceled) return;
+      const file = result.assets?.[0];
+      if (!file) throw new Error("No Excel file was selected.");
+
+      const { workbook } = await readExcelFile(file);
+      const sheetName = workbook.SheetNames?.[0];
+      const worksheet = sheetName ? workbook.Sheets[sheetName] : null;
+      if (!worksheet) throw new Error("The Excel file has no worksheets.");
+      const rows = XLSX.utils
+        .sheet_to_json(worksheet, { header: 1, defval: "" })
+        .map(expandPipeRow);
+      const headers = rows[0] || [];
+      const findColumn = (names) =>
+        headers.findIndex((header) => names.includes(normalizeSheetHeader(header)));
+      const stopIdColumn = findColumn(["stopid"]);
+      const nameColumn = findColumn(["stopname", "stop", "name"]);
+      const longitudeColumn = findColumn([
+        "longitude",
+        "x",
+        "xcoordinate",
+        "xcoordinatelongitude",
+      ]);
+      const latitudeColumn = findColumn([
+        "latitude",
+        "y",
+        "ycoordinate",
+        "ycoordinatelatitude",
+      ]);
+      if (
+        nameColumn < 0 ||
+        longitudeColumn < 0 ||
+        latitudeColumn < 0
+      ) {
+        throw new Error(
+          "Use columns for Stop Name, X Coordinate (Longitude), and Y Coordinate (Latitude).",
+        );
+      }
+
+      const stops = rows.slice(1).map((row) => ({
+        stopId: stopIdColumn < 0 ? "" : String(row[stopIdColumn] || "").trim(),
+        name: String(row[nameColumn] || "").trim(),
+        longitude: row[longitudeColumn],
+        latitude: row[latitudeColumn],
+      })).filter((row) => row.name || row.latitude !== "" || row.longitude !== "");
+      if (!stops.length) throw new Error("The sheet contains no stop rows.");
+
+      const resultData = await stopApi.importCoordinates(token, stops);
+      const summary = resultData.summary || {};
+      const issues = (resultData.rowResults || []).filter((row) =>
+        ["not_found", "ambiguous", "invalid"].includes(row.status),
+      );
+      const issueDetails = issues
+        .slice(0, 5)
+        .map(
+          (row) =>
+            `Row ${row.row} (${row.name || "unnamed"}): ${row.reason || row.status}`,
+        )
+        .join("\n");
+      Alert.alert(
+        issues.length ? "Coordinate sheet partially imported" : "Coordinates imported",
+        `${summary.updated || 0} stop(s) updated. ${summary.missingCoordinates || 0} stop(s) still have blank coordinates.${issueDetails ? `\n\n${issueDetails}` : ""}`,
+      );
+    } catch (error) {
+      Alert.alert(
+        "Upload failed",
+        getErrorMessage(error, "Could not import the Stop Master sheet."),
+      );
+    } finally {
+      setCoordinateSheetBusy(false);
+    }
+  };
+
+  const saveAlteration = async (routeSource, resolvedRoutes) => {
+    if (!alterTargetBus) return;
     setAlteringBus(true);
     try {
       const changeBus = busChangeMode === "combine"
@@ -338,9 +538,16 @@ export default function AddBusesScreen() {
       const result = await changeBus(
         token,
         selectedBus.busNo,
-        targetBus.busNo,
+        alterTargetBus.busNo,
+        {
+          routeSource,
+          ...(routeSource === "custom"
+            ? { routesByPlan: resolvedRoutes }
+            : {}),
+        },
       );
       setShowAlterModal(false);
+      setShowRouteChoiceModal(false);
       await loadBuses();
       Alert.alert(
         busChangeMode === "combine" ? "Buses combined" : "Bus altered",
@@ -359,6 +566,40 @@ export default function AddBusesScreen() {
     } finally {
       setAlteringBus(false);
     }
+  };
+
+  const handleAlterBus = async (routeSource, uploadedRoutes) => {
+    try {
+      let routes = uploadedRoutes;
+      if (routeSource !== "custom") {
+        const routeBus =
+          routeSource === "source" ? selectedBus : alterTargetBus;
+        const data = await busApi.getBusRoutes(token, routeBus.busNo);
+        routes = data?.plans || {};
+        if (!Object.keys(routes).length) {
+          return Alert.alert(
+            "No routes",
+            `Bus ${getDisplayBusNumber(routeBus)} has no routes to select. Upload routes first or choose another bus.`,
+          );
+        }
+      }
+      setShowRouteChoiceModal(false);
+      await saveAlteration(routeSource, routes);
+    } catch (error) {
+      Alert.alert(
+        "Could not load routes",
+        getErrorMessage(error, "Unable to verify routes for the selected bus."),
+      );
+    }
+  };
+
+  const openAlterBus = (mode) => {
+    setBusChangeMode(mode);
+    setAlterTargetBus(null);
+    setAlterationRoutesByPlan(null);
+    setAlterationExcelFileName("");
+    setShowOptionsModal(false);
+    setShowAlterModal(true);
   };
 
   // ---------- Global active plan ----------
@@ -490,7 +731,47 @@ export default function AddBusesScreen() {
           <Text style={styles.emptyText}>No buses yet. Tap + to add one.</Text>
         }
         ListHeaderComponent={
-          <Text style={styles.alteredSectionTitle}>Buses</Text>
+          <View>
+            <Text style={styles.alteredSectionTitle}>Buses</Text>
+            {isSuperadmin && (
+              <View style={styles.coordinateSheetPanel}>
+                <Text style={styles.coordinateSheetTitle}>
+                  Stop Master coordinates
+                </Text>
+                <Text style={styles.coordinateSheetDescription}>
+                  Download the full stop list, fill coordinates where blank, then upload the same sheet. X is longitude; Y is latitude.
+                </Text>
+                <TouchableOpacity
+                  style={styles.optionButton}
+                  onPress={downloadStopCoordinateSheet}
+                  disabled={coordinateSheetBusy}
+                >
+                  <Ionicons
+                    name="download-outline"
+                    size={20}
+                    color={COLORS.primary}
+                  />
+                  <Text style={styles.optionText}>
+                    {coordinateSheetBusy ? "Working..." : "Download Stops Excel"}
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.optionButton}
+                  onPress={pickAndUploadStopCoordinateSheet}
+                  disabled={coordinateSheetBusy}
+                >
+                  <Ionicons
+                    name="cloud-upload-outline"
+                    size={20}
+                    color={COLORS.primary}
+                  />
+                  <Text style={styles.optionText}>
+                    {coordinateSheetBusy ? "Working..." : "Upload Coordinates Excel"}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            )}
+          </View>
         }
         ListFooterComponent={
           <>
@@ -499,13 +780,13 @@ export default function AddBusesScreen() {
                 type: "alter",
                 title: "Altered buses",
                 description:
-                  "Only the bus location changes. The original stops, plans, and routes stay the same.",
+                  "The bus uses the replacement location and the route stops selected by the super admin.",
               },
               {
                 type: "combine",
                 title: "Combined buses",
                 description:
-                  "The buses are merged. Users see the replacement bus location and the combined stops, plans, and routes.",
+                  "The bus uses the replacement location and the route stops selected by the super admin.",
               },
             ].map((section) => {
               const sectionBuses = buses.filter(
@@ -693,7 +974,7 @@ export default function AddBusesScreen() {
                     <View style={styles.optionCopy}>
                       <Text style={styles.optionText}>Alter Bus</Text>
                       <Text style={styles.optionHint}>
-                        Change location only; keep original routes.
+                        Change location and choose which routes users see.
                       </Text>
                     </View>
                   </TouchableOpacity>
@@ -709,7 +990,7 @@ export default function AddBusesScreen() {
                     <View style={styles.optionCopy}>
                       <Text style={styles.optionText}>Combine Bus</Text>
                       <Text style={styles.optionHint}>
-                        Merge routes; use the replacement bus location.
+                        Use the replacement location and choose displayed routes.
                       </Text>
                     </View>
                   </TouchableOpacity>
@@ -767,8 +1048,8 @@ export default function AddBusesScreen() {
             </Text>
             <Text style={styles.subHeader}>
               {busChangeMode === "combine"
-                ? "Select the replacement bus. Users will see only its location, plus the merged stops, plans, and routes from both buses. The buses can have different routes."
-                : "Select the replacement bus. Only its location will be used; this bus's original stops, plans, and routes will stay unchanged."}
+                ? "Select the bus to provide the live location, then choose which route stops users should see."
+                : "Select the replacement bus for live location, then choose which route stops users should see."}
             </Text>
             <FlatList
               data={buses.filter(
@@ -781,7 +1062,13 @@ export default function AddBusesScreen() {
               renderItem={({ item }) => (
                 <TouchableOpacity
                   style={styles.optionButton}
-                  onPress={() => handleAlterBus(item)}
+                  onPress={() => {
+                    setAlterTargetBus(item);
+                    setAlterationRoutesByPlan(null);
+                    setAlterationExcelFileName("");
+                    setShowAlterModal(false);
+                    setShowRouteChoiceModal(true);
+                  }}
                   disabled={alteringBus}
                 >
                   <Ionicons
@@ -796,7 +1083,7 @@ export default function AddBusesScreen() {
               )}
               ListEmptyComponent={
                 <Text style={styles.emptyText}>
-                  No other active buses available to combine with.
+                  No other active buses available.
                 </Text>
               }
             />
@@ -807,6 +1094,95 @@ export default function AddBusesScreen() {
             >
               <Text style={styles.closeText}>Cancel</Text>
             </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ================= ALTER / COMBINE ROUTE CHOICE MODAL ================= */}
+      <Modal
+        transparent
+        animationType="fade"
+        visible={showRouteChoiceModal}
+        onRequestClose={() => setShowRouteChoiceModal(false)}
+      >
+        <View style={styles.overlay}>
+          <View style={styles.modalBox}>
+            <ScrollView contentContainerStyle={styles.modalScrollContent}>
+              <Text style={styles.header}>Choose Route Stops</Text>
+              <Text style={styles.subHeader}>
+                Bus {getDisplayBusNumber(selectedBus)} will use Bus{" "}
+                {getDisplayBusNumber(alterTargetBus)} for its live location.
+                Pick the route set that should be shown to its users.
+              </Text>
+              <TouchableOpacity
+                style={styles.optionButton}
+                onPress={() => handleAlterBus("source")}
+                disabled={alteringBus || parsingAlterationExcel}
+              >
+                <Ionicons
+                  name="git-branch-outline"
+                  size={20}
+                  color={COLORS.primary}
+                />
+                <Text style={styles.optionText}>
+                  Use Bus {getDisplayBusNumber(selectedBus)} routes
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.optionButton}
+                onPress={() => handleAlterBus("target")}
+                disabled={alteringBus || parsingAlterationExcel}
+              >
+                <Ionicons
+                  name="git-branch-outline"
+                  size={20}
+                  color={COLORS.primary}
+                />
+                <Text style={styles.optionText}>
+                  Use Bus {getDisplayBusNumber(alterTargetBus)} routes
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.uploadBtn}
+                onPress={() => pickAndParseExcel(false, true)}
+                disabled={alteringBus || parsingAlterationExcel}
+              >
+                {parsingAlterationExcel ? (
+                  <ActivityIndicator color={COLORS.primary} />
+                ) : (
+                  <Text style={styles.optionText}>Upload new route Excel</Text>
+                )}
+              </TouchableOpacity>
+              {alterationExcelFileName ? (
+                <Text style={styles.fileName}>{alterationExcelFileName}</Text>
+              ) : null}
+              {renderPlansPreview(alterationRoutesByPlan)}
+              {alterationRoutesByPlan && (
+                <TouchableOpacity
+                  style={styles.button}
+                  onPress={() =>
+                    handleAlterBus("custom", alterationRoutesByPlan)
+                  }
+                  disabled={alteringBus || parsingAlterationExcel}
+                >
+                  {alteringBus ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <Text style={{ color: "#fff", fontWeight: "600" }}>
+                      Confirm uploaded routes
+                    </Text>
+                  )}
+                </TouchableOpacity>
+              )}
+              {alteringBus && <ActivityIndicator color={COLORS.primary} />}
+              <TouchableOpacity
+                onPress={() => setShowRouteChoiceModal(false)}
+                style={styles.closeTouch}
+                disabled={alteringBus}
+              >
+                <Text style={styles.closeText}>Cancel</Text>
+              </TouchableOpacity>
+            </ScrollView>
           </View>
         </View>
       </Modal>
@@ -1022,6 +1398,26 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     color: COLORS.textHeader,
     marginBottom: 10,
+  },
+  coordinateSheetPanel: {
+    backgroundColor: "#fff",
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  coordinateSheetTitle: {
+    color: COLORS.textHeader,
+    fontSize: 15,
+    fontWeight: "800",
+  },
+  coordinateSheetDescription: {
+    color: COLORS.textBody,
+    fontSize: 12,
+    lineHeight: 18,
+    marginTop: 5,
+    marginBottom: 8,
   },
   alteredSection: {
     marginTop: 18,

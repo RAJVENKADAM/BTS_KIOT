@@ -14,6 +14,7 @@ import OrganizeScreen from './src/screens/OrganizeScreen';
 import ProfileScreen from './src/screens/ProfileScreen';
 import NotificationsScreen from './src/screens/NotificationsScreen';
 import PlanDetailsScreen from './src/screens/PlanDetailsScreen';
+import MasterScreen from './src/screens/MasterScreen';
 
 const Stack = createStackNavigator();
 
@@ -36,6 +37,7 @@ function AppNavigator() {
           <Stack.Screen name="Profile" component={ProfileScreen} />
           <Stack.Screen name="Notifications" component={NotificationsScreen} />
           <Stack.Screen name="PlanDetails" component={PlanDetailsScreen} />
+          <Stack.Screen name="Master" component={MasterScreen} />
         </>
       ) : (
         <Stack.Screen name="Login" component={LoginScreen} />

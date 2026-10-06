@@ -1,6 +1,6 @@
 /**
  * OSMMap — OpenStreetMap Leaflet component rendered via WebView.
- * Handles single bus marker display with pulsing animation,
+ * Handles single bus marker display with a circular online/offline indicator,
  * college marker, and real-time coordinate updates via postMessage.
  */
 import React, { useRef, useEffect } from "react";
@@ -47,7 +47,11 @@ export default function OSMMap({
 
     const singlePayload = {
       type: "BUS_LOCATION",
-      previewNumber: busData.previewNumber ?? busData.preview_number,
+      previewNumber:
+        busData.previewNumber ??
+        busData.preview_number ??
+        busData.busNo ??
+        busData.bus_no,
       latitude: busData.latitude,
       longitude: busData.longitude,
       isOffline: busData._isOffline === true,
@@ -69,18 +73,24 @@ export default function OSMMap({
     html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #fff; }
     #map { width: 100%; height: 100%; }
     .leaflet-container { background: transparent; }
-    .bus-marker { position: relative; width: 22px; height: 22px; }
-    .bus-marker-label {
-      position: absolute;
-      left: 19px;
-      top: -4px;
-      padding: 2px 5px;
-      border-radius: 8px;
-      background: #fff;
-      color: #111827;
-      font: 700 11px/14px Arial, sans-serif;
+    .bus-marker {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 36px;
+      height: 36px;
+      border: 3px solid #fff;
+      border-radius: 50%;
+      box-shadow: 0 2px 7px rgba(15, 23, 42, .45);
+      box-sizing: border-box;
+      color: #fff;
+      font: 700 10px/1 Arial, sans-serif;
+    }
+    .bus-marker-number {
+      max-width: 28px;
+      overflow: hidden;
+      text-overflow: ellipsis;
       white-space: nowrap;
-      box-shadow: 0 1px 4px rgba(15, 23, 42, .35);
     }
     .college-marker {
       width: 24px;
@@ -102,28 +112,7 @@ export default function OSMMap({
       background: #fff;
     }
 
-    /* Bus status markers: green = live, yellow = waiting/stopped, red = offline/inactive. */
-    .bus-pulse {
-      position: relative;
-      width: 16px;
-      height: 16px;
-      border-radius: 999px;
-      background: #16a34a;
-      border: 3px solid #fff;
-      box-shadow: 0 1px 5px rgba(15, 23, 42, .45);
-      box-sizing: border-box;
-    }
-    .bus-waiting,
-    .bus-offline {
-      position: relative;
-      width: 16px;
-      height: 16px;
-      border-radius: 999px;
-      border: 3px solid #fff;
-      box-shadow: 0 1px 5px rgba(15, 23, 42, .45);
-      box-sizing: border-box;
-    }
-    .bus-waiting { background: #facc15; }
+    .bus-online { background: #16a34a; }
     .bus-offline { background: #dc2626; }
   </style>
 </head>
@@ -286,24 +275,24 @@ export default function OSMMap({
       }
 
       function busIconHtml(offline, status, label) {
-        var className = offline || status === 'inactive' || status === 'offline'
-          ? 'bus-offline'
-          : (status === 'waiting' || status === 'stopped' ? 'bus-waiting' : 'bus-pulse');
-        return '<div class="bus-marker"><span class="' + className + '"></span><span class="bus-marker-label">' + escapeHtml(label) + '</span></div>';
+        var isOffline = offline || status === 'inactive' || status === 'offline';
+        var className = isOffline ? 'bus-offline' : 'bus-online';
+        return '<div class="bus-marker ' + className + '"><span class="bus-marker-number">' + escapeHtml(label) + '</span></div>';
       }
 
       function createBusMarker(offline, status, label) {
+        var isOffline = offline || status === 'inactive' || status === 'offline';
         var icon = L.divIcon({
           className: '',
           html: busIconHtml(offline, status, label),
-          iconSize: [100, 24],
-          iconAnchor: [11, 11],
+          iconSize: [36, 36],
+          iconAnchor: [18, 18],
         });
 
         var m = L.marker([initialLat, initialLng], { icon: icon, interactive: false });
         m.addTo(map);
-        m._isOffline = !!offline;
-        m._status = status;
+        m._isOffline = isOffline;
+        m._status = isOffline ? 'offline' : 'online';
         return m;
       }
 
@@ -311,14 +300,16 @@ function upsertBusMarker(key, lat, lng, offline, status) {
   lat = Number(lat);
   lng = Number(lng);
   if (!isFiniteNumber(lat) || !isFiniteNumber(lng)) return;
+  var isOffline = offline || status === 'inactive' || status === 'offline';
+  var normalizedStatus = isOffline ? 'offline' : 'online';
   var marker = busMarkers[key];
   if (!marker) {
-    busMarkers[key] = createBusMarker(offline, status, key);
+    busMarkers[key] = createBusMarker(isOffline, normalizedStatus, key);
     marker = busMarkers[key];
-  } else if (!!marker._isOffline !== !!offline || marker._status !== status) {
+  } else if (marker._isOffline !== isOffline || marker._status !== normalizedStatus) {
     // Status changed — recreate marker with the correct color.
           map.removeLayer(marker);
-          busMarkers[key] = createBusMarker(offline, status, key);
+          busMarkers[key] = createBusMarker(isOffline, normalizedStatus, key);
           marker = busMarkers[key];
         }
         marker.setLatLng([lat, lng]);

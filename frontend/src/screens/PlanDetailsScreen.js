@@ -40,6 +40,9 @@ export default function PlanDetailsScreen({ route, navigation }) {
   const [items, setItems] = useState([]);
   const [error, setError] = useState(null);
   const [planName, setPlanName] = useState(initialPlan || "PLAN A");
+  const [routeBusPreviewNumber, setRouteBusPreviewNumber] = useState(null);
+  const [isReplacementRoute, setIsReplacementRoute] = useState(false);
+  const [routeSelectionLabel, setRouteSelectionLabel] = useState(null);
   const [nearbyMode, setNearbyMode] = useState(showNearby);
   const [nearbyMessage, setNearbyMessage] = useState("");
 
@@ -131,6 +134,11 @@ export default function PlanDetailsScreen({ route, navigation }) {
         setError(null);
         const target = busNo || busIdentifier || previewNumber;
         const data = await busApi.getBusRoutes(token, target);
+        setRouteBusPreviewNumber(
+          data?.routeBusPreviewNumber ?? previewNumber ?? busNo ?? null,
+        );
+        setIsReplacementRoute(data?.isReplacementRoute === true);
+        setRouteSelectionLabel(data?.routeSelectionLabel ?? null);
         if (Array.isArray(data?.stops)) {
           setItems(data.stops);
           setPlanName(data.activePlan || data.currentPlan || "Current plan");
@@ -187,12 +195,16 @@ export default function PlanDetailsScreen({ route, navigation }) {
           <Text style={styles.title}>
             {mode === "activePlan"
               ? `Plan ${planName}`
-              : `Bus ${busNo || previewNumber}`}
+              : `Bus ${routeBusPreviewNumber ?? busNo ?? previewNumber} stops`}
           </Text>
           <Text style={styles.subtitle}>
             {mode === "activePlan"
               ? "List of buses in this plan"
-              : `Stops for ${getDisplayBusNumber({ previewNumber, busNo })}`}
+              : routeSelectionLabel
+                ? `Showing ${routeSelectionLabel}`
+                : isReplacementRoute
+                ? `Stops assigned to Bus ${routeBusPreviewNumber} (served by Bus ${getDisplayBusNumber({ previewNumber, busNo })})`
+                : `Stops for ${getDisplayBusNumber({ previewNumber, busNo })}`}
           </Text>
           {mode === "activePlan" && (
             <TouchableOpacity

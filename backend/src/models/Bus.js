@@ -51,6 +51,20 @@ const busSchema = new mongoose.Schema(
       enum: ['alter', 'combine'],
       default: null
     },
+    alteration_route_source: {
+      type: String,
+      enum: ['source', 'target', 'custom'],
+      default: null
+    },
+    alteration_routes: {
+      type: [{
+        plan_name: { type: String, required: true },
+        stop_name: { type: String, required: true },
+        stop_order: { type: Number, required: true },
+        stopId: { type: String, required: true }
+      }],
+      default: []
+    },
     altered_at: {
       type: Date,
       default: null

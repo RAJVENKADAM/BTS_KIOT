@@ -102,7 +102,7 @@ try {
 /* ---------------- BODY PARSING ---------------- */
 app.use(
   express.json({
-    limit: "1mb",
+    limit: "5mb",
     verify: (req, res, buf) => {
       req.rawBody = buf;
     },
@@ -114,7 +114,7 @@ app.use(
 );
 app.use(express.urlencoded({
   extended: true,
-  limit: "1mb",
+  limit: "5mb",
   parameterLimit: 1000,
 }));
 
@@ -156,6 +156,8 @@ app.use("/api/organize", require("./routes/organize.routes"));
 app.use("/api/excel-management", require("./routes/excelManagement.routes"));
 app.use("/api/bus", require("./routes/bus.routes"));
 app.use("/api/bus", require("./routes/busImport.routes"));
+app.use("/api/master", require("./routes/master.routes"));
+app.use("/api/stops", require("./routes/stopMaster.routes"));
 app.use("/api/superadmin", require("./routes/superadminImport.routes"));
 app.use("/api/superadmin", require("./routes/superadminUsers.routes"));
 

@@ -195,7 +195,7 @@ export const busApi = {
     return data;
   },
 
-  alterBus: async (token, busNo, newBusNo) => {
+  alterBus: async (token, busNo, newBusNo, routeOptions) => {
     return fetchJson(
       `${API_BASE_URL}/api/bus/alter-bus/${encodeURIComponent(busNo)}`,
       {
@@ -204,12 +204,12 @@ export const busApi = {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ newBusNo }),
+        body: JSON.stringify({ newBusNo, ...routeOptions }),
       },
     );
   },
 
-  combineBus: async (token, busNo, newBusNo) => {
+  combineBus: async (token, busNo, newBusNo, routeOptions) => {
     return fetchJson(
       `${API_BASE_URL}/api/bus/combine-bus/${encodeURIComponent(busNo)}`,
       {
@@ -218,7 +218,7 @@ export const busApi = {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ newBusNo }),
+        body: JSON.stringify({ newBusNo, ...routeOptions }),
       },
     );
   },

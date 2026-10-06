@@ -28,6 +28,10 @@ longitude: {
       type: Number,
       default: 0,
     },
+    speedKmh: {
+      type: Number,
+      default: null,
+    },
 
     // Only switch to true on a confirmed successful GPS provider response.
     // Offline detection is handled time-based using lastSuccessfulGpsUpdate.
@@ -65,4 +69,3 @@ busLiveLocationSchema.pre('save', function (next) {
 });
 
 module.exports = mongoose.model('BusLiveLocation', busLiveLocationSchema);
-

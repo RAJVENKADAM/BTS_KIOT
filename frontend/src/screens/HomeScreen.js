@@ -7,7 +7,7 @@
  * 2. Top bar overlay provides search input (bus number or preview number) +
  *    "Organize" (admin only) + Profile nav icons.
  * 3. @gorhom/bottom-sheet houses status info: bus card with distance-to-college,
- *    marker status (moving/waiting/stopped), error/loading states.
+ *    online/offline status, error/loading states.
  *
  * State Management:
  * ─────────────────
@@ -31,11 +31,11 @@
  *
  * Bus Status Detection:
  * ──────────────────────
- * - detectBusStatus tracks coordinate repetition via refs.
+ * - detectBusStatus tracks coordinate repetition for movement calculations.
  *  - Same coord 3x → "waiting"
  *  - Same coord 10x → "stopped"
  *  - Different coord → "moving"
- * - chooseBusStatus prioritises API's "stopped" state over coordinate detection.
+ * - The user-facing badge reports GPS availability only: online or offline.
  */
 import React, {
   useState,
@@ -160,6 +160,24 @@ const HomeScreen = () => {
     setShowPlanInSheet(false);
     setPlanViewMode(null);
   }, []);
+
+  const openSelectedBusStopsPage = useCallback(() => {
+    const busIdentifier = selectedPreviewNumber || selectedBusNo;
+    if (!busIdentifier) return;
+
+    navigation.navigate("PlanDetails", {
+      mode: "stopsForBus",
+      previewNumber: selectedPreviewNumber,
+      busNo: selectedBusNo,
+      plan: routesData?.activePlan || globalPlan,
+    });
+  }, [
+    selectedPreviewNumber,
+    selectedBusNo,
+    routesData?.activePlan,
+    globalPlan,
+    navigation,
+  ]);
 
   const [isBusFound, setIsBusFound] = useState(false);
 
@@ -430,7 +448,7 @@ const HomeScreen = () => {
                 setLastGoodLocation(data);
                 setIsOffline(isOffline);
                 setLocationStatus(isOffline ? "offline" : "live");
-                setTrackingError(data?.alteration?.message || null);
+                setTrackingError(null);
               })
               .catch((error) =>
                 console.error(
@@ -851,7 +869,7 @@ const HomeScreen = () => {
           setNoBusFound(false);
           setIsBusFound(true);
         } else {
-          setBusData(null);
+          setBusData({ ...data, source: data.source || "offline" });
           setNoBusFound(!foundInBackend);
           setIsBusFound(foundInBackend);
         }
@@ -862,7 +880,7 @@ const HomeScreen = () => {
         setLocationStatus("live");
         setIsOffline(false);
         setMarkerStatus("moving");
-        setTrackingError(data?.alteration?.message || null);
+        setTrackingError(null);
         setNoBusFound(false);
         setIsBusFound(true);
         const statusFromAPI = data.busState;
@@ -871,7 +889,7 @@ const HomeScreen = () => {
           : "offline";
         setMarkerStatus(chooseBusStatus(statusFromAPI, statusFromCoordinates));
       } else {
-        setBusData(null);
+        setBusData({ ...data, source: data.source || "offline" });
         setLastGoodLocation(null);
         setLocationStatus("offline");
         setIsOffline(true);
@@ -922,7 +940,7 @@ const HomeScreen = () => {
           String(busNo).toUpperCase(),
         );
         if (data?.alteration?.isAltered) {
-          setTrackingError(data.alteration.message);
+          setTrackingError(null);
           setBusData(data);
           setLastGoodLocation(null);
           setLocationStatus("offline");
@@ -970,15 +988,13 @@ const HomeScreen = () => {
           setLastGoodLocation({ ...data, source: data.source || "gps" });
           setLocationStatus("live");
           setIsOffline(false);
-          setTrackingError(data?.alteration?.message || null);
+          setTrackingError(null);
           setNoBusFound(false);
           setIsBusFound(true);
         } else {
-          const offlineData = hasValidCoords
-            ? { ...data, source: data.source || "gps" }
-            : null;
+          const offlineData = { ...data, source: data.source || "offline" };
           setBusData(offlineData);
-          setLastGoodLocation(offlineData);
+          setLastGoodLocation(hasValidCoords ? offlineData : null);
           setLocationStatus("offline");
           setIsOffline(true);
           setMarkerStatus("offline");
@@ -1029,7 +1045,7 @@ const HomeScreen = () => {
         const data = await busApi.trackByPreview(token, query);
 
         if (currentSearch !== searchCounterRef.current) return;
-        setTrackingError(data?.alteration?.message || null);
+        setTrackingError(null);
 
         if (!data || data.error || !(data.busNo || data.bus_no)) {
           throw new Error(
@@ -1084,7 +1100,7 @@ const HomeScreen = () => {
           setLastGoodLocation(nextBusData);
           setLocationStatus("live");
           setIsOffline(false);
-          setTrackingError(data?.alteration?.message || null);
+          setTrackingError(null);
           const statusFromAPI = data.busState;
           const statusFromCoordinates = detectBusStatus(
             data.latitude,
@@ -1096,7 +1112,7 @@ const HomeScreen = () => {
         }
       } catch (err) {
         if (currentSearch !== searchCounterRef.current) return;
-        setTrackingError(data?.alteration?.message || null);
+        setTrackingError(null);
         setSelectedBusNo(null);
         setSelectedPreviewNumber(null);
         setBusData(null);
@@ -1124,7 +1140,7 @@ const HomeScreen = () => {
         const data = await busApi.getBusLocation(token, busNo);
 
         if (currentSearch !== searchCounterRef.current) return;
-        setTrackingError(data?.alteration?.message || null);
+        setTrackingError(null);
 
         if (
           data?.isBusActiveInCurrentPlan === false ||
@@ -1170,7 +1186,7 @@ const HomeScreen = () => {
             );
           }
         } else {
-          setBusData(null);
+          setBusData({ ...data, source: data.source || "offline" });
           setLastGoodLocation(null);
           setLocationStatus("offline");
           setIsOffline(true);
@@ -1227,7 +1243,10 @@ const HomeScreen = () => {
 
   const displayBusData = shouldShowBusMarker ? busData : null;
   const displayBusLabel = getDisplayBusNumber({
-    previewNumber: selectedPreviewNumber ?? displayBusData?.previewNumber,
+    previewNumber:
+      displayBusData?.alteration?.originalPreview ??
+      selectedPreviewNumber ??
+      displayBusData?.previewNumber,
     preview_number: displayBusData?.preview_number,
     busNo: selectedBusNo ?? displayBusData?.busNo ?? displayBusData?.bus_no,
   });
@@ -1238,6 +1257,20 @@ const HomeScreen = () => {
 
   const busCardContent = React.useMemo(() => {
     if (!displayBusData) return null;
+    const alteration = displayBusData.alteration;
+    const routeBusLabel =
+      alteration?.replacementForPreview ??
+      alteration?.originalPreview ??
+      selectedPreviewNumber ??
+      displayBusData.previewNumber ??
+      displayBusData.preview_number ??
+      displayBusLabel;
+    const stopsButtonLabel =
+      alteration?.alterationType === "combine"
+        ? "View combined bus stops"
+        : alteration?.isAltered || alteration?.isReplacement
+          ? `View Bus ${routeBusLabel} stops`
+          : "View bus stops";
     const distance = calculateDistance(
       displayBusData.latitude,
       displayBusData.longitude,
@@ -1260,18 +1293,26 @@ const HomeScreen = () => {
             </Text>
           </View>
         )}
+        {(alteration?.isAltered || alteration?.isReplacement) && (
+          <View style={styles.inactivePlanBanner}>
+            <Ionicons
+              name="information-circle-outline"
+              size={17}
+              color="#92400E"
+            />
+            <Text style={styles.inactivePlanText}>{alteration.message}</Text>
+          </View>
+        )}
         <View style={styles.cardHeader}>
           <Text style={styles.busNumber}>Bus {displayBusLabel}</Text>
           <View
             style={[
               styles.statusBadge,
-              isOffline && styles.offlineBadge,
-              !isOffline && markerStatus === "moving" && styles.movingBadge,
-              !isOffline && markerStatus === "stopped" && styles.stoppedBadge,
+              isOffline ? styles.offlineBadge : styles.onlineBadge,
             ]}
           >
             <Text style={styles.badgeText}>
-              {isOffline ? "OFFLINE" : markerStatus.toUpperCase()}
+              {isOffline ? "OFFLINE" : "ONLINE"}
             </Text>
           </View>
         </View>
@@ -1294,17 +1335,13 @@ const HomeScreen = () => {
           </View>
           <TouchableOpacity
             style={styles.liveStopsButton}
-            onPress={() =>
-              navigation.navigate("PlanDetails", {
-                mode: "stopsForBus",
-                previewNumber: selectedPreviewNumber,
-                busNo: selectedBusNo,
-                plan: displayBusData?.activePlan || globalPlan,
-              })
-            }
+            onPress={openSelectedBusStopsPage}
             activeOpacity={0.8}
           >
-            <Text style={styles.liveStopsButtonText}>View stops</Text>
+            <Ionicons name="map-outline" size={16} color={COLORS.primary} />
+            <Text style={styles.liveStopsButtonText}>
+              {stopsButtonLabel} — open stops page
+            </Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -1320,6 +1357,7 @@ const HomeScreen = () => {
     loadingNearbyBuses,
     nearbyBuses,
     navigation,
+    openSelectedBusStopsPage,
     selectedPreviewNumber,
     selectedBusNo,
     globalPlan,
@@ -1518,6 +1556,15 @@ const HomeScreen = () => {
 
         <View style={styles.rightIcons}>
           <TouchableOpacity
+            style={styles.masterButton}
+            onPress={() => navigation.navigate("Master")}
+            activeOpacity={0.7}
+            accessibilityLabel="Open Master"
+          >
+            <Text style={styles.masterButtonText}>!</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
             style={[
               styles.iconButtonPrimary,
               locationStatus === "loading" && { opacity: 0.6 },
@@ -1667,13 +1714,38 @@ const HomeScreen = () => {
             <View style={{ flex: 1, paddingBottom: 24 }}>
               <View style={styles.sheetHeader}>
                 <View>
-                  <Text style={styles.sheetLabel}>Bus {displayBusLabel}</Text>
-                  <Text style={styles.sheetSubLabel}>Plans & Stops</Text>
+                  <Text style={styles.sheetLabel}>
+                    Bus {routesData?.routeBusPreviewNumber ?? displayBusLabel}
+                  </Text>
+                  <Text style={styles.sheetSubLabel}>
+                    {routesData?.routeSelectionLabel
+                      ? `Showing ${routesData.routeSelectionLabel}`
+                      : routesData?.isReplacementRoute
+                        ? `Original stops assigned to Bus ${routesData.routeBusPreviewNumber}`
+                        : "Plans & Stops"}
+                  </Text>
                 </View>
                 <TouchableOpacity onPress={closeAllOverlayPanels}>
                   <Ionicons name="close" size={24} color={COLORS.textBody} />
                 </TouchableOpacity>
               </View>
+
+              <TouchableOpacity
+                style={styles.liveStopsButton}
+                onPress={openSelectedBusStopsPage}
+                activeOpacity={0.8}
+                disabled={!selectedBusNo && !selectedPreviewNumber}
+              >
+                <Ionicons name="map-outline" size={16} color={COLORS.primary} />
+                <Text style={styles.liveStopsButtonText}>
+                  View Bus{" "}
+                  {routesData?.routeBusPreviewNumber ??
+                    displayBusData?.alteration?.replacementForPreview ??
+                    selectedPreviewNumber ??
+                    selectedBusNo}{" "}
+                  stops page
+                </Text>
+              </TouchableOpacity>
 
               {loadingRoutes ? (
                 <View style={styles.loadingContainer}>
@@ -1836,7 +1908,22 @@ const styles = StyleSheet.create({
   rightIcons: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6, // reduce gap
+    gap: 4,
+  },
+  masterButton: {
+    height: 32,
+    minWidth: 32,
+    paddingHorizontal: 8,
+    borderRadius: 16,
+    backgroundColor: COLORS.warning,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  masterButtonText: {
+    color: "#fff",
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 0.2,
   },
   organizeButton: {
     flexDirection: "row",
@@ -1974,8 +2061,10 @@ const styles = StyleSheet.create({
   },
   liveStopsButton: {
     alignSelf: "stretch",
+    flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
+    gap: 8,
     minHeight: 40,
     marginTop: 12,
     borderRadius: 8,
@@ -2133,12 +2222,8 @@ const styles = StyleSheet.create({
     backgroundColor: "#f0f0f0",
   },
 
-  movingBadge: {
-    backgroundColor: "#2ecc71",
-  },
-
-  stoppedBadge: {
-    backgroundColor: "#e74c3c",
+  onlineBadge: {
+    backgroundColor: "#16a34a",
   },
 
   offlineBadge: {

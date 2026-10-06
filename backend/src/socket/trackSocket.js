@@ -8,6 +8,7 @@ const { getIO } = require("../socket");
 // Models are required lazily to avoid importing mongoose before the DB is ready.
 const getBus = () => require("../models/Bus");
 const getBusLiveLocation = () => require("../models/BusLiveLocation");
+const getUser = () => require("../models/User");
 
 function registerTrackSocketHandlers() {
   const io = getIO();
@@ -17,12 +18,61 @@ function registerTrackSocketHandlers() {
     const authenticatedUserId = String(socket.user.id);
     let locationRequests = 0;
     let locationWindowStarted = Date.now();
+    let masterRoom = null;
     socket.join(`user_${authenticatedUserId}`);
 
     socket.on("join-user", (userId) => {
       if (userId && String(userId) === authenticatedUserId) {
         socket.join(`user_${authenticatedUserId}`);
       }
+    });
+    socket.on("join-master", async () => {
+      try {
+        const User = getUser();
+        const Bus = getBus();
+        const user = await User.findById(authenticatedUserId)
+          .select("bus_no is_active deleted_by_user")
+          .lean();
+        if (!user || !user.is_active || user.deleted_by_user || !user.bus_no) {
+          return;
+        }
+
+        let bus = await Bus.findOne({
+          bus_no: String(user.bus_no).trim().toUpperCase(),
+        });
+        if (!bus) {
+          bus = await Bus.findOne({
+            preview_number: String(user.bus_no).trim(),
+          });
+        }
+        const visited = new Set();
+        let depth = 0;
+        while (
+          bus?.altered_to_bus_id &&
+          depth < 20 &&
+          !visited.has(String(bus._id))
+        ) {
+          visited.add(String(bus._id));
+          const nextBus = await Bus.findById(bus.altered_to_bus_id)
+            .select("_id altered_to_bus_id")
+            .lean();
+          if (!nextBus) break;
+          bus = nextBus;
+          depth += 1;
+        }
+        if (!bus) return;
+
+        if (masterRoom) socket.leave(masterRoom);
+        masterRoom = `master_${String(bus._id)}`;
+        socket.join(masterRoom);
+      } catch (error) {
+        console.error("join-master error:", error.message);
+      }
+    });
+    socket.on("leave-master", () => {
+      if (!masterRoom) return;
+      socket.leave(masterRoom);
+      masterRoom = null;
     });
     // Join a room for a specific preview number to receive live updates.
     // Use preview_ prefix to avoid exposing internal bus_no to clients.

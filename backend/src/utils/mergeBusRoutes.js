@@ -16,13 +16,20 @@ function mergeBusRoutes(sourceRoutes, targetRoutes) {
     }
 
     const plan = plans.get(planKey);
-    const stopKey = normalizeText(route.stop_name);
+    const stopKey = route.stopId
+      ? `STOP:${route.stopId}`
+      : `NAME:${normalizeText(route.stop_name)}`;
     if (!stopKey || plan.stops.has(stopKey)) continue;
 
-    plan.stops.set(stopKey, {
+    const mergedStop = {
       stop_name: String(route.stop_name).trim(),
       stop_order: plan.stops.size + 1,
-    });
+    };
+    if (route.stopId) mergedStop.stopId = route.stopId;
+    if (Number.isFinite(route.latitude)) mergedStop.latitude = route.latitude;
+    if (Number.isFinite(route.longitude)) mergedStop.longitude = route.longitude;
+    if (route.stopStatus) mergedStop.stopStatus = route.stopStatus;
+    plan.stops.set(stopKey, mergedStop);
   }
 
   return [...plans.values()].flatMap((plan) =>

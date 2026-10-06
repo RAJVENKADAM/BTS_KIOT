@@ -1,11 +1,19 @@
 const Bus = require("../models/Bus");
 const BusRoute = require("../models/BusRoute");
+const StopMaster = require("../models/StopMaster");
+const { randomUUID } = require("node:crypto");
 const BusLiveLocation = require("../models/BusLiveLocation");
 const AppSetting = require("../models/AppSetting");
 const User = require("../models/User");
 const Notification = require("../models/Notification");
 const { getIO } = require("../socket");
-const mergeBusRoutes = require("../utils/mergeBusRoutes");
+const resolveBusServiceRoutes = require("../utils/resolveBusServiceRoutes");
+const {
+  resolveAssignedBusRoutes,
+} = require("../utils/resolveBusServiceRoutes");
+const selectAlterationRoutes = require("../utils/selectAlterationRoutes");
+const findVerifiedStop = require("../utils/findVerifiedStop");
+const normalizeStopName = require("../utils/normalizeStopName");
 
 const GLOBAL_ACTIVE_PLAN_KEY = "global_active_plan";
 const DEFAULT_PLAN_NAMES = ["PLAN A", "PLAN B", "PLAN C", "PLAN D"];
@@ -118,9 +126,10 @@ function buildAlterationDetails(sourceBus, effectiveBus) {
   return {
     isAltered: true,
     alterationType: sourceBus.alteration_type || "alter",
+    originalPreview: sourceBus.preview_number ?? null,
     message: isCombined
-      ? `Bus ${oldPreview} is combined with bus ${newPreview}. The service includes their merged stops, plans, and routes and uses bus ${newPreview}'s location.`
-      : `Bus ${oldPreview} is altered to use bus ${newPreview}'s location. Your original stops and plans are unchanged.`,
+      ? `Bus ${oldPreview} is combined with bus ${newPreview}. The service uses bus ${newPreview}'s location and the route stops selected by the administrator.`
+      : `Bus ${oldPreview} is altered to use bus ${newPreview}'s location and the route stops selected by the administrator.`,
     newPreview: effectiveBus.preview_number ?? null,
     effectivePreview: effectiveBus.preview_number ?? null,
   };
@@ -131,22 +140,180 @@ const hasRouteForPlan = (routes, planName) =>
     (route) => route.plan_name.toUpperCase() === planName.toUpperCase(),
   );
 
-async function getRoutesForBus(bus) {
-  const sourceRoutes = await BusRoute.find({ bus_id: bus._id })
-    .select("plan_name stop_name stop_order")
-    .sort({ plan_name: 1, stop_order: 1 })
+async function getIncomingBusChanges(bus) {
+  return Bus.find({
+    altered_to_bus_id: bus._id,
+    alteration_type: { $in: ["alter", "combine"] },
+  })
+    .select(
+      "_id bus_no preview_number alteration_type alteration_route_source alteration_routes",
+    )
+    .sort({ bus_no: 1 })
     .lean();
-  if (!bus.altered_to_bus_id || bus.alteration_type !== "combine") {
-    return sourceRoutes;
+}
+
+function buildReplacementDetails(bus, incomingChanges) {
+  const replacedBus = incomingChanges.find(
+    (changedBus) => changedBus.alteration_type === "alter",
+  );
+  if (!replacedBus) return null;
+
+  const originalPreview =
+    replacedBus.preview_number ?? replacedBus.bus_no ?? "the original bus";
+  return {
+    isReplacement: true,
+    alterationType: "alter",
+    replacementForPreview: originalPreview,
+    message: replacedBus.alteration_route_source
+      ? `Bus ${bus.preview_number ?? bus.bus_no} is being used instead of bus ${originalPreview}. The stops shown follow the route choice made by the administrator.`
+      : `Bus ${bus.preview_number ?? bus.bus_no} is being used instead of bus ${originalPreview}. The stops shown are bus ${originalPreview}'s original stops.`,
+  };
+}
+
+async function getRoutesForBus(bus) {
+  const sourceRoutes = await getBusRouteRows(bus._id);
+
+  let targetRoutes = [];
+  if (bus.altered_to_bus_id) {
+    targetRoutes = await getBusRouteRows(bus.altered_to_bus_id);
   }
 
-  const targetRoutes = await BusRoute.find({
-    bus_id: bus.altered_to_bus_id,
-  })
-    .select("plan_name stop_name stop_order")
+  const selectedRoutes = selectAlterationRoutes(
+    bus.alteration_route_source,
+    sourceRoutes,
+    targetRoutes,
+    bus.alteration_routes,
+  );
+  if (selectedRoutes) return hydrateRouteRows(selectedRoutes);
+
+  const incomingChanges = await getIncomingBusChanges(bus);
+  const incomingRouteGroups = incomingChanges.length
+    ? (
+        await Promise.all(
+          incomingChanges.map(async (changedBus) => {
+            const changedBusRoutes = await getBusRouteRows(changedBus._id);
+            const selectedChangedRoutes = selectAlterationRoutes(
+              changedBus.alteration_route_source,
+              changedBusRoutes,
+              sourceRoutes,
+              changedBus.alteration_routes,
+            );
+            return {
+              alterationType: changedBus.alteration_type,
+              hasRouteSelection: !!changedBus.alteration_route_source,
+              routes: selectedChangedRoutes || changedBusRoutes,
+            };
+          }),
+        )
+      )
+    : [];
+
+  return hydrateRouteRows(
+    resolveBusServiceRoutes(sourceRoutes, incomingRouteGroups, targetRoutes),
+  );
+}
+
+async function getAssignedBusRoutes(bus) {
+  const sourceRoutes = await getBusRouteRows(bus._id);
+  const targetRoutes = bus.altered_to_bus_id
+    ? await getBusRouteRows(bus.altered_to_bus_id)
+    : [];
+  return hydrateRouteRows(
+    resolveAssignedBusRoutes(bus, sourceRoutes, targetRoutes),
+  );
+}
+
+async function getBusRouteRows(busId) {
+  const rows = await BusRoute.find({ bus_id: busId })
+    .select("plan_name stop_name stop_order stopId")
     .sort({ plan_name: 1, stop_order: 1 })
     .lean();
-  return mergeBusRoutes(sourceRoutes, targetRoutes);
+  const pendingByName = new Map();
+  const existingIds = rows.map((row) => row.stopId).filter(Boolean);
+  const existingStops = existingIds.length
+    ? await StopMaster.find({ stopId: { $in: existingIds } })
+        .select("stopId")
+        .lean()
+    : [];
+  const existingIdSet = new Set(existingStops.map((stop) => stop.stopId));
+
+  for (const row of rows) {
+    if (row.stopId && existingIdSet.has(row.stopId)) continue;
+
+    const { stop } = await findVerifiedStop({ name: row.stop_name });
+    let stopId = stop?.stopId;
+    if (!stopId) {
+      const key = String(row.stop_name).trim().replace(/\s+/g, " ").toLowerCase();
+      if (pendingByName.has(key)) {
+        stopId = pendingByName.get(key);
+      } else {
+        const exact = new RegExp(`^${escapeRegExp(key)}$`, "i");
+        let pendingStop = await StopMaster.findOne({
+          status: "PENDING",
+          name: exact,
+        });
+        if (!pendingStop) {
+          pendingStop = await StopMaster.create({
+            stopId: `STOP-${randomUUID()}`,
+            name: row.stop_name,
+            source: "EXISTING_STOP",
+            status: "PENDING",
+          });
+        }
+        stopId = pendingStop.stopId;
+        pendingByName.set(key, stopId);
+      }
+    }
+    await BusRoute.updateOne({ _id: row._id }, { $set: { stopId } });
+    row.stopId = stopId;
+  }
+
+  return hydrateRouteRows(rows);
+}
+
+async function hydrateRouteRows(routes) {
+  const stopIds = [...new Set(routes.map((route) => route.stopId).filter(Boolean))];
+  const stops = stopIds.length
+    ? await StopMaster.find({ stopId: { $in: stopIds } })
+        .select("stopId name latitude longitude status")
+        .lean()
+    : [];
+  const stopMap = new Map(stops.map((stop) => [stop.stopId, stop]));
+  return routes.map((route) => {
+    const stop = stopMap.get(route.stopId);
+    return {
+      ...route,
+      stop_name: stop?.status === "VERIFIED" ? stop.name : route.stop_name,
+      latitude: stop?.latitude ?? null,
+      longitude: stop?.longitude ?? null,
+      stopStatus: stop?.status || "PENDING",
+    };
+  });
+}
+
+async function getRouteSelectionLabel(bus, incomingChanges) {
+  const selectedChange =
+    (bus.alteration_route_source && bus) ||
+    incomingChanges.find((change) => change.alteration_route_source);
+  if (!selectedChange) return null;
+
+  if (selectedChange.alteration_route_source === "custom") {
+    return "Uploaded routes";
+  }
+  if (selectedChange.alteration_route_source === "source") {
+    return `Bus ${selectedChange.preview_number ?? "selected"} routes`;
+  }
+
+  if (selectedChange === bus) {
+    const targetBus = bus.altered_to_bus_id
+      ? await Bus.findById(bus.altered_to_bus_id)
+        .select("bus_no preview_number")
+        .lean()
+      : null;
+    return `Bus ${targetBus?.preview_number ?? bus.altered_to_preview ?? "replacement"} routes`;
+  }
+
+  return `Bus ${bus.preview_number ?? bus.bus_no} routes`;
 }
 
 async function findStudentsAssignedToBus(bus) {
@@ -336,23 +503,24 @@ async function getBusesForPlan(req, res) {
     const { plan } = req.params || {};
     const targetPlan = normalizePlanName(plan || "PLAN A");
 
-    const busIds = await BusRoute.find({ plan_name: targetPlan })
-      .distinct("bus_id")
-      .catch(() => []);
-
-    const buses = await Bus.find({
-      _id: { $in: busIds },
-      status: "active",
-    }).sort({ bus_no: 1, preview_number: 1 });
+    const buses = await Bus.find({ status: "active" }).sort({
+      bus_no: 1,
+      preview_number: 1,
+    });
+    const busesWithPlan = [];
+    for (const bus of buses) {
+      const routes = await getRoutesForBus(bus);
+      if (hasRouteForPlan(routes, targetPlan)) busesWithPlan.push(bus);
+    }
 
     const liveLocations = await BusLiveLocation.find({
-      bus_id: { $in: buses.map((bus) => bus._id) },
+      bus_id: { $in: busesWithPlan.map((bus) => bus._id) },
     });
     const locationMap = new Map(
       liveLocations.map((loc) => [loc.bus_id.toString(), loc]),
     );
 
-    const response = buses.map((bus) => {
+    const response = busesWithPlan.map((bus) => {
       const liveLocation = locationMap.get(bus._id.toString());
       return {
         busNo: bus.bus_no,
@@ -595,6 +763,33 @@ async function setGlobalActivePlan(req, res) {
   }
 }
 
+function normalizeAlterationRoutes(routesByPlan) {
+  if (
+    !routesByPlan ||
+    typeof routesByPlan !== "object" ||
+    Array.isArray(routesByPlan)
+  ) {
+    return null;
+  }
+
+  const routes = [];
+  for (const [rawPlanName, stops] of Object.entries(routesByPlan)) {
+    const plan_name = rawPlanName.trim();
+    if (!plan_name || !Array.isArray(stops)) return null;
+    for (const stop of stops) {
+      const stop_name =
+        typeof stop?.stop_name === "string" ? stop.stop_name.trim() : "";
+      const stop_order = Number(stop?.stop_order);
+      const stopId = String(stop?.stopId || "").trim();
+      if (!stop_name || !Number.isInteger(stop_order) || stop_order < 1) {
+        return null;
+      }
+      routes.push({ plan_name, stop_name, stop_order, stopId: stopId || null });
+    }
+  }
+  return routes.length ? routes : null;
+}
+
 async function changeBus(req, res, alterationType) {
   try {
     const sourceBus = await findBusByIdentifier(req.params.busNo);
@@ -636,13 +831,86 @@ async function changeBus(req, res, alterationType) {
       });
     }
 
+    const { routeSource, routesByPlan } = req.body || {};
+    if (
+      routeSource !== undefined &&
+      !["source", "target", "custom"].includes(routeSource)
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "Choose routes from this bus, the replacement bus, or an upload.",
+      });
+    }
+    const alterationRoutes =
+      routeSource === "custom"
+        ? normalizeAlterationRoutes(routesByPlan)
+        : [];
+    if (routeSource === "custom" && !alterationRoutes) {
+      return res.status(400).json({
+        success: false,
+        error: "Upload a valid route file containing at least one stop.",
+      });
+    }
+    if (routeSource === "custom") {
+      const routeStops = await StopMaster.find({})
+        .select("stopId name")
+        .lean();
+      const stopsById = new Map(routeStops.map((stop) => [stop.stopId, stop]));
+      const stopsByName = new Map();
+      routeStops.forEach((stop) => {
+        const key = normalizeStopName(stop.name);
+        stopsByName.set(key, [...(stopsByName.get(key) || []), stop]);
+      });
+      const createdStops = new Map();
+      for (const route of alterationRoutes) {
+        let stop = route.stopId ? stopsById.get(route.stopId) : null;
+        const key = normalizeStopName(route.stop_name);
+        if (!stop) {
+          const matches = stopsByName.get(key) || [];
+          if (matches.length > 1) {
+            return res.status(400).json({
+              success: false,
+              error: `Stop "${route.stop_name}" matches multiple Stop Master names.`,
+            });
+          }
+          stop = matches[0] || createdStops.get(key);
+        }
+        if (!stop) {
+          stop = await StopMaster.create({
+            stopId: `STOP-${randomUUID()}`,
+            name: route.stop_name.trim().replace(/\s+/g, " "),
+            source: "EXISTING_STOP",
+            status: "PENDING",
+          });
+          createdStops.set(key, stop);
+        }
+        route.stopId = stop.stopId;
+        route.stop_name = stop.name;
+      }
+    }
+    if (routeSource === "source" || routeSource === "target") {
+      const selectedRouteBus = routeSource === "source" ? sourceBus : targetBus;
+      const selectedRoutes = await getBusRouteRows(selectedRouteBus._id);
+      if (!selectedRoutes.length) {
+        return res.status(400).json({
+          success: false,
+          error: `Bus ${selectedRouteBus.preview_number ?? selectedRouteBus.bus_no} has no uploaded routes. Choose another route option or upload new routes.`,
+        });
+      }
+    }
+
     const users = await findStudentsAssignedToBus(sourceBus);
 
     const isCombined = alterationType === "combine";
     const notificationType = isCombined ? "bus_combined" : "bus_altered";
+    const routeMessage = routeSource
+      ? "the route stops selected by the administrator"
+      : isCombined
+        ? "the combined route stops"
+        : "the original route stops";
     const previewMessage = isCombined
-      ? `Bus ${sourceBus.preview_number} is combined with bus ${targetBus.preview_number}. The service includes their merged stops, plans, and routes and uses bus ${targetBus.preview_number}'s location.`
-      : `Bus ${sourceBus.preview_number} is altered to use bus ${targetBus.preview_number}'s location. Your stops and plans remain unchanged.`;
+      ? `Bus ${sourceBus.preview_number} is combined with bus ${targetBus.preview_number}. It uses bus ${targetBus.preview_number}'s location and ${routeMessage}.`
+      : `Bus ${sourceBus.preview_number} is altered to use bus ${targetBus.preview_number}'s location and ${routeMessage}.`;
 
     const notifications = users.map((user) => ({
       user_id: user._id,
@@ -660,6 +928,8 @@ async function changeBus(req, res, alterationType) {
     sourceBus.altered_to_bus_id = targetBus._id;
     sourceBus.altered_to_preview = targetBus.preview_number ?? null;
     sourceBus.alteration_type = alterationType;
+    sourceBus.alteration_route_source = routeSource || null;
+    sourceBus.alteration_routes = alterationRoutes || [];
     sourceBus.altered_at = new Date();
     await sourceBus.save();
 
@@ -731,6 +1001,8 @@ async function restoreAlteredBus(req, res) {
     bus.altered_to_bus_id = null;
     bus.altered_to_preview = null;
     bus.alteration_type = null;
+    bus.alteration_route_source = null;
+    bus.alteration_routes = [];
     bus.altered_at = null;
     await bus.save();
 
@@ -791,13 +1063,28 @@ async function getBusRoutes(req, res) {
     }
 
     const routes = await getRoutesForBus(bus);
+    const incomingChanges = await getIncomingBusChanges(bus);
+    const routeSelectionLabel = await getRouteSelectionLabel(
+      bus,
+      incomingChanges,
+    );
+    const routeBusPreviewNumber =
+      incomingChanges.find((changedBus) => changedBus.alteration_type === "alter")
+        ?.preview_number ?? bus.preview_number;
+    const isReplacementRoute = incomingChanges.some(
+      (changedBus) => changedBus.alteration_type === "alter",
+    );
 
     const plansMap = {};
     for (const r of routes) {
       if (!plansMap[r.plan_name]) plansMap[r.plan_name] = [];
       plansMap[r.plan_name].push({
+        stopId: r.stopId,
         stop_name: r.stop_name,
         stop_order: r.stop_order,
+        latitude: r.latitude,
+        longitude: r.longitude,
+        stopStatus: r.stopStatus,
       });
     }
 
@@ -812,6 +1099,9 @@ async function getBusRoutes(req, res) {
       success: true,
       busNo: isSuperadmin ? bus.bus_no : String(bus.preview_number ?? bus.bus_no),
       previewNumber: bus.preview_number,
+      routeBusPreviewNumber,
+      isReplacementRoute,
+      routeSelectionLabel,
       activePlan,
       isBusActiveInCurrentPlan: !!isBusActiveInCurrentPlan,
       notActiveMessage: isBusActiveInCurrentPlan ? null : buildNotActiveMessage(activePlan),
@@ -899,11 +1189,11 @@ async function getPlans(req, res) {
       return res.status(404).json({ error: `Bus ${busNo} not found` });
     }
 
-    const routes = await BusRoute.find({ bus_id: bus._id })
-      .distinct("plan_name")
-      .sort();
-
-    res.json({ plans: routes });
+    const effectiveRoutes = await getRoutesForBus(bus);
+    res.json({
+      plans: [...new Set(effectiveRoutes.map((route) => route.plan_name))].sort(),
+      stops: effectiveRoutes.length,
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -941,16 +1231,45 @@ async function getLiveLocation(req, res) {
     }
 
     const effectiveBus = await resolveEffectiveBus(bus);
-    const alteration = buildAlterationDetails(bus, effectiveBus);
+    const incomingChanges = await getIncomingBusChanges(bus);
+    const alteration =
+      buildAlterationDetails(bus, effectiveBus) ||
+      buildReplacementDetails(bus, incomingChanges);
     const location = await BusLiveLocation.findOne({ bus_id: effectiveBus._id });
     const activePlan = await getCurrentGlobalPlan();
     const routes = await getRoutesForBus(bus);
+    const routeSelectionLabel = await getRouteSelectionLabel(
+      bus,
+      incomingChanges,
+    );
+    const routeBusPreviewNumber =
+      incomingChanges.find((changedBus) => changedBus.alteration_type === "alter")
+        ?.preview_number ?? bus.preview_number;
+    const isReplacementRoute = incomingChanges.some(
+      (changedBus) => changedBus.alteration_type === "alter",
+    );
     const activeStops = routes
       .filter(
         (route) =>
           route.plan_name.toUpperCase() === activePlan.toUpperCase(),
       )
-      .map(({ stop_name, stop_order }) => ({ stop_name, stop_order }));
+      .map(
+        ({
+          stopId,
+          stop_name,
+          stop_order,
+          latitude,
+          longitude,
+          stopStatus,
+        }) => ({
+          stopId,
+          stop_name,
+          stop_order,
+          latitude,
+          longitude,
+          stopStatus,
+        }),
+      );
     const isBusActiveInCurrentPlan = activeStops.length > 0;
 
     // Privacy: only superadmin may receive internal bus_no in responses.
@@ -977,6 +1296,9 @@ async function getLiveLocation(req, res) {
       previewNumber: effectiveBus.preview_number,
       effectivePreviewNumber: effectiveBus.preview_number,
       effectiveBusNo: effectiveBus.bus_no,
+      routeBusPreviewNumber,
+      isReplacementRoute,
+      routeSelectionLabel,
       latitude: location?.latitude ?? null,
       longitude: location?.longitude ?? null,
       speed: location?.speed ?? 0,
@@ -1029,10 +1351,23 @@ async function trackByPreview(req, res) {
     }
 
     const effectiveBus = await resolveEffectiveBus(bus);
-    const alteration = buildAlterationDetails(bus, effectiveBus);
+    const incomingChanges = await getIncomingBusChanges(bus);
+    const alteration =
+      buildAlterationDetails(bus, effectiveBus) ||
+      buildReplacementDetails(bus, incomingChanges);
     const location = await BusLiveLocation.findOne({ bus_id: effectiveBus._id });
     const activePlan = await getCurrentGlobalPlan();
     const routes = await getRoutesForBus(bus);
+    const routeSelectionLabel = await getRouteSelectionLabel(
+      bus,
+      incomingChanges,
+    );
+    const routeBusPreviewNumber =
+      incomingChanges.find((changedBus) => changedBus.alteration_type === "alter")
+        ?.preview_number ?? bus.preview_number;
+    const isReplacementRoute = incomingChanges.some(
+      (changedBus) => changedBus.alteration_type === "alter",
+    );
     const isBusActiveInCurrentPlan = hasRouteForPlan(routes, activePlan);
 
     // Bus found → always return 200 with offline status if no location doc,
@@ -1046,6 +1381,9 @@ async function trackByPreview(req, res) {
       previewNumber: effectiveBus.preview_number,
       effectivePreviewNumber: effectiveBus.preview_number,
       effectiveBusNo: effectiveBus.bus_no,
+      routeBusPreviewNumber,
+      isReplacementRoute,
+      routeSelectionLabel,
       currentPlan: activePlan,
       activePlan,
       isBusActiveInCurrentPlan: !!isBusActiveInCurrentPlan,
@@ -1070,6 +1408,12 @@ async function trackByPreview(req, res) {
 }
 
 module.exports = {
+  findBusByIdentifier,
+  resolveEffectiveBus,
+  getCurrentGlobalPlan,
+  getRoutesForBus,
+  getAssignedBusRoutes,
+  getIncomingBusChanges,
   uploadBusRoutes,
   updateBusNumber,
   getAllBuses,

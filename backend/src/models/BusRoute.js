@@ -7,6 +7,11 @@ const busRouteSchema = new mongoose.Schema(
       ref: 'Bus',
       required: true
     },
+    stopId: {
+      type: String,
+      ref: 'StopMaster',
+      default: null
+    },
     plan_name: {
       type: String,
       required: true
