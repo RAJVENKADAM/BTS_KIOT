@@ -316,7 +316,7 @@ export default function MasterScreen({ navigation }) {
         {recommendation?.gps?.status === "UNAVAILABLE" && (
           <View style={styles.noticeInline}>
             <Ionicons name="alert-circle-outline" size={20} color={COLORS.warning} />
-            <Text style={styles.body}>
+            <Text style={[styles.body, styles.noticeInlineBody]}>
               Live bus location is currently unavailable. No bus position or ETA
               is being estimated.
             </Text>
@@ -361,7 +361,7 @@ const styles = StyleSheet.create({
     alignItems: "flex-start",
   },
   headerTitle: { fontSize: 18, fontWeight: "700", color: COLORS.textHeader },
-  content: { padding: 20, paddingBottom: 34 },
+  content: { paddingHorizontal: 16, paddingTop: 20, paddingBottom: 34 },
   eyebrow: {
     marginTop: 8,
     color: COLORS.primary,
@@ -371,12 +371,18 @@ const styles = StyleSheet.create({
   },
   title: {
     color: COLORS.textHeader,
-    fontSize: 22,
+    fontSize: 21,
     fontWeight: "800",
     marginTop: 7,
     marginBottom: 4,
+    flexShrink: 1,
   },
-  planLabel: { fontSize: 13, color: COLORS.textBody, marginBottom: 16 },
+  planLabel: {
+    fontSize: 13,
+    color: COLORS.textBody,
+    marginBottom: 16,
+    flexShrink: 1,
+  },
   resultCard: {
     backgroundColor: COLORS.white,
     borderRadius: 18,
@@ -400,8 +406,9 @@ const styles = StyleSheet.create({
     marginTop: 6,
     marginBottom: 14,
     color: COLORS.textHeader,
-    fontSize: 24,
+    fontSize: 22,
     fontWeight: "800",
+    flexShrink: 1,
   },
   infoRow: {
     flexDirection: "row",
@@ -409,32 +416,48 @@ const styles = StyleSheet.create({
     gap: 9,
     marginTop: 10,
   },
-  infoText: { color: COLORS.textHeader, fontSize: 16, fontWeight: "600" },
+  infoText: {
+    color: COLORS.textHeader,
+    fontSize: 16,
+    fontWeight: "600",
+    flex: 1,
+    minWidth: 0,
+    flexShrink: 1,
+  },
   etaText: {
     color: COLORS.primary,
     fontSize: 18,
     fontWeight: "800",
     marginTop: 14,
+    flexShrink: 1,
   },
   subtleText: {
     color: COLORS.textBody,
     fontSize: 12,
     marginTop: 5,
     lineHeight: 18,
+    flexShrink: 1,
   },
-  timestamp: { marginTop: 17, color: COLORS.textBody, fontSize: 12 },
+  timestamp: {
+    marginTop: 17,
+    color: COLORS.textBody,
+    fontSize: 12,
+    flexShrink: 1,
+  },
   cardTitle: {
     fontSize: 17,
     lineHeight: 24,
     fontWeight: "800",
     color: COLORS.textHeader,
     marginTop: 10,
+    flexShrink: 1,
   },
   body: {
     color: COLORS.textBody,
     fontSize: 14,
     lineHeight: 21,
     marginTop: 10,
+    flexShrink: 1,
   },
   noticeCard: {
     backgroundColor: COLORS.white,
@@ -453,7 +476,13 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingHorizontal: 20,
   },
-  primaryButtonText: { color: COLORS.white, fontSize: 14, fontWeight: "800" },
+  primaryButtonText: {
+    color: COLORS.white,
+    fontSize: 14,
+    fontWeight: "800",
+    flexShrink: 1,
+    textAlign: "center",
+  },
   disabledButton: { opacity: 0.65 },
   secondaryButton: {
     minHeight: 44,
@@ -464,7 +493,13 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
   },
-  secondaryButtonText: { color: COLORS.primary, fontWeight: "800", fontSize: 13 },
+  secondaryButtonText: {
+    color: COLORS.primary,
+    fontWeight: "800",
+    fontSize: 13,
+    flexShrink: 1,
+    textAlign: "center",
+  },
   mapCard: {
     backgroundColor: COLORS.white,
     borderRadius: 18,
@@ -473,22 +508,30 @@ const styles = StyleSheet.create({
     ...SHADOWS.soft,
   },
   mapTitle: { color: COLORS.textHeader, fontWeight: "800", fontSize: 16 },
-  mapCaption: { color: COLORS.textBody, fontSize: 12, marginTop: 4, marginBottom: 10 },
+  mapCaption: {
+    color: COLORS.textBody,
+    fontSize: 12,
+    marginTop: 4,
+    marginBottom: 10,
+    flexShrink: 1,
+  },
   mapContainer: { height: 320, overflow: "hidden", borderRadius: 12 },
   noticeInline: {
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     gap: 8,
     backgroundColor: "#FFFBEB",
     borderRadius: 12,
     padding: 12,
     marginTop: 12,
   },
-  errorText: { color: COLORS.error, fontSize: 13, marginTop: 10 },
+  noticeInlineBody: { flex: 1, minWidth: 0, marginTop: 0 },
+  errorText: { color: COLORS.error, fontSize: 13, marginTop: 10, flexShrink: 1 },
   footer: {
     textAlign: "center",
     color: COLORS.textBody,
     fontSize: 12,
     marginTop: 14,
+    flexShrink: 1,
   },
 });

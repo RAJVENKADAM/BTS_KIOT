@@ -134,9 +134,9 @@ function selectBestMasterRecommendation(evaluatedServices) {
       .filter((item) => item.status === "RECOMMENDED")
       .sort(
         (first, second) =>
-          first.assignmentPriority - second.assignmentPriority ||
           first.recommendation.userDistanceToStop -
             second.recommendation.userDistanceToStop ||
+          first.assignmentPriority - second.assignmentPriority ||
           first.recommendation.busRouteDistanceToStop -
             second.recommendation.busRouteDistanceToStop,
       )[0] || null

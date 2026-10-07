@@ -471,15 +471,17 @@ export default function AddBusesScreen() {
       const findColumn = (names) =>
         headers.findIndex((header) => names.includes(normalizeSheetHeader(header)));
       const stopIdColumn = findColumn(["stopid"]);
-      const nameColumn = findColumn(["stopname", "stop", "name"]);
+      const nameColumn = findColumn(["stopname", "stops", "stop", "name"]);
       const longitudeColumn = findColumn([
         "longitude",
+        "long",
         "x",
         "xcoordinate",
         "xcoordinatelongitude",
       ]);
       const latitudeColumn = findColumn([
         "latitude",
+        "lat",
         "y",
         "ycoordinate",
         "ycoordinatelatitude",
@@ -490,7 +492,7 @@ export default function AddBusesScreen() {
         latitudeColumn < 0
       ) {
         throw new Error(
-          "Use columns for Stop Name, X Coordinate (Longitude), and Y Coordinate (Latitude).",
+          "Use columns for Stop, Lat (Latitude), and Long (Longitude).",
         );
       }
 
@@ -515,8 +517,8 @@ export default function AddBusesScreen() {
         )
         .join("\n");
       Alert.alert(
-        issues.length ? "Coordinate sheet partially imported" : "Coordinates imported",
-        `${summary.updated || 0} stop(s) updated. ${summary.missingCoordinates || 0} stop(s) still have blank coordinates.${issueDetails ? `\n\n${issueDetails}` : ""}`,
+        issues.length ? "Stop sheet not fully imported" : "Stops replaced",
+        `${(summary.updated || 0) + (summary.missingCoordinates || 0)} stop(s) saved from this sheet, including ${summary.added || 0} new stop(s). ${summary.updated || 0} have coordinates, ${summary.missingCoordinates || 0} have blank coordinates, and ${summary.removed || 0} old stop(s) were removed.${issueDetails ? `\n\n${issueDetails}` : ""}`,
       );
     } catch (error) {
       Alert.alert(
@@ -739,7 +741,7 @@ export default function AddBusesScreen() {
                   Stop Master coordinates
                 </Text>
                 <Text style={styles.coordinateSheetDescription}>
-                  Download the full stop list, fill coordinates where blank, then upload the same sheet. X is longitude; Y is latitude.
+                  Upload a stop list with Stops, Lat, and Long columns. This sheet replaces the saved stop list; stops omitted from it are removed.
                 </Text>
                 <TouchableOpacity
                   style={styles.optionButton}
@@ -1418,6 +1420,7 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     marginTop: 5,
     marginBottom: 8,
+    flexShrink: 1,
   },
   alteredSection: {
     marginTop: 18,
@@ -1578,7 +1581,14 @@ const styles = StyleSheet.create({
     backgroundColor: "#fff",
     gap: 12,
   },
-  optionText: { fontSize: 15, color: COLORS.textHeader, fontWeight: "600" },
+  optionText: {
+    fontSize: 15,
+    color: COLORS.textHeader,
+    fontWeight: "600",
+    flex: 1,
+    minWidth: 0,
+    flexShrink: 1,
+  },
   optionCopy: { flex: 1, marginLeft: 12 },
   optionHint: {
     color: COLORS.textBody,

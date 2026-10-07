@@ -1,7 +1,9 @@
+const { randomUUID } = require("crypto");
 const StopMaster = require("../models/StopMaster");
 const { getIO } = require("../socket");
 const normalizeStopName = require("../utils/normalizeStopName");
 const uniqueStopCoordinateRows = require("../utils/uniqueStopCoordinateRows");
+const buildStopCoordinateOperations = require("../utils/buildStopCoordinateOperations");
 
 function validCoordinates(latitude, longitude) {
   return (
@@ -50,7 +52,7 @@ async function importCoordinates(req, res) {
 
   try {
     const knownStops = await StopMaster.find({})
-      .select("stopId name")
+      .select("stopId name aliases")
       .lean();
     const byName = new Map();
     const byId = new Map(knownStops.map((stop) => [stop.stopId, stop]));
@@ -59,24 +61,8 @@ async function importCoordinates(req, res) {
       byName.set(key, [...(byName.get(key) || []), stop]);
     }
 
+    const importedStops = [];
     const rowIndexesByName = new Map();
-    rows.forEach((row, index) => {
-      const key = row?.stopId
-        ? `ID:${String(row.stopId).trim()}`
-        : normalizeStopName(row?.name);
-      if (key) {
-        rowIndexesByName.set(key, [
-          ...(rowIndexesByName.get(key) || []),
-          index,
-        ]);
-      }
-    });
-    const duplicateRows = new Set();
-    for (const indexes of rowIndexesByName.values()) {
-      if (indexes.length > 1) indexes.forEach((index) => duplicateRows.add(index));
-    }
-
-    const operations = [];
     const rowResults = [];
     rows.forEach((row, index) => {
       const name = String(row?.name || "").trim().replace(/\s+/g, " ");
@@ -86,6 +72,7 @@ async function importCoordinates(req, res) {
       const hasLatitude = String(rawLatitude ?? "").trim() !== "";
       const hasLongitude = String(rawLongitude ?? "").trim() !== "";
       const stopId = String(row?.stopId || "").trim();
+      const normalizedName = normalizeStopName(name);
 
       if (!name || name.length > 160) {
         rowResults.push({
@@ -96,7 +83,7 @@ async function importCoordinates(req, res) {
         });
         return;
       }
-      if (duplicateRows.has(index)) {
+      if (rowIndexesByName.has(normalizedName)) {
         rowResults.push({
           row: index + 2,
           name,
@@ -105,13 +92,15 @@ async function importCoordinates(req, res) {
         });
         return;
       }
+      rowIndexesByName.set(normalizedName, index);
+
       const identifiedStop = stopId ? byId.get(stopId) : null;
       if (stopId && !identifiedStop) {
         rowResults.push({
           row: index + 2,
           name,
           status: "not_found",
-          reason: "Stop ID does not match Stop Master.",
+          reason: "Stop ID does not match Stop Master. Download a fresh sheet and retry.",
         });
         return;
       }
@@ -130,15 +119,6 @@ async function importCoordinates(req, res) {
       const matches = identifiedStop
         ? [identifiedStop]
         : byName.get(key) || [];
-      if (!matches.length) {
-        rowResults.push({
-          row: index + 2,
-          name,
-          status: "not_found",
-          reason: "Stop name does not match Stop Master.",
-        });
-        return;
-      }
       if (matches.length > 1) {
         rowResults.push({
           row: index + 2,
@@ -148,63 +128,85 @@ async function importCoordinates(req, res) {
         });
         return;
       }
-      if (!hasLatitude && !hasLongitude) {
-        rowResults.push({ row: index + 2, name, status: "missing_coordinates" });
-        return;
-      }
 
-      const latitude = Number(rawLatitude);
-      const longitude = Number(rawLongitude);
-      if (
-        !hasLatitude ||
-        !hasLongitude ||
-        !validCoordinates(latitude, longitude)
-      ) {
+      if (hasLatitude !== hasLongitude) {
         rowResults.push({
           row: index + 2,
           name,
           status: "invalid",
-          reason: "Both coordinate values must be valid (X = longitude, Y = latitude).",
+          reason: "Provide both latitude and longitude, or leave both blank.",
         });
         return;
       }
 
-      for (const match of matches) {
-        operations.push({
-          updateOne: {
-            filter: { stopId: match.stopId },
-            update: {
-              $set: {
-                latitude,
-                longitude,
-                source: "ADMIN",
-                status: "VERIFIED",
-                verifiedBy: req.user.id,
-                verifiedAt: new Date(),
-              },
-            },
-          },
+      const latitude = hasLatitude ? Number(rawLatitude) : null;
+      const longitude = hasLongitude ? Number(rawLongitude) : null;
+      if (hasLatitude && !validCoordinates(latitude, longitude)) {
+        rowResults.push({
+          row: index + 2,
+          name,
+          status: "invalid",
+          reason: "Latitude must be between -90 and 90 and longitude between -180 and 180.",
         });
+        return;
       }
-      rowResults.push({ row: index + 2, name, status: "updated" });
+
+      const matchedStop = matches[0];
+      importedStops.push({
+        stopId: matchedStop?.stopId || `STOP-${randomUUID()}`,
+        name,
+        latitude,
+        longitude,
+      });
+      rowResults.push({
+        row: index + 2,
+        name,
+        status: hasLatitude ? "updated" : "missing_coordinates",
+      });
     });
 
-    if (operations.length) {
-      await StopMaster.bulkWrite(operations);
-      getIO()?.emit("bus-update", {
-        actionType: "STOP_COORDINATES_UPDATED",
-        count: operations.length,
+    const invalidRows = rowResults.filter((row) =>
+      ["invalid", "ambiguous", "not_found"].includes(row.status),
+    );
+    if (invalidRows.length) {
+      return res.status(400).json({
+        success: false,
+        error: "The stop sheet has invalid rows; no database records were changed.",
+        rowResults,
       });
     }
+    if (!importedStops.length || !importedStops.some((stop) => stop.latitude != null)) {
+      return res.status(400).json({
+        success: false,
+        error: "The sheet must contain at least one stop with valid coordinates; no database records were changed.",
+      });
+    }
+
+    const operations = buildStopCoordinateOperations(
+      importedStops,
+      req.user.id,
+      new Date(),
+    );
+    await StopMaster.bulkWrite(operations);
+    const importedStopIds = importedStops.map((stop) => stop.stopId);
+    const removed = knownStops.filter(
+      (stop) => !importedStopIds.includes(stop.stopId),
+    ).length;
+    await StopMaster.deleteMany({ stopId: { $nin: importedStopIds } });
+    getIO()?.emit("bus-update", {
+      actionType: "STOP_COORDINATES_UPDATED",
+      count: importedStops.filter((stop) => stop.latitude != null).length,
+      removed,
+    });
+
     const summary = {
       totalRows: rows.length,
-      updated: operations.length,
+      updated: importedStops.filter((stop) => stop.latitude != null).length,
+      added: importedStops.filter((stop) => !byId.has(stop.stopId)).length,
+      removed,
       missingCoordinates: rowResults.filter(
         (row) => row.status === "missing_coordinates",
       ).length,
-      notFound: rowResults.filter((row) => row.status === "not_found").length,
-      ambiguous: rowResults.filter((row) => row.status === "ambiguous").length,
-      invalid: rowResults.filter((row) => row.status === "invalid").length,
     };
     return res.json({ success: true, summary, rowResults });
   } catch (error) {

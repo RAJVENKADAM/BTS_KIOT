@@ -228,7 +228,6 @@ async function getBusRouteRows(busId) {
     .select("plan_name stop_name stop_order stopId")
     .sort({ plan_name: 1, stop_order: 1 })
     .lean();
-  const pendingByName = new Map();
   const existingIds = rows.map((row) => row.stopId).filter(Boolean);
   const existingStops = existingIds.length
     ? await StopMaster.find({ stopId: { $in: existingIds } })
@@ -236,39 +235,32 @@ async function getBusRouteRows(busId) {
         .lean()
     : [];
   const existingIdSet = new Set(existingStops.map((stop) => stop.stopId));
+  const activeRows = [];
 
   for (const row of rows) {
-    if (row.stopId && existingIdSet.has(row.stopId)) continue;
+    if (row.stopId) {
+      if (existingIdSet.has(row.stopId)) activeRows.push(row);
+      continue;
+    }
 
     const { stop } = await findVerifiedStop({ name: row.stop_name });
     let stopId = stop?.stopId;
     if (!stopId) {
       const key = String(row.stop_name).trim().replace(/\s+/g, " ").toLowerCase();
-      if (pendingByName.has(key)) {
-        stopId = pendingByName.get(key);
-      } else {
-        const exact = new RegExp(`^${escapeRegExp(key)}$`, "i");
-        let pendingStop = await StopMaster.findOne({
-          status: "PENDING",
-          name: exact,
-        });
-        if (!pendingStop) {
-          pendingStop = await StopMaster.create({
-            stopId: `STOP-${randomUUID()}`,
-            name: row.stop_name,
-            source: "EXISTING_STOP",
-            status: "PENDING",
-          });
-        }
-        stopId = pendingStop.stopId;
-        pendingByName.set(key, stopId);
-      }
+      const exact = new RegExp(`^${escapeRegExp(key)}$`, "i");
+      const pendingStop = await StopMaster.findOne({
+        status: "PENDING",
+        name: exact,
+      }).select("stopId").lean();
+      stopId = pendingStop?.stopId;
     }
+    if (!stopId) continue;
     await BusRoute.updateOne({ _id: row._id }, { $set: { stopId } });
     row.stopId = stopId;
+    activeRows.push(row);
   }
 
-  return hydrateRouteRows(rows);
+  return hydrateRouteRows(activeRows);
 }
 
 async function hydrateRouteRows(routes) {

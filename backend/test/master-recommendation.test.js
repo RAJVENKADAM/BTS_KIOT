@@ -39,35 +39,62 @@ test("does not recommend stops behind the bus on its assigned route", () => {
     routeStops,
   });
 
-  test("prefers the active original bus route over a closer altered bus route", () => {
-    const directRecommendation = {
-      busNumber: "4",
-      userDistanceToStop: 50000,
-      busRouteDistanceToStop: 1000,
-    };
-    const alteredRecommendation = {
-      busNumber: "2",
-      userDistanceToStop: 100,
-      busRouteDistanceToStop: 100,
-    };
-    const selected = selectBestMasterRecommendation([
-      {
-        status: "RECOMMENDED",
-        assignmentPriority: 1,
-        recommendation: alteredRecommendation,
-      },
-      {
-        status: "RECOMMENDED",
-        assignmentPriority: 0,
-        recommendation: directRecommendation,
-      },
-    ]);
-
-    assert.equal(selected.recommendation.busNumber, "4");
-  });
-
   assert.equal(result.status, "RECOMMENDED");
   assert.equal(result.recommendation.stop.stopId, "STOP-2");
+});
+
+test("chooses a closer future stop over the assigned bus stop", () => {
+  const directRecommendation = {
+    busNumber: "4",
+    userDistanceToStop: 80000,
+    busRouteDistanceToStop: 1000,
+  };
+  const alteredRecommendation = {
+    busNumber: "2",
+    userDistanceToStop: 200,
+    busRouteDistanceToStop: 100,
+  };
+  const selected = selectBestMasterRecommendation([
+    {
+      status: "RECOMMENDED",
+      assignmentPriority: 1,
+      recommendation: alteredRecommendation,
+    },
+    {
+      status: "RECOMMENDED",
+      assignmentPriority: 0,
+      recommendation: directRecommendation,
+    },
+  ]);
+
+  assert.equal(selected.recommendation.busNumber, "2");
+});
+
+test("prefers the assigned bus when future stops are equally close", () => {
+  const assignedRecommendation = {
+    busNumber: "4",
+    userDistanceToStop: 200,
+    busRouteDistanceToStop: 1000,
+  };
+  const otherRecommendation = {
+    busNumber: "2",
+    userDistanceToStop: 200,
+    busRouteDistanceToStop: 100,
+  };
+  const selected = selectBestMasterRecommendation([
+    {
+      status: "RECOMMENDED",
+      assignmentPriority: 1,
+      recommendation: otherRecommendation,
+    },
+    {
+      status: "RECOMMENDED",
+      assignmentPriority: 0,
+      recommendation: assignedRecommendation,
+    },
+  ]);
+
+  assert.equal(selected.recommendation.busNumber, "4");
 });
 
 test("chooses the most accessible future stop, not an already-passed nearby stop", () => {
