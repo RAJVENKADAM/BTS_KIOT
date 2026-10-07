@@ -119,6 +119,29 @@ test("does not invent a recommendation when all route stops are behind the bus",
   assert.equal(result.recommendation, null);
 });
 
+test("does not recommend a single stop after the bus has passed it toward college", () => {
+  const result = getMasterRecommendation({
+    userLocation: { latitude: 11, longitude: 78.015 },
+    busLocation: { latitude: 11, longitude: 78.015 },
+    routeStops: [routeStops[1]],
+    collegeLocation: { latitude: 11, longitude: 78.019759 },
+  });
+
+  assert.equal(result.status, "NO_FUTURE_STOPS");
+  assert.equal(result.recommendation, null);
+});
+
+test("does not recommend the final stop after the bus has passed it toward college", () => {
+  const result = getMasterRecommendation({
+    userLocation: { latitude: 11, longitude: 78.019 },
+    busLocation: { latitude: 11, longitude: 78.0205 },
+    routeStops,
+  });
+
+  assert.equal(result.status, "NO_FUTURE_STOPS");
+  assert.equal(result.recommendation, null);
+});
+
 test("uses pending stops that have saved coordinates", () => {
   const result = getMasterRecommendation({
     userLocation: { latitude: 11, longitude: 78.002 },

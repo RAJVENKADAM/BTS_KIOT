@@ -60,6 +60,8 @@ const MAP_SOURCE = {
 
       var markers = {};
       var routeLine = null;
+      var routeRequestId = 0;
+      var lastRequestedRoute = null;
       var lastFocusedTarget = null;
 
       function escapeHtml(value) {
@@ -116,6 +118,83 @@ const MAP_SOURCE = {
         markers[key] = marker;
       }
 
+      function updateRoadRoute(user, stop) {
+        if (!user || !stop) {
+          routeRequestId += 1;
+          lastRequestedRoute = null;
+          if (routeLine) {
+            map.removeLayer(routeLine);
+            routeLine = null;
+          }
+          return;
+        }
+
+        var routeKey = [
+          user.latitude,
+          user.longitude,
+          stop.latitude,
+          stop.longitude
+        ].join(',');
+        if (routeKey === lastRequestedRoute) return;
+        lastRequestedRoute = routeKey;
+        var requestId = ++routeRequestId;
+        if (routeLine) {
+          map.removeLayer(routeLine);
+          routeLine = null;
+        }
+        var url = 'https://router.project-osrm.org/route/v1/driving/' +
+          user.longitude + ',' + user.latitude + ';' +
+          stop.longitude + ',' + stop.latitude +
+          '?overview=full&geometries=geojson';
+
+        fetch(url)
+          .then(function (response) {
+            if (!response.ok) {
+              throw new Error('Routing service returned ' + response.status);
+            }
+            return response.json();
+          })
+          .then(function (result) {
+            if (requestId !== routeRequestId) return;
+            var coordinates = result.routes && result.routes[0] &&
+              result.routes[0].geometry &&
+              result.routes[0].geometry.coordinates;
+            if (
+              result.code !== 'Ok' ||
+              !Array.isArray(coordinates) ||
+              coordinates.length < 2
+            ) {
+              throw new Error('No road route was returned');
+            }
+
+            var points = coordinates.map(function (coordinate) {
+              return [coordinate[1], coordinate[0]];
+            });
+            if (routeLine) map.removeLayer(routeLine);
+            routeLine = L.polyline(points, {
+              color: '#16a34a',
+              weight: 4,
+              opacity: 0.85,
+              lineCap: 'round',
+              lineJoin: 'round'
+            }).addTo(map);
+            if (lastFocusedTarget) {
+              map.fitBounds(routeLine.getBounds(), {
+                padding: [32, 32],
+                maxZoom: 16,
+                animate: true,
+                duration: 0.6
+              });
+            }
+          })
+          .catch(function (error) {
+            if (requestId === routeRequestId) {
+              lastRequestedRoute = null;
+              console.warn('Could not load the map route:', error.message);
+            }
+          });
+      }
+
       window.updateMasterMap = function (data) {
         data = data || {};
         updateMarker('user', data.user, 'user', 'You', 'Your current location');
@@ -141,23 +220,7 @@ const MAP_SOURCE = {
           ].filter(function (line) { return line !== null; })
         );
 
-        if (data.user && data.stop) {
-          var linePoints = [
-            [data.user.latitude, data.user.longitude],
-            [data.stop.latitude, data.stop.longitude]
-          ];
-          if (routeLine) routeLine.setLatLngs(linePoints);
-          else {
-            routeLine = L.polyline(linePoints, {
-              color: '#16a34a',
-              dashArray: '6 8',
-              weight: 3
-            }).addTo(map);
-          }
-        } else if (routeLine) {
-          map.removeLayer(routeLine);
-          routeLine = null;
-        }
+        updateRoadRoute(data.user, data.stop);
 
         var targetKey = data.stop
           ? [data.stopId || '', data.stop.latitude, data.stop.longitude].join(':')
@@ -202,7 +265,9 @@ export default function MasterMap({ recommendation }) {
       bus: toPoint(result.gps),
       stopId: result.stop?.stopId,
       stopName: result.stop?.name || "Recommended stop",
-      busNumber: result.busNumber || "Nearest active bus",
+      busNumber: result.serviceBusNumbers?.length
+        ? result.serviceBusNumbers.join(" + ")
+        : result.busNumber || "Nearest active bus",
       userDistance: result.userDistanceToStop,
       busStatus: result.status || "Unknown",
       etaMinutes: result.etaMinutes,

@@ -1,7 +1,9 @@
 const EARTH_RADIUS_METERS = 6371000;
 const STOP_PASSED_RADIUS_METERS = 75;
+const COLLEGE_ROUTE_LINK_METERS = 5000;
 const WALKING_SPEED_METERS_PER_SECOND = 1.2;
 const WALKING_ROUTE_DETOUR_FACTOR = 1.3;
+const COLLEGE_LOCATION = { latitude: 11.554528, longitude: 78.019759 };
 
 function isValidPoint(point) {
   return (
@@ -148,6 +150,7 @@ function getMasterRecommendation({
   busLocation,
   routeStops,
   busSpeedKmh,
+  collegeLocation = COLLEGE_LOCATION,
 }) {
   if (!isValidPoint(userLocation) || !isValidPoint(busLocation)) {
     return { status: "LOCATION_UNAVAILABLE", recommendation: null };
@@ -163,9 +166,19 @@ function getMasterRecommendation({
     return { status: "NO_VERIFIED_STOPS", recommendation: null };
   }
 
-  const routePosition = getBusRoutePosition(busLocation, orderedStops);
+  const positionStops = [...orderedStops];
+  const collegeDistance = isValidPoint(collegeLocation)
+    ? distanceMeters(positionStops[positionStops.length - 1], collegeLocation)
+    : Infinity;
   if (
-    orderedStops.length > 1 &&
+    collegeDistance > STOP_PASSED_RADIUS_METERS &&
+    collegeDistance <= COLLEGE_ROUTE_LINK_METERS
+  ) {
+    positionStops.push(collegeLocation);
+  }
+  const routePosition = getBusRoutePosition(busLocation, positionStops);
+  if (
+    positionStops.length > 1 &&
     routePosition.segmentIndex === 0 &&
     routePosition.fraction === 0 &&
     distanceMeters(busLocation, orderedStops[0]) > STOP_PASSED_RADIUS_METERS
@@ -182,14 +195,15 @@ function getMasterRecommendation({
       userDistanceToStop: Math.round(distanceMeters(userLocation, stop)),
       busDistanceToStop: Math.round(distanceMeters(busLocation, stop)),
       busRouteDistanceToStop: Math.round(
-        getRouteDistanceToStop(orderedStops, routePosition, index),
+        getRouteDistanceToStop(positionStops, routePosition, index),
       ),
     }))
     .filter(({ index, busDistanceToStop }) => {
-      if (orderedStops.length === 1) {
-        return busDistanceToStop > STOP_PASSED_RADIUS_METERS;
-      }
-      return index > routePosition.progress + 0.001;
+      return (
+        index > routePosition.progress + 0.001 &&
+        (orderedStops.length > 1 ||
+          busDistanceToStop > STOP_PASSED_RADIUS_METERS)
+      );
     })
     .map((candidate) => {
       const walkingEtaMinutes =
@@ -209,10 +223,11 @@ function getMasterRecommendation({
 
   const selected = candidates[0];
   if (!selected) {
-    const hasFutureStop = orderedStops.some((stop, index) =>
-      orderedStops.length === 1
-        ? distanceMeters(busLocation, stop) > STOP_PASSED_RADIUS_METERS
-        : index > routePosition.progress + 0.001,
+    const hasFutureStop = orderedStops.some(
+      (stop, index) =>
+        index > routePosition.progress + 0.001 &&
+        (orderedStops.length > 1 ||
+          distanceMeters(busLocation, stop) > STOP_PASSED_RADIUS_METERS),
     );
     return {
       status: hasFutureStop ? "NO_CATCHABLE_STOPS" : "NO_FUTURE_STOPS",

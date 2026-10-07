@@ -130,6 +130,9 @@ export function createHttpError(response, data) {
   err.status = response.status;
   err.code = data?.error || data?.code || `HTTP_${response.status}`;
   err.serverMessage = data?.error || data?.message;
+  if (Array.isArray(data?.rowResults)) {
+    err.rowResults = data.rowResults;
+  }
   return err;
 }
 

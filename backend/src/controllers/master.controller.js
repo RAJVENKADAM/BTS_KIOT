@@ -12,6 +12,7 @@ const {
   getMasterRecommendation,
   selectBestMasterRecommendation,
 } = require("../utils/masterRecommendation");
+const getMasterServiceIdentity = require("../utils/masterServiceIdentity");
 
 const GPS_FRESHNESS_MS = 3 * 60 * 1000;
 
@@ -26,10 +27,6 @@ function isCoordinate(value, minimum, maximum) {
   );
 }
 
-function publicBusNumber(bus) {
-  return bus?.preview_number ?? bus?.bus_name ?? null;
-}
-
 function normalizeBusIdentifier(value) {
   return String(value ?? "").trim().toUpperCase();
 }
@@ -41,19 +38,6 @@ async function findAssignedBus(identifier) {
     (await Bus.findOne({ bus_no: normalized }).lean()) ||
     (await Bus.findOne({ preview_number: normalized }).lean())
   );
-}
-
-function getOperationType(assignedBus, incomingChanges) {
-  if (assignedBus.alteration_type) {
-    return assignedBus.alteration_type.toUpperCase();
-  }
-  if (incomingChanges.some((change) => change.alteration_type === "combine")) {
-    return "COMBINE";
-  }
-  if (incomingChanges.some((change) => change.alteration_type === "alter")) {
-    return "ALTER";
-  }
-  return "NORMAL";
 }
 
 async function getRecommendation(req, res) {
@@ -184,14 +168,13 @@ async function getRecommendation(req, res) {
         now - new Date(lastSuccessfulGpsUpdate).getTime() <= GPS_FRESHNESS_MS &&
         isCoordinate(location.latitude, -90, 90) &&
         isCoordinate(location.longitude, -180, 180);
-      const assignedBusNumber = service.isAssignedOperationalService
-        ? publicBusNumber(assignedBus) || assignedBus.bus_no
-        : publicBusNumber(service.bus);
-      const operatingBusNumber =
-        publicBusNumber(service.operationalBus) || assignedBusNumber;
-      const busNumber = service.isAssignedOperationalService
-        ? assignedBusNumber
-        : operatingBusNumber;
+      const serviceIdentity = getMasterServiceIdentity({
+        bus: service.bus,
+        operationalBus: service.operationalBus,
+        assignedBus,
+        incomingChanges: service.incomingChanges,
+        isAssignedOperationalService: service.isAssignedOperationalService,
+      });
       const isOriginalAssignedBus =
         service.isAssignedOperationalService &&
         String(service.bus._id) === String(assignedBus?._id) &&
@@ -205,12 +188,7 @@ async function getRecommendation(req, res) {
           ? 1
           : 2;
       const base = {
-        assignedBusNumber,
-        busNumber,
-        operatingBusNumber,
-        operationType: service.isAssignedOperationalService
-          ? getOperationType(assignedBus, [])
-          : getOperationType(service.bus, service.incomingChanges),
+        ...serviceIdentity,
         routeId: null,
         userLocation: { latitude, longitude },
         gps: isGpsFresh
@@ -292,13 +270,12 @@ async function getRecommendation(req, res) {
       BUS_OFF_ROUTE:
         "Active bus locations are too far from their routes to determine a waiting stop.",
     };
-    const fallback = evaluated.find((item) => item.recommendation);
     return res.json({
       success: true,
       status,
       message: messageByStatus[status] || "No waiting stop is available right now.",
       plan: activePlan,
-      recommendation: fallback?.recommendation || null,
+      recommendation: null,
     });
   } catch (error) {
     console.error("getMasterRecommendation error:", error);

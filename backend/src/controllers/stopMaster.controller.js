@@ -169,9 +169,16 @@ async function importCoordinates(req, res) {
       ["invalid", "ambiguous", "not_found"].includes(row.status),
     );
     if (invalidRows.length) {
+      const rowDetails = invalidRows
+        .slice(0, 5)
+        .map(
+          (row) =>
+            `Row ${row.row} (${row.name || "unnamed"}): ${row.reason || row.status}`,
+        )
+        .join("\n");
       return res.status(400).json({
         success: false,
-        error: "The stop sheet has invalid rows; no database records were changed.",
+        error: `The stop sheet has invalid rows; no database records were changed.\n${rowDetails}`,
         rowResults,
       });
     }

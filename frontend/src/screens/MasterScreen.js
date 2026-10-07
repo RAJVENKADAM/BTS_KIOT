@@ -35,7 +35,8 @@ function getStatusMessage(status, message) {
   if (status === "GPS_UNAVAILABLE") {
     return "Live location is currently unavailable for the active buses.";
   }
-  if (status === "NO_ACTIVE_BUSES") return "There are no active buses right now.";
+  if (status === "NO_ACTIVE_BUSES")
+    return "There are no active buses right now.";
   return "No waiting stop is available right now.";
 }
 
@@ -79,7 +80,9 @@ export default function MasterScreen({ navigation }) {
       setRecommendationData(result);
       socket?.emit("join-master");
     } catch (refreshError) {
-      setError(refreshError.message || "Could not refresh your bus recommendation.");
+      setError(
+        refreshError.message || "Could not refresh your bus recommendation.",
+      );
     } finally {
       setLoading(false);
     }
@@ -155,15 +158,14 @@ export default function MasterScreen({ navigation }) {
       <ScrollView ref={scrollRef} contentContainerStyle={styles.content}>
         <Text style={styles.eyebrow}>ACTIVE BUSES NEAR YOU</Text>
         <Text style={styles.title}>WHERE SHOULD I WAIT NOW?</Text>
-        {recommendationData?.plan && (
-          <Text style={styles.planLabel}>
-            Active plan: {recommendationData.plan}
-          </Text>
-        )}
 
         {permission === "denied" ? (
           <View style={styles.noticeCard}>
-            <Ionicons name="location-outline" size={30} color={COLORS.primary} />
+            <Ionicons
+              name="location-outline"
+              size={30}
+              color={COLORS.primary}
+            />
             <Text style={styles.cardTitle}>Location Required</Text>
             <Text style={styles.body}>
               Master needs your current location to determine a nearby waiting
@@ -180,7 +182,9 @@ export default function MasterScreen({ navigation }) {
         ) : loading && !recommendationData ? (
           <View style={styles.noticeCard}>
             <ActivityIndicator color={COLORS.primary} size="large" />
-            <Text style={styles.body}>Finding active buses and nearby stops…</Text>
+            <Text style={styles.body}>
+              Finding active buses and nearby stops…
+            </Text>
           </View>
         ) : error && !recommendationData ? (
           <View style={styles.noticeCard}>
@@ -199,49 +203,32 @@ export default function MasterScreen({ navigation }) {
                   </Text>
                 )}
                 <View style={styles.infoRow}>
-                  <Ionicons name="bus-outline" size={20} color={COLORS.primary} />
                   <Text style={styles.infoText}>
-                    Bus {recommendation.busNumber || "Nearest active bus"}
+                    Bus{" "}
+                    {recommendation.serviceBusNumbers?.length
+                      ? recommendation.serviceBusNumbers.join(" + ")
+                      : recommendation.busNumber || "Nearest active bus"}
                   </Text>
                 </View>
                 {recommendation.operatingBusNumber &&
-                  recommendation.operatingBusNumber !== recommendation.busNumber && (
+                  !recommendation.serviceBusNumbers?.includes(
+                    String(recommendation.operatingBusNumber),
+                  ) && (
                     <Text style={styles.subtleText}>
-                      Assigned bus {recommendation.busNumber} is operating as{" "}
-                      {recommendation.operatingBusNumber}
+                      {recommendation.operationType === "ALTER"
+                        ? `Original bus ${recommendation.busNumber} is operating as`
+                        : "Service is operated by"}{" "}
+                      bus {recommendation.operatingBusNumber}
                     </Text>
                   )}
                 <View style={styles.infoRow}>
-                  <Ionicons name="walk-outline" size={20} color={COLORS.textBody} />
                   <Text style={styles.infoText}>
-                    {formatDistance(recommendation.userDistanceToStop)} from you
+                    {formatDistance(recommendation.userDistanceToStop)}
                     {recommendation.walkingEtaMinutes
-                      ? ` · about ${recommendation.walkingEtaMinutes} min walk`
+                      ? ` | About ${recommendation.walkingEtaMinutes} min walk`
                       : ""}
                   </Text>
                 </View>
-                <View style={styles.infoRow}>
-                  <Ionicons
-                    name="navigate-outline"
-                    size={20}
-                    color={COLORS.success}
-                  />
-                  <Text style={styles.infoText}>
-                    Bus {String(recommendation.status || "EN_ROUTE")
-                      .toLowerCase()
-                      .replace("_", " ")}
-                  </Text>
-                </View>
-                <Text style={styles.etaText}>
-                  {recommendation.etaMinutes == null
-                    ? "ETA unavailable"
-                    : `Estimated arrival: ${recommendation.etaMinutes} min`}
-                </Text>
-                {recommendation.etaUnavailableReason && (
-                  <Text style={styles.subtleText}>
-                    {recommendation.etaUnavailableReason}
-                  </Text>
-                )}
               </>
             ) : (
               <>
@@ -250,11 +237,11 @@ export default function MasterScreen({ navigation }) {
                     ? "ACTIVE BUSES HAVE PASSED THEIR REMAINING STOPS"
                     : status === "NO_CATCHABLE_STOPS"
                       ? "YOUR BUS CANNOT BE CAUGHT RIGHT NOW"
-                    : status === "GPS_UNAVAILABLE"
-                      ? "LIVE BUS LOCATION UNAVAILABLE"
-                      : status === "NO_ACTIVE_BUSES"
-                        ? "NO ACTIVE BUSES"
-                        : "NO WAITING STOP AVAILABLE"}
+                      : status === "GPS_UNAVAILABLE"
+                        ? "LIVE BUS LOCATION UNAVAILABLE"
+                        : status === "NO_ACTIVE_BUSES"
+                          ? "NO ACTIVE BUSES"
+                          : "NO WAITING STOP AVAILABLE"}
                 </Text>
                 {recommendation?.busNumber && (
                   <Text style={styles.infoText}>
@@ -266,14 +253,6 @@ export default function MasterScreen({ navigation }) {
                 </Text>
               </>
             )}
-            {!!error && <Text style={styles.errorText}>{error}</Text>}
-            <Text style={styles.timestamp}>
-              {recommendation?.gps?.lastUpdated
-                ? `Bus GPS updated ${new Date(
-                    recommendation.gps.lastUpdated,
-                  ).toLocaleTimeString()}`
-                : "Recommendation uses your latest location"}
-            </Text>
           </View>
         )}
 
@@ -315,7 +294,11 @@ export default function MasterScreen({ navigation }) {
 
         {recommendation?.gps?.status === "UNAVAILABLE" && (
           <View style={styles.noticeInline}>
-            <Ionicons name="alert-circle-outline" size={20} color={COLORS.warning} />
+            <Ionicons
+              name="alert-circle-outline"
+              size={20}
+              color={COLORS.warning}
+            />
             <Text style={[styles.body, styles.noticeInlineBody]}>
               Live bus location is currently unavailable. No bus position or ETA
               is being estimated.
@@ -335,7 +318,8 @@ export default function MasterScreen({ navigation }) {
           )}
         </TouchableOpacity>
         <Text style={styles.footer}>
-          Master checks all active buses and recommends a nearby catchable stop under the active plan.
+          Master checks all active buses and recommends a nearby catchable stop
+          under the active plan.
         </Text>
       </ScrollView>
     </SafeAreaView>
@@ -526,7 +510,12 @@ const styles = StyleSheet.create({
     marginTop: 12,
   },
   noticeInlineBody: { flex: 1, minWidth: 0, marginTop: 0 },
-  errorText: { color: COLORS.error, fontSize: 13, marginTop: 10, flexShrink: 1 },
+  errorText: {
+    color: COLORS.error,
+    fontSize: 13,
+    marginTop: 10,
+    flexShrink: 1,
+  },
   footer: {
     textAlign: "center",
     color: COLORS.textBody,

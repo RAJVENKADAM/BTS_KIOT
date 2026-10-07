@@ -369,11 +369,11 @@ export default function AddBusesScreen() {
         );
       }
       const worksheet = XLSX.utils.aoa_to_sheet([
-        ["Stop Name", "X Coordinate (Longitude)", "Y Coordinate (Latitude)"],
+        ["Stop Name", "Latitude", "Longitude"],
         ...(data.stops || []).map((stop) => [
           stop.name,
-          stop.longitude ?? "",
           stop.latitude ?? "",
+          stop.longitude ?? "",
         ]),
       ]);
       const workbook = XLSX.utils.book_new();
@@ -496,12 +496,20 @@ export default function AddBusesScreen() {
         );
       }
 
-      const stops = rows.slice(1).map((row) => ({
-        stopId: stopIdColumn < 0 ? "" : String(row[stopIdColumn] || "").trim(),
-        name: String(row[nameColumn] || "").trim(),
-        longitude: row[longitudeColumn],
-        latitude: row[latitudeColumn],
-      })).filter((row) => row.name || row.latitude !== "" || row.longitude !== "");
+      const stops = rows
+        .slice(1)
+        .map((row) => ({
+          stopId:
+            stopIdColumn < 0 ? "" : String(row[stopIdColumn] || "").trim(),
+          name: String(row[nameColumn] || "").trim(),
+          longitude: row[longitudeColumn],
+          latitude: row[latitudeColumn],
+        }))
+        .filter((row) =>
+          [row.name, row.latitude, row.longitude].some(
+            (value) => value !== null && value !== undefined && String(value).trim() !== "",
+          ),
+        );
       if (!stops.length) throw new Error("The sheet contains no stop rows.");
 
       const resultData = await stopApi.importCoordinates(token, stops);
@@ -521,9 +529,17 @@ export default function AddBusesScreen() {
         `${(summary.updated || 0) + (summary.missingCoordinates || 0)} stop(s) saved from this sheet, including ${summary.added || 0} new stop(s). ${summary.updated || 0} have coordinates, ${summary.missingCoordinates || 0} have blank coordinates, and ${summary.removed || 0} old stop(s) were removed.${issueDetails ? `\n\n${issueDetails}` : ""}`,
       );
     } catch (error) {
+      const rowIssues = (error?.rowResults || [])
+        .filter((row) => ["not_found", "ambiguous", "invalid"].includes(row.status))
+        .slice(0, 5)
+        .map(
+          (row) =>
+            `Row ${row.row} (${row.name || "unnamed"}): ${row.reason || row.status}`,
+        )
+        .join("\n");
       Alert.alert(
         "Upload failed",
-        getErrorMessage(error, "Could not import the Stop Master sheet."),
+        `${getErrorMessage(error, "Could not import the Stop Master sheet.")}${rowIssues ? `\n\n${rowIssues}` : ""}`,
       );
     } finally {
       setCoordinateSheetBusy(false);
@@ -741,7 +757,7 @@ export default function AddBusesScreen() {
                   Stop Master coordinates
                 </Text>
                 <Text style={styles.coordinateSheetDescription}>
-                  Upload a stop list with Stops, Lat, and Long columns. This sheet replaces the saved stop list; stops omitted from it are removed.
+                  Upload columns named Stop Name, Latitude, and Longitude. Leave coordinates blank for stops without them; at least one stop must have both coordinates. This sheet replaces the saved stop list, so omitted stops are removed.
                 </Text>
                 <TouchableOpacity
                   style={styles.optionButton}
