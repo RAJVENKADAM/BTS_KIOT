@@ -1,0 +1,868 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="A simple guide to how BTMS helps students follow their campus bus and administrators manage transport."
+    />
+    <title>BTMS | Campus transport, made clear</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --blue: #1f78d1;
+        --blue-dark: #155ea9;
+        --ink: #1e293b;
+        --body: #64748b;
+        --border: #e2e8f0;
+        --page: #f8fafc;
+        --white: #fff;
+        --pale-blue: #eff6ff;
+        --green: #10b981;
+        --radius: 20px;
+        --shadow: 0 14px 40px rgba(15, 23, 42, 0.07);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+        scroll-padding-top: 92px;
+      }
+
+      body {
+        margin: 0;
+        background: var(--page);
+        color: var(--ink);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+
+      button {
+        font: inherit;
+      }
+
+      .wrap {
+        width: min(1120px, calc(100% - 40px));
+        margin: 0 auto;
+      }
+
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        border-bottom: 1px solid rgba(226, 232, 240, 0.86);
+        background: rgba(255, 255, 255, 0.92);
+        backdrop-filter: blur(14px);
+      }
+
+      .nav {
+        min-height: 72px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+      }
+
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 11px;
+        font-size: 17px;
+        font-weight: 800;
+        letter-spacing: -0.04em;
+      }
+
+      .brand-mark {
+        width: 38px;
+        height: 38px;
+        display: grid;
+        place-items: center;
+        border-radius: 12px;
+        background: var(--blue);
+        color: var(--white);
+      }
+
+      .brand small {
+        display: block;
+        margin-top: 1px;
+        color: var(--body);
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+      }
+
+      .nav-links {
+        display: flex;
+        align-items: center;
+        gap: 30px;
+        color: var(--body);
+        font-size: 13px;
+        font-weight: 650;
+      }
+
+      .nav-links a:hover,
+      .nav-links a:focus-visible {
+        color: var(--blue);
+      }
+
+      .nav-cta,
+      .button-primary {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 9px;
+        border: 0;
+        border-radius: 12px;
+        background: var(--blue);
+        color: var(--white);
+        font-size: 13px;
+        font-weight: 700;
+        transition: background 160ms ease, transform 160ms ease;
+      }
+
+      .nav-cta {
+        padding: 11px 16px;
+      }
+
+      .button-primary {
+        padding: 13px 18px;
+      }
+
+      .nav-cta:hover,
+      .button-primary:hover {
+        transform: translateY(-1px);
+        background: var(--blue-dark);
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: 1.03fr 0.97fr;
+        align-items: center;
+        gap: 64px;
+        padding: 78px 0 74px;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0 0 18px;
+        color: var(--blue);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .eyebrow-mark {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--blue);
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin-top: 0;
+      }
+
+      h1 {
+        max-width: 560px;
+        margin-bottom: 18px;
+        font-size: clamp(42px, 5.2vw, 64px);
+        font-weight: 820;
+        letter-spacing: -0.065em;
+        line-height: 1.06;
+      }
+
+      h1 span {
+        color: var(--blue);
+      }
+
+      .hero-copy {
+        max-width: 470px;
+        margin-bottom: 27px;
+        color: var(--body);
+        font-size: 16px;
+        line-height: 1.75;
+      }
+
+      .hero-actions {
+        display: flex;
+        align-items: center;
+        gap: 19px;
+      }
+
+      .text-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        color: var(--ink);
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .text-link:hover {
+        color: var(--blue);
+      }
+
+      .preview {
+        position: relative;
+        min-height: 390px;
+        overflow: hidden;
+        display: grid;
+        place-items: center;
+        border: 1px solid #e7edf5;
+        border-radius: 28px;
+        background:
+          radial-gradient(ellipse at 80% 15%, rgba(31, 120, 209, 0.1), transparent 40%),
+          linear-gradient(145deg, #f1f6fc, #eaf2fb);
+      }
+
+      .preview-grid {
+        position: absolute;
+        inset: 0;
+        opacity: 0.45;
+        background-image:
+          linear-gradient(rgba(148, 163, 184, 0.11) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(148, 163, 184, 0.11) 1px, transparent 1px);
+        background-size: 34px 34px;
+        mask-image: linear-gradient(135deg, black, transparent 85%);
+      }
+
+      .route-line {
+        position: absolute;
+        width: 220px;
+        height: 235px;
+        border: 4px solid transparent;
+        border-left-color: rgba(31, 120, 209, 0.25);
+        border-bottom-color: rgba(31, 120, 209, 0.25);
+        border-radius: 48% 0 0 48%;
+        transform: rotate(-35deg);
+      }
+
+      .route-line::after {
+        position: absolute;
+        right: -9px;
+        bottom: -10px;
+        width: 15px;
+        height: 15px;
+        border: 4px solid var(--white);
+        border-radius: 50%;
+        background: var(--blue);
+        content: "";
+      }
+
+      .map-label {
+        position: absolute;
+        z-index: 1;
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 8px 11px;
+        border: 1px solid rgba(226, 232, 240, 0.8);
+        border-radius: 11px;
+        background: rgba(255, 255, 255, 0.93);
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+        color: var(--ink);
+        font-size: 11px;
+        font-weight: 700;
+      }
+
+      .map-label.start {
+        top: 19%;
+        left: 13%;
+      }
+
+      .map-label.stop {
+        top: 37%;
+        right: 10%;
+      }
+
+      .map-label.campus {
+        bottom: 18%;
+        left: 23%;
+      }
+
+      .pin {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--blue);
+      }
+
+      .map-label.campus .pin {
+        background: var(--green);
+      }
+
+      .status-card {
+        position: relative;
+        z-index: 2;
+        width: min(290px, calc(100% - 34px));
+        margin-top: 36px;
+        padding: 17px;
+        border: 1px solid rgba(226, 232, 240, 0.9);
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.97);
+        box-shadow: var(--shadow);
+      }
+
+      .status-top,
+      .bus-row,
+      .status-foot {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .status-top {
+        margin-bottom: 15px;
+        color: var(--body);
+        font-size: 10px;
+        font-weight: 750;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .live-dot {
+        display: inline-block;
+        width: 7px;
+        height: 7px;
+        margin-right: 5px;
+        border-radius: 50%;
+        background: var(--green);
+      }
+
+      .bus-row {
+        justify-content: flex-start;
+        gap: 12px;
+        padding-bottom: 14px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .bus-icon {
+        width: 40px;
+        height: 40px;
+        display: grid;
+        place-items: center;
+        border-radius: 12px;
+        background: var(--pale-blue);
+        color: var(--blue);
+      }
+
+      .bus-name {
+        font-size: 14px;
+        font-weight: 750;
+      }
+
+      .bus-caption {
+        margin-top: 3px;
+        color: var(--body);
+        font-size: 11px;
+      }
+
+      .status-foot {
+        padding-top: 12px;
+        color: var(--body);
+        font-size: 11px;
+      }
+
+      .status-foot strong {
+        color: var(--ink);
+        font-size: 12px;
+      }
+
+      .section {
+        padding: 74px 0;
+      }
+
+      .section-head {
+        max-width: 570px;
+        margin: 0 auto 34px;
+        text-align: center;
+      }
+
+      .section-head .eyebrow {
+        margin-bottom: 12px;
+      }
+
+      h2 {
+        margin-bottom: 12px;
+        font-size: clamp(29px, 3.5vw, 40px);
+        font-weight: 800;
+        letter-spacing: -0.055em;
+        line-height: 1.15;
+      }
+
+      .section-head p,
+      .card-copy {
+        color: var(--body);
+        font-size: 14px;
+        line-height: 1.7;
+      }
+
+      .roles {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 18px;
+      }
+
+      .role-card,
+      .step-card,
+      .feature-card {
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: var(--white);
+      }
+
+      .role-card {
+        padding: 25px;
+        transition: border-color 160ms ease, box-shadow 160ms ease;
+      }
+
+      .role-card:hover {
+        border-color: #bdd9f5;
+        box-shadow: var(--shadow);
+      }
+
+      .card-icon {
+        width: 44px;
+        height: 44px;
+        display: grid;
+        place-items: center;
+        margin-bottom: 19px;
+        border-radius: 14px;
+        background: var(--pale-blue);
+        color: var(--blue);
+      }
+
+      .role-card h3,
+      .step-card h3,
+      .feature-card h3 {
+        margin-bottom: 8px;
+        font-size: 17px;
+        font-weight: 750;
+        letter-spacing: -0.025em;
+      }
+
+      .role-card .card-copy {
+        margin-bottom: 17px;
+        font-size: 13px;
+      }
+
+      .check-list {
+        display: grid;
+        gap: 10px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .check-list li {
+        display: flex;
+        align-items: flex-start;
+        gap: 9px;
+        color: #475569;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .check-list svg {
+        flex: 0 0 auto;
+        margin-top: 1px;
+        color: var(--green);
+      }
+
+      .steps {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 16px;
+      }
+
+      .step-card {
+        position: relative;
+        padding: 23px;
+      }
+
+      .step-number {
+        display: inline-grid;
+        width: 31px;
+        height: 31px;
+        place-items: center;
+        margin-bottom: 17px;
+        border-radius: 10px;
+        background: var(--pale-blue);
+        color: var(--blue);
+        font-size: 12px;
+        font-weight: 800;
+      }
+
+      .step-card p,
+      .feature-card p {
+        margin-bottom: 0;
+        color: var(--body);
+        font-size: 12px;
+        line-height: 1.7;
+      }
+
+      .feature-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 13px;
+      }
+
+      .feature-card {
+        padding: 19px;
+      }
+
+      .feature-card .card-icon {
+        width: 38px;
+        height: 38px;
+        margin-bottom: 15px;
+        border-radius: 12px;
+      }
+
+      .feature-card h3 {
+        font-size: 14px;
+      }
+
+      .feature-card p {
+        font-size: 11px;
+      }
+
+      .tinted {
+        background: #f1f6fc;
+      }
+
+      .footer {
+        padding: 24px 0;
+        border-top: 1px solid var(--border);
+        color: var(--body);
+        font-size: 11px;
+      }
+
+      .footer-inner {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+
+      .footer-brand {
+        color: var(--ink);
+        font-weight: 750;
+      }
+
+      .icon {
+        width: 19px;
+        height: 19px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.8;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .brand-mark .icon {
+        width: 22px;
+        height: 22px;
+      }
+
+      @media (max-width: 800px) {
+        .nav-links {
+          gap: 17px;
+        }
+
+        .hero {
+          gap: 36px;
+          padding: 58px 0;
+        }
+
+        .preview {
+          min-height: 350px;
+        }
+
+        .feature-grid {
+          grid-template-columns: repeat(2, 1fr);
+        }
+      }
+
+      @media (max-width: 620px) {
+        .wrap {
+          width: min(100% - 32px, 480px);
+        }
+
+        .nav {
+          min-height: 64px;
+        }
+
+        .nav-links {
+          display: none;
+        }
+
+        .nav-cta {
+          padding: 10px 12px;
+          font-size: 12px;
+        }
+
+        .hero {
+          grid-template-columns: 1fr;
+          gap: 34px;
+          padding: 49px 0 55px;
+        }
+
+        h1 {
+          max-width: 430px;
+          font-size: clamp(42px, 12vw, 56px);
+        }
+
+        .hero-copy {
+          font-size: 14px;
+        }
+
+        .preview {
+          min-height: 330px;
+        }
+
+        .section {
+          padding: 56px 0;
+        }
+
+        .roles,
+        .steps {
+          grid-template-columns: 1fr;
+        }
+
+        .role-card {
+          padding: 21px;
+        }
+
+        .section-head {
+          margin-bottom: 26px;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="wrap nav">
+        <a class="brand" href="#top" aria-label="BTMS home">
+          <span class="brand-mark" aria-hidden="true">
+            <svg class="icon" viewBox="0 0 24 24">
+              <path d="M5 16V6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5V16" />
+              <path d="M5 12h14M8 19v-3m8 3v-3M7 19h10a2 2 0 0 0 2-2v-1H5v1a2 2 0 0 0 2 2Z" />
+              <path d="M8 8h.01M16 8h.01" />
+            </svg>
+          </span>
+          <span>BTMS<small>Campus transport</small></span>
+        </a>
+        <nav class="nav-links" aria-label="Main navigation">
+          <a href="#overview">Overview</a>
+          <a href="#students">Students</a>
+          <a href="#admins">Admins</a>
+          <a href="#features">Features</a>
+        </nav>
+        <a class="nav-cta" href="#how-it-works">
+          How it works
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 12h14m-6-6 6 6-6 6" />
+          </svg>
+        </a>
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="wrap hero" id="overview">
+        <div>
+          <p class="eyebrow"><span class="eyebrow-mark"></span> Campus journeys, simplified</p>
+          <h1>Know your bus.<br /><span>Know your way.</span></h1>
+          <p class="hero-copy">
+            BTMS brings students and transport administrators together with clear
+            bus locations, routes, and service updates in one place.
+          </p>
+          <div class="hero-actions">
+            <a class="button-primary" href="#students">
+              Explore BTMS
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M5 12h14m-6-6 6 6-6 6" />
+              </svg>
+            </a>
+            <a class="text-link" href="#how-it-works">
+              See how it works
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m9 18 6-6-6-6" />
+              </svg>
+            </a>
+          </div>
+        </div>
+
+        <div class="preview" aria-label="Illustration of a bus route and live status">
+          <div class="preview-grid" aria-hidden="true"></div>
+          <div class="route-line" aria-hidden="true"></div>
+          <span class="map-label start"><i class="pin"></i> Your bus</span>
+          <span class="map-label stop"><i class="pin"></i> Route stop</span>
+          <span class="map-label campus"><i class="pin"></i> Campus</span>
+          <div class="status-card">
+            <div class="status-top">
+              <span>Bus status</span>
+              <span><i class="live-dot"></i>Location available</span>
+            </div>
+            <div class="bus-row">
+              <span class="bus-icon" aria-hidden="true">
+                <svg class="icon" viewBox="0 0 24 24">
+                  <path d="M5 16V6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5V16" />
+                  <path d="M5 12h14M8 19v-3m8 3v-3M7 19h10a2 2 0 0 0 2-2v-1H5v1a2 2 0 0 0 2 2Z" />
+                </svg>
+              </span>
+              <span>
+                <span class="bus-name">Your assigned bus</span>
+                <span class="bus-caption">Route and stop details at a glance</span>
+              </span>
+            </div>
+            <div class="status-foot">
+              <span>Route information</span>
+              <strong>View stops</strong>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section tinted" id="how-it-works">
+        <div class="wrap">
+          <div class="section-head">
+            <p class="eyebrow"><span class="eyebrow-mark"></span> Simple by design</p>
+            <h2>From route planning to the ride</h2>
+            <p>One clear flow keeps campus transport easy to follow for everyone.</p>
+          </div>
+          <div class="steps">
+            <article class="step-card">
+              <span class="step-number">01</span>
+              <h3>Transport is organised</h3>
+              <p>Administrators keep bus details, student assignments, routes, and the active plan up to date.</p>
+            </article>
+            <article class="step-card">
+              <span class="step-number">02</span>
+              <h3>Students check their trip</h3>
+              <p>Students see their assigned bus, current location when available, and the stops on its route.</p>
+            </article>
+            <article class="step-card">
+              <span class="step-number">03</span>
+              <h3>Everyone stays informed</h3>
+              <p>Service changes and messages are easy to find, so students can plan around the latest information.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section wrap" aria-labelledby="roles-heading">
+        <div class="section-head">
+          <p class="eyebrow"><span class="eyebrow-mark"></span> One service, two views</p>
+          <h2 id="roles-heading">Made for the people who use it</h2>
+          <p>Each role gets the information and tools that matter to their journey.</p>
+        </div>
+        <div class="roles">
+          <article class="role-card" id="students">
+            <span class="card-icon" aria-hidden="true">
+              <svg class="icon" viewBox="0 0 24 24">
+                <circle cx="12" cy="8" r="3.5" />
+                <path d="M5 20a7 7 0 0 1 14 0M19 8h3m-1.5-1.5v3" />
+              </svg>
+            </span>
+            <h3>For students</h3>
+            <p class="card-copy">A quick, dependable view of the bus journey assigned to you.</p>
+            <ul class="check-list">
+              <li><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg>Check your bus location and availability</li>
+              <li><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg>See your route, stops, and active plan</li>
+              <li><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg>Find nearby bus guidance and service messages</li>
+            </ul>
+          </article>
+          <article class="role-card" id="admins">
+            <span class="card-icon" aria-hidden="true">
+              <svg class="icon" viewBox="0 0 24 24">
+                <path d="M12 3 5 6v5c0 4.6 2.9 8.2 7 10 4.1-1.8 7-5.4 7-10V6l-7-3Z" />
+                <path d="m9 12 2 2 4-4" />
+              </svg>
+            </span>
+            <h3>For administrators</h3>
+            <p class="card-copy">Keep transport information organised and ready for students.</p>
+            <ul class="check-list">
+              <li><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg>Manage student and bus records</li>
+              <li><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg>Add or update routes, stops, and service plans</li>
+              <li><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg>Handle bus changes and keep the active plan current</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section class="section tinted" id="features">
+        <div class="wrap">
+          <div class="section-head">
+            <p class="eyebrow"><span class="eyebrow-mark"></span> Everything in one place</p>
+            <h2>Useful details, without the clutter</h2>
+            <p>The essentials for checking a journey and keeping campus transport moving.</p>
+          </div>
+          <div class="feature-grid">
+            <article class="feature-card">
+              <span class="card-icon" aria-hidden="true">
+                <svg class="icon" viewBox="0 0 24 24"><path d="M20 10c0 5-8 11-8 11S4 15 4 10a8 8 0 1 1 16 0Z" /><circle cx="12" cy="10" r="2.5" /></svg>
+              </span>
+              <h3>Bus tracking</h3>
+              <p>See the bus location and whether its location is available.</p>
+            </article>
+            <article class="feature-card">
+              <span class="card-icon" aria-hidden="true">
+                <svg class="icon" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16" /><circle cx="7" cy="6" r="1" /><circle cx="17" cy="12" r="1" /><circle cx="10" cy="18" r="1" /></svg>
+              </span>
+              <h3>Routes &amp; stops</h3>
+              <p>Review the stops for your bus and the current route plan.</p>
+            </article>
+            <article class="feature-card">
+              <span class="card-icon" aria-hidden="true">
+                <svg class="icon" viewBox="0 0 24 24"><path d="M4 19V5m0 14h16M7 15l4-4 3 2 5-6" /><path d="M16 7h3v3" /></svg>
+              </span>
+              <h3>Nearby guidance</h3>
+              <p>Get a helpful bus and stop suggestion based on your location.</p>
+            </article>
+            <article class="feature-card">
+              <span class="card-icon" aria-hidden="true">
+                <svg class="icon" viewBox="0 0 24 24"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM10 21h4" /></svg>
+              </span>
+              <h3>Service messages</h3>
+              <p>Keep up with important transport updates in your inbox.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="wrap footer-inner">
+        <span class="footer-brand">BTMS · Campus transport</span>
+        <span>Clear journeys start with clear information.</span>
+      </div>
+    </footer>
+  </body>
+</html>

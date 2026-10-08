@@ -205,7 +205,12 @@ const MAP_SOURCE = {
           'Recommended stop',
           [
             data.stopName || 'Recommended stop',
-            formatDistance(data.userDistance),
+            'Approx. walk: ' + (data.walkingEtaMinutes == null
+              ? 'time unavailable'
+              : data.walkingEtaMinutes + ' min') +
+              (data.walkingDistance == null
+                ? ''
+                : ' · ' + formatDistance(data.walkingDistance)),
             'Coordinates: ' + formatCoordinates(data.stop)
           ]
         );
@@ -269,6 +274,8 @@ export default function MasterMap({ recommendation }) {
         ? result.serviceBusNumbers.join(" + ")
         : result.busNumber || "Nearest active bus",
       userDistance: result.userDistanceToStop,
+      walkingDistance: result.walkingDistanceMeters,
+      walkingEtaMinutes: result.walkingEtaMinutes,
       busStatus: result.status || "Unknown",
       etaMinutes: result.etaMinutes,
     };

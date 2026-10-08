@@ -29,6 +29,9 @@ const formatDistance = (distance) => {
 
 function getStatusMessage(status, message) {
   if (message) return message;
+  if (status === "ALREADY_AT_COLLEGE") {
+    return "Your current location is within 500 metres of KIOT College.";
+  }
   if (status === "NO_FUTURE_STOPS") {
     return "Your bus has already passed all stops on its active route.";
   }
@@ -122,6 +125,7 @@ export default function MasterScreen({ navigation }) {
 
   const recommendation = recommendationData?.recommendation || null;
   const status = recommendationData?.status;
+  const atCollege = status === "ALREADY_AT_COLLEGE";
   const hasStop = status === "RECOMMENDED" && recommendation?.stop;
 
   const openLocationSettings = async () => {
@@ -193,7 +197,16 @@ export default function MasterScreen({ navigation }) {
           </View>
         ) : (
           <View style={styles.resultCard}>
-            {hasStop ? (
+            {atCollege ? (
+              <>
+                <Text style={styles.waitLabel}>CAMPUS ARRIVAL</Text>
+                <Text style={styles.stopName}>You’re already at KIOT College</Text>
+                <Text style={styles.infoText}>
+                  {formatDistance(recommendation?.collegeDistanceMeters)} from
+                  campus
+                </Text>
+              </>
+            ) : hasStop ? (
               <>
                 <Text style={styles.waitLabel}>WAIT AT</Text>
                 <Text style={styles.stopName}>{recommendation.stop.name}</Text>
@@ -221,13 +234,31 @@ export default function MasterScreen({ navigation }) {
                       bus {recommendation.operatingBusNumber}
                     </Text>
                   )}
-                <View style={styles.infoRow}>
-                  <Text style={styles.infoText}>
-                    {formatDistance(recommendation.userDistanceToStop)}
-                    {recommendation.walkingEtaMinutes
-                      ? ` | About ${recommendation.walkingEtaMinutes} min walk`
-                      : ""}
-                  </Text>
+                <View style={styles.metricsRow}>
+                  <View style={styles.metricCard}>
+                    <Text style={styles.metricLabel}>YOUR WALK</Text>
+                    <Text style={styles.metricValue}>
+                      {formatDistance(
+                        recommendation.walkingDistanceMeters ??
+                          recommendation.userDistanceToStop,
+                      ) || "—"}
+                    </Text>
+                    <Text style={styles.metricHint}>
+                      About {recommendation.walkingEtaMinutes || "—"} min
+                    </Text>
+                  </View>
+                  <View style={styles.metricCard}>
+                    <Text style={styles.metricLabel}>BUS TO STOP</Text>
+                    <Text style={styles.metricValue}>
+                      {recommendation.etaMinutes == null
+                        ? "Updating"
+                        : `${recommendation.etaMinutes} min`}
+                    </Text>
+                    <Text style={styles.metricHint}>
+                      {formatDistance(recommendation.busRouteDistanceToStop) ||
+                        "Route distance unavailable"}
+                    </Text>
+                  </View>
                 </View>
               </>
             ) : (
@@ -256,7 +287,7 @@ export default function MasterScreen({ navigation }) {
           </View>
         )}
 
-        {!!recommendation?.userLocation && (
+        {!!recommendation?.userLocation && !atCollege && (
           <TouchableOpacity
             style={styles.secondaryButton}
             onPress={() =>
@@ -274,7 +305,7 @@ export default function MasterScreen({ navigation }) {
           </TouchableOpacity>
         )}
 
-        {!!recommendation?.userLocation && (
+        {!!recommendation?.userLocation && !atCollege && (
           <View
             style={styles.mapCard}
             onLayout={(event) => {
@@ -407,6 +438,35 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
     flexShrink: 1,
+  },
+  metricsRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 14,
+  },
+  metricCard: {
+    flex: 1,
+    minWidth: 0,
+    padding: 12,
+    borderRadius: 12,
+    backgroundColor: "#F4F7FB",
+  },
+  metricLabel: {
+    color: COLORS.textBody,
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 0.5,
+  },
+  metricValue: {
+    marginTop: 5,
+    color: COLORS.textHeader,
+    fontSize: 17,
+    fontWeight: "800",
+  },
+  metricHint: {
+    marginTop: 3,
+    color: COLORS.textBody,
+    fontSize: 12,
   },
   etaText: {
     color: COLORS.primary,

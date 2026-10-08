@@ -1269,8 +1269,8 @@ const HomeScreen = () => {
       alteration?.alterationType === "combine"
         ? "View combined bus stops"
         : alteration?.isAltered || alteration?.isReplacement
-          ? `View Bus ${routeBusLabel} stops`
-          : "View bus stops";
+          ? `View active stops`
+          : "View active stops";
     const distance = calculateDistance(
       displayBusData.latitude,
       displayBusData.longitude,
@@ -1339,9 +1339,7 @@ const HomeScreen = () => {
             activeOpacity={0.8}
           >
             <Ionicons name="map-outline" size={16} color={COLORS.primary} />
-            <Text style={styles.liveStopsButtonText}>
-              {stopsButtonLabel} — open stops page
-            </Text>
+            <Text style={styles.liveStopsButtonText}>{stopsButtonLabel}</Text>
           </TouchableOpacity>
         </View>
       </View>

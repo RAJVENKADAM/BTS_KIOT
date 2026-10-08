@@ -1,5 +1,6 @@
 const EARTH_RADIUS_METERS = 6371000;
 const STOP_PASSED_RADIUS_METERS = 75;
+const COLLEGE_ARRIVAL_RADIUS_METERS = 500;
 const COLLEGE_ROUTE_LINK_METERS = 5000;
 const WALKING_SPEED_METERS_PER_SECOND = 1.2;
 const WALKING_ROUTE_DETOUR_FACTOR = 1.3;
@@ -39,6 +40,30 @@ function distanceMeters(pointA, pointB) {
     EARTH_RADIUS_METERS *
     Math.atan2(Math.sqrt(boundedHaversine), Math.sqrt(1 - boundedHaversine))
   );
+}
+
+function getCollegeArrival(userLocation, collegeLocation = COLLEGE_LOCATION) {
+  if (!isValidPoint(userLocation) || !isValidPoint(collegeLocation)) return null;
+
+  const collegeDistanceMeters = Math.round(
+    distanceMeters(userLocation, collegeLocation),
+  );
+  if (collegeDistanceMeters > COLLEGE_ARRIVAL_RADIUS_METERS) return null;
+
+  return {
+    status: "ALREADY_AT_COLLEGE",
+    recommendation: {
+      userLocation: {
+        latitude: Number(userLocation.latitude),
+        longitude: Number(userLocation.longitude),
+      },
+      collegeLocation: {
+        latitude: Number(collegeLocation.latitude),
+        longitude: Number(collegeLocation.longitude),
+      },
+      collegeDistanceMeters,
+    },
+  };
 }
 
 function projectOntoSegment(point, start, end) {
@@ -152,7 +177,14 @@ function getMasterRecommendation({
   busSpeedKmh,
   collegeLocation = COLLEGE_LOCATION,
 }) {
-  if (!isValidPoint(userLocation) || !isValidPoint(busLocation)) {
+  if (!isValidPoint(userLocation)) {
+    return { status: "LOCATION_UNAVAILABLE", recommendation: null };
+  }
+
+  const collegeArrival = getCollegeArrival(userLocation, collegeLocation);
+  if (collegeArrival) return collegeArrival;
+
+  if (!isValidPoint(busLocation)) {
     return { status: "LOCATION_UNAVAILABLE", recommendation: null };
   }
 
@@ -169,7 +201,7 @@ function getMasterRecommendation({
   const positionStops = [...orderedStops];
   const collegeDistance = isValidPoint(collegeLocation)
     ? distanceMeters(positionStops[positionStops.length - 1], collegeLocation)
-    : Infinity;
+    : 0;
   if (
     collegeDistance > STOP_PASSED_RADIUS_METERS &&
     collegeDistance <= COLLEGE_ROUTE_LINK_METERS
@@ -246,6 +278,9 @@ function getMasterRecommendation({
         sequence: Number(selected.stop.stop_order),
       },
       userDistanceToStop: selected.userDistanceToStop,
+      walkingDistanceMeters: Math.ceil(
+        selected.userDistanceToStop * WALKING_ROUTE_DETOUR_FACTOR,
+      ),
       walkingEtaMinutes: Math.max(1, Math.ceil(selected.walkingEtaMinutes)),
       busDistanceToStop: selected.busDistanceToStop,
       busRouteDistanceToStop: selected.busRouteDistanceToStop,
@@ -276,6 +311,7 @@ function getMasterRecommendation({
 
 module.exports = {
   distanceMeters,
+  getCollegeArrival,
   getMasterRecommendation,
   selectBestMasterRecommendation,
 };

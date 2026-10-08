@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
+  getCollegeArrival,
   getMasterRecommendation,
   selectBestMasterRecommendation,
 } = require("../src/utils/masterRecommendation");
@@ -31,6 +32,55 @@ const routeStops = [
     status: "VERIFIED",
   },
 ];
+
+test("reports campus arrival within 500 metres of KIOT", () => {
+  const result = getCollegeArrival({
+    latitude: 11.558,
+    longitude: 78.019759,
+  });
+
+  assert.equal(result.status, "ALREADY_AT_COLLEGE");
+  assert.ok(result.recommendation.collegeDistanceMeters <= 500);
+});
+
+test("does not report campus arrival outside the 500 metre radius", () => {
+  const result = getCollegeArrival({
+    latitude: 11.56,
+    longitude: 78.019759,
+  });
+
+  assert.equal(result, null);
+});
+
+test("does not recommend a stop when the user is already at college", () => {
+  const result = getMasterRecommendation({
+    userLocation: { latitude: 11.554, longitude: 78.019759 },
+    busLocation: null,
+    routeStops: [],
+  });
+
+  assert.equal(result.status, "ALREADY_AT_COLLEGE");
+  assert.equal(result.recommendation.stop, undefined);
+});
+
+test("treats KIOT as the route destination when checking whether stops were passed", () => {
+  const result = getMasterRecommendation({
+    userLocation: { latitude: 11.53, longitude: 78.019759 },
+    busLocation: { latitude: 11.52, longitude: 78.019759 },
+    routeStops: [
+      {
+        stopId: "LAST-STOP",
+        name: "Last stop",
+        stop_order: 1,
+        latitude: 11.51,
+        longitude: 78.019759,
+      },
+    ],
+  });
+
+  assert.equal(result.status, "NO_FUTURE_STOPS");
+  assert.equal(result.recommendation, null);
+});
 
 test("does not recommend stops behind the bus on its assigned route", () => {
   const result = getMasterRecommendation({

@@ -9,6 +9,7 @@ const {
   resolveEffectiveBus,
 } = require("./bus.controller");
 const {
+  getCollegeArrival,
   getMasterRecommendation,
   selectBestMasterRecommendation,
 } = require("../utils/masterRecommendation");
@@ -50,6 +51,15 @@ async function getRecommendation(req, res) {
     return res.status(400).json({
       success: false,
       error: "Valid user latitude and longitude are required.",
+    });
+  }
+
+  const collegeArrival = getCollegeArrival({ latitude, longitude });
+  if (collegeArrival) {
+    return res.json({
+      success: true,
+      ...collegeArrival,
+      message: "You are already at KIOT College.",
     });
   }
 
