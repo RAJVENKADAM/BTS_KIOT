@@ -1,7 +1,7 @@
 const EARTH_RADIUS_METERS = 6371000;
 const STOP_PASSED_RADIUS_METERS = 75;
+const MAX_BUS_ROUTE_DEVIATION_METERS = 500;
 const COLLEGE_ARRIVAL_RADIUS_METERS = 500;
-const COLLEGE_ROUTE_LINK_METERS = 5000;
 const WALKING_SPEED_METERS_PER_SECOND = 1.2;
 const WALKING_ROUTE_DETOUR_FACTOR = 1.3;
 const COLLEGE_LOCATION = { latitude: 11.554528, longitude: 78.019759 };
@@ -202,13 +202,13 @@ function getMasterRecommendation({
   const collegeDistance = isValidPoint(collegeLocation)
     ? distanceMeters(positionStops[positionStops.length - 1], collegeLocation)
     : 0;
-  if (
-    collegeDistance > STOP_PASSED_RADIUS_METERS &&
-    collegeDistance <= COLLEGE_ROUTE_LINK_METERS
-  ) {
+  if (collegeDistance > STOP_PASSED_RADIUS_METERS) {
     positionStops.push(collegeLocation);
   }
   const routePosition = getBusRoutePosition(busLocation, positionStops);
+  if (routePosition.distanceFromRoute > MAX_BUS_ROUTE_DEVIATION_METERS) {
+    return { status: "BUS_OFF_ROUTE", recommendation: null };
+  }
   if (
     positionStops.length > 1 &&
     routePosition.segmentIndex === 0 &&
@@ -267,25 +267,50 @@ function getMasterRecommendation({
     };
   }
 
-  return {
-    status: "RECOMMENDED",
-    recommendation: {
-      stop: {
+  const collegeDistanceToUser = Math.round(
+    distanceMeters(userLocation, collegeLocation),
+  );
+  const goToCollegeDirectly =
+    collegeDistanceToUser < selected.userDistanceToStop;
+  const destination = goToCollegeDirectly
+    ? {
+        stopId: "KIOT-COLLEGE",
+        name: "KIOT College",
+        latitude: Number(collegeLocation.latitude),
+        longitude: Number(collegeLocation.longitude),
+      }
+    : {
         stopId: selected.stop.stopId,
         name: selected.stop.name,
         latitude: Number(selected.stop.latitude),
         longitude: Number(selected.stop.longitude),
         sequence: Number(selected.stop.stop_order),
-      },
-      userDistanceToStop: selected.userDistanceToStop,
+      };
+  const userDistanceToDestination = goToCollegeDirectly
+    ? collegeDistanceToUser
+    : selected.userDistanceToStop;
+  const walkingEtaMinutes =
+    (userDistanceToDestination * WALKING_ROUTE_DETOUR_FACTOR) /
+    (WALKING_SPEED_METERS_PER_SECOND * 60);
+
+  return {
+    status: "RECOMMENDED",
+    recommendation: {
+      stop: destination,
+      isCollegeDestination: goToCollegeDirectly,
+      userDistanceToStop: userDistanceToDestination,
       walkingDistanceMeters: Math.ceil(
-        selected.userDistanceToStop * WALKING_ROUTE_DETOUR_FACTOR,
+        userDistanceToDestination * WALKING_ROUTE_DETOUR_FACTOR,
       ),
-      walkingEtaMinutes: Math.max(1, Math.ceil(selected.walkingEtaMinutes)),
-      busDistanceToStop: selected.busDistanceToStop,
-      busRouteDistanceToStop: selected.busRouteDistanceToStop,
+      walkingEtaMinutes: Math.max(1, Math.ceil(walkingEtaMinutes)),
+      busDistanceToStop: goToCollegeDirectly
+        ? null
+        : selected.busDistanceToStop,
+      busRouteDistanceToStop: goToCollegeDirectly
+        ? null
+        : selected.busRouteDistanceToStop,
       etaMinutes:
-        selected.etaMinutes == null
+        goToCollegeDirectly || selected.etaMinutes == null
           ? null
           : Math.max(1, Math.ceil(selected.etaMinutes)),
       busStatus:
@@ -293,6 +318,10 @@ function getMasterRecommendation({
       userLocation: {
         latitude: Number(userLocation.latitude),
         longitude: Number(userLocation.longitude),
+      },
+      collegeLocation: {
+        latitude: Number(collegeLocation.latitude),
+        longitude: Number(collegeLocation.longitude),
       },
       busLocation: {
         latitude: Number(busLocation.latitude),

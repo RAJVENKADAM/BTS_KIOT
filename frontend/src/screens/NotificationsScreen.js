@@ -14,6 +14,7 @@ import { useAuth } from "../context/AuthContext";
 import notificationApi from "../api/notificationApi";
 import { COLORS } from "../theme";
 import { useBus } from "../context/BusContext";
+import { getErrorMessage } from "../utils/errorHandler";
 
 export default function NotificationsScreen() {
   const { token } = useAuth();
@@ -28,6 +29,10 @@ export default function NotificationsScreen() {
       setNotifications(data.notifications || []);
     } catch (error) {
       console.error("Failed to load notifications:", error);
+      Alert.alert(
+        "Messages unavailable",
+        getErrorMessage(error, "Could not load your messages."),
+      );
     } finally {
       setLoading(false);
     }
@@ -43,6 +48,10 @@ export default function NotificationsScreen() {
       );
     } catch (error) {
       console.error("Failed to mark notification read:", error);
+      Alert.alert(
+        "Could not update message",
+        getErrorMessage(error, "Please try again."),
+      );
     }
   };
 
@@ -58,6 +67,10 @@ export default function NotificationsScreen() {
       setNotifications([]);
     } catch (error) {
       console.error("Failed to delete notification:", error);
+      Alert.alert(
+        "Could not delete messages",
+        getErrorMessage(error, "Please try again."),
+      );
     }
         },
       },

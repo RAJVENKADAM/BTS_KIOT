@@ -245,15 +245,74 @@ test("does not accept stops without real coordinates", () => {
   assert.equal(result.status, "NO_VERIFIED_STOPS");
 });
 
-test("uses the nearest future route stop when the active bus is away from its mapped route", () => {
+test("excludes an active bus when its GPS location is more than 500 metres from its route", () => {
   const result = getMasterRecommendation({
     userLocation: { latitude: 11, longitude: 78.01 },
     busLocation: { latitude: 11.5, longitude: 78.005 },
     routeStops,
   });
 
+  assert.equal(result.status, "BUS_OFF_ROUTE");
+  assert.equal(result.recommendation, null);
+});
+
+test("allows GPS locations within 500 metres of manually mapped route stops", () => {
+  const result = getMasterRecommendation({
+    userLocation: { latitude: 11, longitude: 78.002 },
+    busLocation: { latitude: 11.0035, longitude: 78.005 },
+    routeStops,
+  });
+
+  assert.equal(result.status, "RECOMMENDED");
+});
+
+test("includes an active bus again when its GPS location returns to its route", () => {
+  const result = getMasterRecommendation({
+    userLocation: { latitude: 11, longitude: 78.01 },
+    busLocation: { latitude: 11, longitude: 78.005 },
+    routeStops,
+  });
+
   assert.equal(result.status, "RECOMMENDED");
   assert.equal(result.recommendation.stop.stopId, "STOP-2");
+});
+
+test("recommends the ordered route stops with KIOT College as the destination", () => {
+  const result = getMasterRecommendation({
+    userLocation: { latitude: 11, longitude: 78.002 },
+    busLocation: { latitude: 11, longitude: 78.006 },
+    routeStops: [...routeStops].reverse(),
+  });
+
+  assert.deepEqual(
+    result.recommendation.routeStops.map((stop) => stop.sequence),
+    [1, 2, 3],
+  );
+  assert.deepEqual(result.recommendation.collegeLocation, {
+    latitude: 11.554528,
+    longitude: 78.019759,
+  });
+});
+
+test("recommends walking directly to college when it is closer than the best stop", () => {
+  const result = getMasterRecommendation({
+    userLocation: { latitude: 11.554528, longitude: 78.012 },
+    busLocation: { latitude: 11.554528, longitude: 77.996 },
+    routeStops: [
+      {
+        stopId: "FAR-STOP",
+        name: "Far stop",
+        stop_order: 1,
+        latitude: 11.554528,
+        longitude: 78,
+      },
+    ],
+  });
+
+  assert.equal(result.status, "RECOMMENDED");
+  assert.equal(result.recommendation.isCollegeDestination, true);
+  assert.equal(result.recommendation.stop.name, "KIOT College");
+  assert.equal(result.recommendation.etaMinutes, null);
 });
 
 test("recommends the nearest future stop even when the bus will arrive before the user", () => {
@@ -269,14 +328,15 @@ test("recommends the nearest future stop even when the bus will arrive before th
   assert.ok(result.recommendation.etaMinutes > 0);
 });
 
-test("still shows the nearest future stop when it is far from the user", () => {
+test("recommends college when it is closer than a distant future stop", () => {
   const result = getMasterRecommendation({
     userLocation: { latitude: 12, longitude: 79 },
-    busLocation: { latitude: 11, longitude: 78.005 },
+    busLocation: { latitude: 11, longitude: 78.006 },
     busSpeedKmh: 40,
     routeStops: [routeStops[1]],
   });
 
   assert.equal(result.status, "RECOMMENDED");
-  assert.equal(result.recommendation.stop.stopId, "STOP-2");
+  assert.equal(result.recommendation.isCollegeDestination, true);
+  assert.equal(result.recommendation.stop.stopId, "KIOT-COLLEGE");
 });

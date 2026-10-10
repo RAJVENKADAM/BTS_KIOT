@@ -65,7 +65,7 @@ import { COLORS, SHADOWS } from "../theme";
 import { useAuth } from "../context/AuthContext";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import BottomSheet, { BottomSheetView } from "@gorhom/bottom-sheet";
-import { isNetworkError, getErrorMessage } from "../utils/errorHandler";
+import { getErrorMessage } from "../utils/errorHandler";
 import { getDisplayBusNumber } from "../utils/busDisplay";
 import notificationApi from "../api/notificationApi";
 import * as Location from "expo-location";
@@ -119,6 +119,7 @@ const HomeScreen = () => {
   const [selectedBusNo, setSelectedBusNo] = useState(null);
   const [lastGoodLocation, setLastGoodLocation] = useState(null);
   const [isSuperadminSearched, setIsSuperadminSearched] = useState(false);
+  const [isBusFound, setIsBusFound] = useState(false);
   const [locationStatus, setLocationStatus] = useState("idle");
   const [markerStatus, setMarkerStatus] = useState("moving");
   const [isOffline, setIsOffline] = useState(false);
@@ -163,7 +164,7 @@ const HomeScreen = () => {
 
   const openSelectedBusStopsPage = useCallback(() => {
     const busIdentifier = selectedPreviewNumber || selectedBusNo;
-    if (!busIdentifier) return;
+    if (!isBusFound || !busIdentifier) return;
 
     navigation.navigate("PlanDetails", {
       mode: "stopsForBus",
@@ -176,10 +177,9 @@ const HomeScreen = () => {
     selectedBusNo,
     routesData?.activePlan,
     globalPlan,
+    isBusFound,
     navigation,
   ]);
-
-  const [isBusFound, setIsBusFound] = useState(false);
 
   const lastCoordinateRef = useRef(null);
   const sameCoordinateCountRef = useRef(0);
@@ -375,15 +375,12 @@ const HomeScreen = () => {
         setLastGoodLocation(null);
         setRoutesData(null);
         setLocationStatus("error");
-        if (isNetworkError(err)) {
-          setNoBusFound(false);
-          setTrackingError(
-            "Cannot connect to the server. Please check your internet connection.",
-          );
-        } else {
-          setNoBusFound(true);
-          setTrackingError(null);
-        }
+        setNoBusFound(err?.status === 404);
+        setTrackingError(
+          err?.status === 404
+            ? "Bus not found. Please check the bus number and try again."
+            : getErrorMessage(err, "Could not load this bus."),
+        );
         setIsBusFound(false);
       }
     })();
@@ -727,7 +724,9 @@ const HomeScreen = () => {
       setShowPlanInSheet(true);
       bottomSheetRef.current?.snapToIndex?.(1);
     } catch (error) {
-      setTrackingError(error.message);
+      setTrackingError(
+        getErrorMessage(error, "Could not find nearby buses."),
+      );
       setNearbyBuses([]);
     } finally {
       setLoadingNearbyBuses(false);
@@ -898,6 +897,12 @@ const HomeScreen = () => {
       }
     } catch (err) {
       console.log("Refresh error:", err.message);
+      setTrackingError(
+        err?.status === 404
+          ? "Bus not found. Please check the bus number and try again."
+          : getErrorMessage(err, "Could not refresh the bus location."),
+      );
+      setNoBusFound(err?.status === 404);
       if (lastGoodLocation) {
         setBusData(lastGoodLocation);
         setLocationStatus("offline");
@@ -905,15 +910,6 @@ const HomeScreen = () => {
         setIsBusFound(true);
       } else {
         setLocationStatus("error");
-        if (isNetworkError(err)) {
-          setNoBusFound(false);
-          setTrackingError(
-            "Cannot connect to the server. Please check your internet connection.",
-          );
-        } else {
-          setNoBusFound(true);
-          setTrackingError(null);
-        }
       }
     }
     await refreshBuses();
@@ -934,11 +930,13 @@ const HomeScreen = () => {
       setIsBusSearchAttempted(true);
       setLocationStatus("loading");
       setTrackingError(null);
+      setIsBusFound(false);
       try {
         const data = await busApi.getBusLocation(
           token,
           String(busNo).toUpperCase(),
         );
+        setIsBusFound(true);
         if (data?.alteration?.isAltered) {
           setTrackingError(null);
           setBusData(data);
@@ -1013,6 +1011,7 @@ const HomeScreen = () => {
         console.log("Open plan bus error:", err.message);
         setTrackingError(getErrorMessage(err, "Could not load this bus"));
         setLocationStatus("error");
+        setIsBusFound(false);
       }
     },
     [token],
@@ -1120,26 +1119,23 @@ const HomeScreen = () => {
         setIsBusFound(false);
         setRoutesData(null);
         setLocationStatus("error");
-        if (isNetworkError(err)) {
-          setNoBusFound(false);
-          setTrackingError(
-            "Cannot connect to the server. Please check your internet connection.",
-          );
-        } else {
-          setNoBusFound(true);
-          setTrackingError(null);
-        }
+        setNoBusFound(err?.status === 404);
+        setTrackingError(
+          err?.status === 404
+            ? "Bus not found. Please check the bus number and try again."
+            : getErrorMessage(err, "Could not load this bus."),
+        );
       }
     } else {
       const busNo = query.toUpperCase();
       setSelectedPreviewNumber(null);
       setSelectedBusNo(busNo);
-      setIsBusFound(true);
 
       try {
         const data = await busApi.getBusLocation(token, busNo);
 
         if (currentSearch !== searchCounterRef.current) return;
+        setIsBusFound(true);
         setTrackingError(null);
 
         if (
@@ -1200,15 +1196,12 @@ const HomeScreen = () => {
         setIsBusFound(false);
         setRoutesData(null);
         setLocationStatus("error");
-        if (isNetworkError(err)) {
-          setNoBusFound(false);
-          setTrackingError(
-            "Cannot connect to the server. Please check your internet connection.",
-          );
-        } else {
-          setNoBusFound(true);
-          setTrackingError(null);
-        }
+        setNoBusFound(err?.status === 404);
+        setTrackingError(
+          err?.status === 404
+            ? "Bus not found. Please check the bus number and try again."
+            : getErrorMessage(err, "Could not load this bus."),
+        );
       }
     }
   };
@@ -1250,6 +1243,8 @@ const HomeScreen = () => {
     preview_number: displayBusData?.preview_number,
     busNo: selectedBusNo ?? displayBusData?.busNo ?? displayBusData?.bus_no,
   });
+  const canViewBusStops =
+    isBusFound && Boolean(selectedBusNo || selectedPreviewNumber);
   const assignedBusDisplay = getDisplayBusNumber({
     previewNumber: user?.previewNumber ?? user?.preview_number,
     busNo: user?.bus_no,
@@ -1258,19 +1253,6 @@ const HomeScreen = () => {
   const busCardContent = React.useMemo(() => {
     if (!displayBusData) return null;
     const alteration = displayBusData.alteration;
-    const routeBusLabel =
-      alteration?.replacementForPreview ??
-      alteration?.originalPreview ??
-      selectedPreviewNumber ??
-      displayBusData.previewNumber ??
-      displayBusData.preview_number ??
-      displayBusLabel;
-    const stopsButtonLabel =
-      alteration?.alterationType === "combine"
-        ? "View combined bus stops"
-        : alteration?.isAltered || alteration?.isReplacement
-          ? `View active stops`
-          : "View active stops";
     const distance = calculateDistance(
       displayBusData.latitude,
       displayBusData.longitude,
@@ -1333,14 +1315,6 @@ const HomeScreen = () => {
               )}
             </View>
           </View>
-          <TouchableOpacity
-            style={styles.liveStopsButton}
-            onPress={openSelectedBusStopsPage}
-            activeOpacity={0.8}
-          >
-            <Ionicons name="map-outline" size={16} color={COLORS.primary} />
-            <Text style={styles.liveStopsButtonText}>{stopsButtonLabel}</Text>
-          </TouchableOpacity>
         </View>
       </View>
     );
@@ -1355,10 +1329,6 @@ const HomeScreen = () => {
     loadingNearbyBuses,
     nearbyBuses,
     navigation,
-    openSelectedBusStopsPage,
-    selectedPreviewNumber,
-    selectedBusNo,
-    globalPlan,
   ]);
 
   const planCardContent = React.useMemo(() => {
@@ -1412,27 +1382,15 @@ const HomeScreen = () => {
             <Ionicons name="chevron-forward" size={16} color={COLORS.primary} />
           </TouchableOpacity>
         ) : (
-          <TouchableOpacity
+          <View
             style={styles.studentPlanInfo}
-            onPress={() =>
-              navigation.navigate("PlanDetails", {
-                mode: "stopsForBus",
-                previewNumber: selectedPreviewNumber,
-                busNo: selectedBusNo,
-                plan: currentPlan,
-              })
-            }
-            activeOpacity={0.75}
           >
             <Text style={styles.studentPlanInfoText}>
               {routesData?.isBusActiveInCurrentPlan
                 ? `Bus is active in ${currentPlan}.`
                 : `Bus is inactive in ${currentPlan}.`}
             </Text>
-            <Text style={styles.studentPlanAction}>
-              View stops in {currentPlan}
-            </Text>
-          </TouchableOpacity>
+          </View>
         )}
         {!hasPlanStops && isAdmin && (
           <Text style={styles.planEmptyHint}>
@@ -1728,22 +1686,20 @@ const HomeScreen = () => {
                 </TouchableOpacity>
               </View>
 
-              <TouchableOpacity
-                style={styles.liveStopsButton}
-                onPress={openSelectedBusStopsPage}
-                activeOpacity={0.8}
-                disabled={!selectedBusNo && !selectedPreviewNumber}
-              >
-                <Ionicons name="map-outline" size={16} color={COLORS.primary} />
-                <Text style={styles.liveStopsButtonText}>
-                  View Bus{" "}
-                  {routesData?.routeBusPreviewNumber ??
-                    displayBusData?.alteration?.replacementForPreview ??
-                    selectedPreviewNumber ??
-                    selectedBusNo}{" "}
-                  stops page
-                </Text>
-              </TouchableOpacity>
+              {canViewBusStops && (
+                <TouchableOpacity
+                  style={styles.liveStopsButton}
+                  onPress={openSelectedBusStopsPage}
+                  activeOpacity={0.8}
+                >
+                  <Ionicons
+                    name="map-outline"
+                    size={16}
+                    color={COLORS.primary}
+                  />
+                  <Text style={styles.liveStopsButtonText}>View stops</Text>
+                </TouchableOpacity>
+              )}
 
               {loadingRoutes ? (
                 <View style={styles.loadingContainer}>
@@ -1801,16 +1757,35 @@ const HomeScreen = () => {
                 </View>
               </View>
 
+              {canViewBusStops && (
+                <TouchableOpacity
+                  style={styles.liveStopsButton}
+                  onPress={openSelectedBusStopsPage}
+                  activeOpacity={0.8}
+                >
+                  <Ionicons
+                    name="map-outline"
+                    size={16}
+                    color={COLORS.primary}
+                  />
+                  <Text style={styles.liveStopsButtonText}>View stops</Text>
+                </TouchableOpacity>
+              )}
+
               <View style={styles.content}>
                 {trackingError ? (
                   <View>
                     <Text style={[styles.infoText, styles.errorText]}>
                       {trackingError}
                     </Text>
-                    <Text style={[styles.infoText, styles.subInfoText]}>
-                      Bus is inactive in the current plan.
-                    </Text>
-                    {!isAdmin && inactiveBusActions}
+                    {markerStatus === "inactive" && (
+                      <Text style={[styles.infoText, styles.subInfoText]}>
+                        Bus is inactive in the current plan.
+                      </Text>
+                    )}
+                    {!isAdmin &&
+                      markerStatus === "inactive" &&
+                      inactiveBusActions}
                   </View>
                 ) : error ? (
                   <Text style={[styles.infoText, styles.errorText]}>

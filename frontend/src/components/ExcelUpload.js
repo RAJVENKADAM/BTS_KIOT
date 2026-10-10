@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 import { COLORS } from '../theme';
+import { getErrorMessage } from '../utils/errorHandler';
 
 const ExcelUpload = ({ onUpload, disabled = false }) => {
   const [loading, setLoading] = useState(false);
@@ -40,7 +41,10 @@ const ExcelUpload = ({ onUpload, disabled = false }) => {
     } catch (err) {
       setLoading(false);
       console.error('PICK ERROR:', err);
-      Alert.alert('Error', 'Failed to pick or upload file');
+      Alert.alert(
+        'Upload failed',
+        getErrorMessage(err, 'Please check your connection and try again.'),
+      );
     }
   };
 

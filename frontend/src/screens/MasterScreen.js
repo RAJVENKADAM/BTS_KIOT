@@ -16,6 +16,7 @@ import * as Location from "expo-location";
 import { useIsFocused } from "@react-navigation/native";
 import MasterMap from "../components/Map/MasterMap";
 import masterApi from "../api/masterApi";
+import { getErrorMessage } from "../utils/errorHandler";
 import { useAuth } from "../context/AuthContext";
 import { useBus } from "../context/BusContext";
 import { COLORS, SHADOWS } from "../theme";
@@ -84,7 +85,10 @@ export default function MasterScreen({ navigation }) {
       socket?.emit("join-master");
     } catch (refreshError) {
       setError(
-        refreshError.message || "Could not refresh your bus recommendation.",
+        getErrorMessage(
+          refreshError,
+          "Could not refresh your bus recommendation.",
+        ),
       );
     } finally {
       setLoading(false);
@@ -136,7 +140,9 @@ export default function MasterScreen({ navigation }) {
     try {
       await Linking.openSettings();
     } catch (settingsError) {
-      setError(settingsError.message || "Could not open location settings.");
+      setError(
+        getErrorMessage(settingsError, "Could not open location settings."),
+      );
     }
   };
 
@@ -208,7 +214,9 @@ export default function MasterScreen({ navigation }) {
               </>
             ) : hasStop ? (
               <>
-                <Text style={styles.waitLabel}>WAIT AT</Text>
+                <Text style={styles.waitLabel}>
+                  {recommendation.isCollegeDestination ? "GO TO" : "WAIT AT"}
+                </Text>
                 <Text style={styles.stopName}>{recommendation.stop.name}</Text>
                 {recommendation.operationType !== "NORMAL" && (
                   <Text style={styles.operationLabel}>
@@ -247,18 +255,20 @@ export default function MasterScreen({ navigation }) {
                       About {recommendation.walkingEtaMinutes || "—"} min
                     </Text>
                   </View>
-                  <View style={styles.metricCard}>
-                    <Text style={styles.metricLabel}>BUS TO STOP</Text>
-                    <Text style={styles.metricValue}>
-                      {recommendation.etaMinutes == null
-                        ? "Updating"
-                        : `${recommendation.etaMinutes} min`}
-                    </Text>
-                    <Text style={styles.metricHint}>
-                      {formatDistance(recommendation.busRouteDistanceToStop) ||
-                        "Route distance unavailable"}
-                    </Text>
-                  </View>
+                  {!recommendation.isCollegeDestination && (
+                    <View style={styles.metricCard}>
+                      <Text style={styles.metricLabel}>BUS TO STOP</Text>
+                      <Text style={styles.metricValue}>
+                        {recommendation.etaMinutes == null
+                          ? "Updating"
+                          : `${recommendation.etaMinutes} min`}
+                      </Text>
+                      <Text style={styles.metricHint}>
+                        {formatDistance(recommendation.busRouteDistanceToStop) ||
+                          "Route distance unavailable"}
+                      </Text>
+                    </View>
+                  )}
                 </View>
               </>
             ) : (
@@ -314,8 +324,9 @@ export default function MasterScreen({ navigation }) {
           >
             <Text style={styles.mapTitle}>LIVE MAP</Text>
             <Text style={styles.mapCaption}>
-              Your location · {hasStop ? "Recommended stop · " : ""}
-              Nearest active bus
+              {hasStop
+                ? "Active bus route · stops in order · KIOT College destination"
+                : "Your location · nearest active bus"}
             </Text>
             <View style={styles.mapContainer}>
               <MasterMap recommendation={recommendation} />

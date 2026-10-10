@@ -2,12 +2,12 @@
  * SplashScreen — Animated loading screen shown while auth state resolves.
  * Displays app logo, name, and loading indicator.
  */
-import React, { useEffect, useRef } from 'react';
-import { View, StyleSheet, Image, Animated, StatusBar } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import React, { useEffect, useRef } from "react";
+import { View, StyleSheet, Image, Animated, StatusBar } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 
-import { COLORS } from '../theme';
-import { Header, Subtitle, MutedText } from '../components/UI/Typography';
+import { COLORS } from "../theme";
+import { Header, Subtitle, MutedText } from "../components/UI/Typography";
 
 export default function SplashScreen() {
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -33,26 +33,12 @@ export default function SplashScreen() {
       <StatusBar barStyle="light-content" backgroundColor={COLORS.primary} />
 
       <View style={styles.container}>
-        {/* Logo */}
-        <Animated.View
-          style={[
-            styles.logoContainer,
-            { opacity: fadeAnim, transform: [{ scale: scaleAnim }] },
-          ]}
-        >
-          <View style={styles.logoCircle}>
-            <Image
-              source={require('../../assets/icon.png')}
-              style={styles.logo}
-              resizeMode="contain"
-            />
-          </View>
-        </Animated.View>
-
         {/* Title */}
-        <Animated.View style={{ opacity: fadeAnim, alignItems: 'center' }}>
+        <Animated.View style={{ opacity: fadeAnim, alignItems: "center" }}>
           <Header style={styles.title}>BTMS App</Header>
-          <Subtitle style={styles.subtitle}>Bus Tracking System</Subtitle>
+          <Subtitle style={styles.subtitle}>
+            Bus Tracking Management System
+          </Subtitle>
         </Animated.View>
 
         {/* Footer */}
@@ -74,8 +60,8 @@ const styles = StyleSheet.create({
   },
   container: {
     flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
   },
   logoContainer: {
     marginBottom: 24,
@@ -84,9 +70,9 @@ const styles = StyleSheet.create({
     width: 144,
     height: 144,
     borderRadius: 32,
-    backgroundColor: '#fff',
-    justifyContent: 'center',
-    alignItems: 'center',
+    backgroundColor: "#fff",
+    justifyContent: "center",
+    alignItems: "center",
   },
   logo: {
     width: 124,
@@ -95,23 +81,23 @@ const styles = StyleSheet.create({
   },
   title: {
     fontSize: 36,
-    color: '#fff',
-    fontWeight: '900',
+    color: "#fff",
+    fontWeight: "900",
   },
   subtitle: {
     fontSize: 16,
-    color: 'rgba(255,255,255,0.7)',
+    color: "rgba(255,255,255,0.7)",
     marginTop: 4,
-    fontWeight: '600',
+    fontWeight: "600",
   },
   footer: {
-    position: 'absolute',
+    position: "absolute",
     bottom: 60,
   },
   loading: {
-    color: 'rgba(255,255,255,0.6)',
+    color: "rgba(255,255,255,0.6)",
     fontSize: 12,
     letterSpacing: 1.5,
-    textTransform: 'uppercase',
+    textTransform: "uppercase",
   },
 });

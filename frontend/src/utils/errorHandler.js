@@ -14,12 +14,11 @@ const NETWORK_MESSAGES = [
   "Network request failed",
   "Failed to fetch",
   "NetworkError",
-  "request failed",
-  "fetch is not defined",
-  "Network request failed",
   "Load failed",
   "The Internet connection appears to be offline",
   "Network error",
+  "timed out",
+  "timeout",
 ];
 
 /**
@@ -30,6 +29,13 @@ export function isNetworkError(err) {
   if (!err) return false;
   // Custom flag set by our fetch helper.
   if (err.isNetwork === true) return true;
+  if (
+    err.name === "AbortError" ||
+    err.name === "TimeoutError" ||
+    ["ETIMEDOUT", "ECONNABORTED", "ERR_NETWORK"].includes(err.code)
+  ) {
+    return true;
+  }
   // TypeError from native fetch (network failure).
   if (err instanceof TypeError) return true;
   const msg = String(err?.message || err?.name || "").toLowerCase();
@@ -50,15 +56,46 @@ export function getHttpErrorMessage(status) {
       return "You do not have permission to perform this action.";
     case 404:
       return "The requested item was not found.";
+    case 408:
+      return "The request took too long. Please try again.";
     case 429:
       return "Too many requests. Please wait a moment and try again.";
     case 500:
       return "The server encountered an unexpected error. Please try again.";
+    case 502:
+      return "The server is temporarily unavailable. Please try again shortly.";
     case 503:
       return "The server is temporarily unavailable. Please try again in a few seconds.";
+    case 504:
+      return "The server took too long to respond. Please try again.";
     default:
       return null;
   }
+}
+
+function isTimeoutError(err) {
+  const message = String(err?.message || "").toLowerCase();
+  return (
+    err?.isTimeout === true ||
+    err?.name === "TimeoutError" ||
+    err?.code === "ETIMEDOUT" ||
+    err?.code === "ECONNABORTED" ||
+    message.includes("timed out") ||
+    message.includes("timeout")
+  );
+}
+
+function getSafeServerMessage(message, fallback) {
+  if (typeof message !== "string" || !message.trim()) return null;
+  const normalized = message.trim().replace(/^error:\s*/i, "");
+  if (
+    /internal server error|request failed(?:\s*\(\d+\))?|network request failed|failed to fetch|timed out|timeout|syntaxerror|stack trace|<html|<!doctype/i.test(
+      normalized,
+    )
+  ) {
+    return fallback;
+  }
+  return normalized;
 }
 
 /**
@@ -79,25 +116,35 @@ export function getErrorMessage(
 
   // Network error → specific, actionable message.
   if (isNetworkError(err)) {
+    if (isTimeoutError(err)) {
+      return "The request is taking longer than expected. Please check your connection and try again.";
+    }
     return "Cannot connect to the server. Please check your internet connection and try again.";
   }
 
-  // Server-provided message (e.g. from a JSON error body).
-  const serverMsg = err?.message || err?.serverMessage || err?.error;
-  if (serverMsg && typeof serverMsg === "string" && serverMsg.trim()) {
-    // Avoid returning a generic technical string like "Internal server error".
-    if (/internal server error/i.test(serverMsg)) {
-      return "The server hit an unexpected error. Please try again.";
-    }
-    // Avoid leaking raw "Error: ..." prefixes.
-    return serverMsg.replace(/^error:\s*/i, "");
+  if (err.code === "NO_DATA") {
+    return "Live bus location is not available right now. Please try again shortly.";
+  }
+  if (err.code === "BUS_NOT_FOUND") {
+    return "Bus not found. Please check the bus number and try again.";
+  }
+  if (err.code === "INVALID_RESPONSE") {
+    return "The server returned an unexpected response. Please try again later.";
   }
 
-  // HTTP status based fallback.
+  const fallbackMessage = fallback || "Something went wrong. Please try again.";
   const httpMsg = getHttpErrorMessage(err?.status);
+  if (httpMsg && err?.status !== 400) return httpMsg;
+
+  // Server-provided message (e.g. from a JSON error body).
+  const serverMsg = err?.message || err?.serverMessage || err?.error;
+  const safeServerMessage = getSafeServerMessage(serverMsg, httpMsg || fallbackMessage);
+  if (safeServerMessage) return safeServerMessage;
+
+  // HTTP status based fallback.
   if (httpMsg) return httpMsg;
 
-  return fallback;
+  return fallbackMessage;
 }
 
 /**
@@ -146,34 +193,49 @@ export function createHttpError(response, data) {
  * @param {RequestInit} [options]
  */
 export async function fetchJson(url, options = {}) {
-  let response;
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs || 15000);
-  const { timeoutMs, signal, ...fetchOptions } = options;
+  const { timeoutMs = 15000, signal, ...fetchOptions } = options;
+  let timedOut = false;
+  const timeoutId =
+    timeoutMs > 0
+      ? setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, timeoutMs)
+      : null;
+  const abortRequest = () => controller.abort();
+  if (signal?.aborted) {
+    abortRequest();
+  } else {
+    signal?.addEventListener("abort", abortRequest, { once: true });
+  }
+
   try {
-    response = await fetch(url, {
+    const response = await fetch(url, {
       ...fetchOptions,
-      signal: signal || controller.signal,
+      signal: controller.signal,
     });
+    const data = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw createHttpError(response, data);
+    }
+    return data;
   } catch (err) {
-    // Native fetch network failure → tag it so callers can show a connection message.
+    if (err?.status || err?.code === "INVALID_RESPONSE") throw err;
+    if (!(err instanceof TypeError) && err?.name !== "AbortError") throw err;
+
     const wrapped = new Error(
-      err?.name === "AbortError"
+      timedOut
         ? "Request timed out"
         : err?.message || "Network request failed",
     );
     wrapped.isNetwork = true;
+    wrapped.isTimeout = timedOut;
+    if (timedOut) wrapped.code = "REQUEST_TIMEOUT";
     wrapped.cause = err;
     throw wrapped;
   } finally {
-    clearTimeout(timeoutId);
+    if (timeoutId) clearTimeout(timeoutId);
+    signal?.removeEventListener("abort", abortRequest);
   }
-
-  const data = await parseJsonResponse(response);
-
-  if (!response.ok) {
-    throw createHttpError(response, data);
-  }
-
-  return data;
 }

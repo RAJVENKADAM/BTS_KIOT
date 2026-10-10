@@ -18,6 +18,7 @@ import { COLORS, SPACING } from "../theme";
 import Input from "../components/UI/Input";
 import Button from "../components/UI/Button";
 import { Header, Subtitle } from "../components/UI/Typography";
+import { getErrorMessage } from "../utils/errorHandler";
 
 export default function LoginScreen() {
   const [email, setEmail] = useState("");
@@ -55,11 +56,7 @@ export default function LoginScreen() {
         setError(result.error || "Invalid email or password");
       }
     } catch (err) {
-      setError(
-        err?.isNetwork
-          ? "Cannot connect to the server. Please check your internet connection and try again."
-          : "Unable to connect. Please try again.",
-      );
+      setError(getErrorMessage(err, "Unable to sign in. Please try again."));
     } finally {
       setLoading(false);
     }

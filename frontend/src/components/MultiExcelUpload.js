@@ -12,6 +12,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, SPACING, RADIUS } from '../theme';
 import { Body, MutedText } from './UI/Typography';
+import { getErrorMessage } from '../utils/errorHandler';
 
 const MultiExcelUpload = ({ onUpload, disabled = false }) => {
   const [showModal, setShowModal] = useState(false);
@@ -39,7 +40,7 @@ const MultiExcelUpload = ({ onUpload, disabled = false }) => {
       }
     } catch (err) {
       console.error('PICK ERROR:', err);
-      Alert.alert('Error', 'Failed to pick file');
+      Alert.alert('Could not select file', getErrorMessage(err, 'Please try again.'));
     }
   };
 
@@ -65,7 +66,10 @@ const MultiExcelUpload = ({ onUpload, disabled = false }) => {
       
       await onUpload(selectedFile, customName.trim());
     } catch (error) {
-      Alert.alert('Upload Error', error.message);
+      Alert.alert(
+        'Upload failed',
+        getErrorMessage(error, 'Please check your connection and try again.'),
+      );
     } finally {
       setLoading(false);
     }

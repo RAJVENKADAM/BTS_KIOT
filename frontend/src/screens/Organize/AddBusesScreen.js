@@ -28,7 +28,7 @@ import {
   convertExcelToJson,
   convertColumnsToPlans,
 } from "../../utils/excelImport";
-import { getErrorMessage } from "../../utils/errorHandler";
+import { fetchJson, getErrorMessage } from "../../utils/errorHandler";
 import { getDisplayBusNumber } from "../../utils/busDisplay";
 import { stopApi } from "../../api/stopApi";
 
@@ -108,33 +108,25 @@ export default function AddBusesScreen() {
   const loadBuses = async () => {
     setLoading(true);
     try {
-      const res = await fetch(API_BASE_URL + "/api/bus/get-all-buses", {
+      const data = await fetchJson(API_BASE_URL + "/api/bus/get-all-buses", {
         headers: { Authorization: "Bearer " + token },
       });
-      const rawText = await res.text();
-      const data = rawText ? JSON.parse(rawText) : {};
-      if (res.ok) {
-        const loadedBuses = [
-          ...(data.buses || []),
-          ...(data.alteredBuses || []),
-        ];
-        // Sort buses in ascending order by their preview number (numeric comparison with string fallback)
-        loadedBuses.sort((a, b) => {
-          const numA = Number(a.previewNumber);
-          const numB = Number(b.previewNumber);
-          if (!isNaN(numA) && !isNaN(numB)) {
-            return numA - numB;
-          }
-          return String(a.previewNumber || "").localeCompare(
-            String(b.previewNumber || ""),
-          );
-        });
-        setBuses(loadedBuses);
-      } else {
-        const err = new Error(data.error || "Failed to load buses");
-        err.status = res.status;
-        throw err;
-      }
+      const loadedBuses = [
+        ...(data.buses || []),
+        ...(data.alteredBuses || []),
+      ];
+      // Sort buses in ascending order by their preview number (numeric comparison with string fallback)
+      loadedBuses.sort((a, b) => {
+        const numA = Number(a.previewNumber);
+        const numB = Number(b.previewNumber);
+        if (!isNaN(numA) && !isNaN(numB)) {
+          return numA - numB;
+        }
+        return String(a.previewNumber || "").localeCompare(
+          String(b.previewNumber || ""),
+        );
+      });
+      setBuses(loadedBuses);
     } catch (e) {
       Alert.alert(
         "Error loading buses",
@@ -233,7 +225,10 @@ export default function AddBusesScreen() {
         setExcelFileName(file.name);
       }
     } catch (e) {
-      Alert.alert("Parse Error", e?.message || "Failed to parse Excel");
+      Alert.alert(
+        "Could not read routes file",
+        getErrorMessage(e, "Please check the file and try again."),
+      );
     } finally {
       if (isAlteration) setParsingAlterationExcel(false);
       else if (isEdit) setParsingEditExcel(false);
@@ -663,30 +658,15 @@ export default function AddBusesScreen() {
           style: "destructive",
           onPress: async () => {
             try {
-              const res = await fetch(
+              await fetchJson(
                 API_BASE_URL + "/api/bus/delete-bus/" + selectedBus?.busNo,
                 {
                   method: "DELETE",
                   headers: { Authorization: "Bearer " + token },
                 },
               );
-              if (res.ok) {
-                setShowOptionsModal(false);
-                loadBuses();
-              } else {
-                const rawText = await res.text();
-                const data = rawText ? JSON.parse(rawText) : {};
-                Alert.alert(
-                  "Error",
-                  getErrorMessage(
-                    {
-                      ...new Error(data.error || "Failed to delete bus"),
-                      status: res.status,
-                    },
-                    "Failed to delete the bus.",
-                  ),
-                );
-              }
+              setShowOptionsModal(false);
+              loadBuses();
             } catch (e) {
               Alert.alert(
                 "Error",

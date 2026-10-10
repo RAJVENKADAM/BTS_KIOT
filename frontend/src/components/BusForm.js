@@ -17,6 +17,7 @@ import Button from './UI/Button';
 import Input from './UI/Input';
 import { COLORS, SPACING, RADIUS } from '../theme';
 import { Subtitle, MutedText } from './UI/Typography';
+import { getErrorMessage } from '../utils/errorHandler';
 
 const BusForm = ({ 
   initialData = {}, 
@@ -58,6 +59,11 @@ const BusForm = ({
         }
       } catch (err) {
         console.error('Preview validate error:', err);
+        Alert.alert(
+          'Could not validate bus number',
+          getErrorMessage(err, 'Please check your connection and try again.'),
+        );
+        return false;
       }
     }
     return true;
@@ -94,10 +100,19 @@ const BusForm = ({
           setParsedRoutes(data);
           setShowPreview(true);
         } else {
-          Alert.alert('Parse Error', data.error);
+          Alert.alert(
+            'Could not read route file',
+            getErrorMessage(
+              { status: res.status, message: data.error || data.message },
+              'Please check the file and try again.',
+            ),
+          );
         }
       } catch (err) {
-        Alert.alert('Network Error', 'Failed to parse Excel');
+        Alert.alert(
+          'Could not read route file',
+          getErrorMessage(err, 'Please check the file and try again.'),
+        );
       } finally {
         setUploading(false);
       }
@@ -148,10 +163,19 @@ const BusForm = ({
         refreshBuses();
         onSuccess?.();
       } else {
-        Alert.alert('Submit Error', data.error);
+        Alert.alert(
+          'Could not save bus routes',
+          getErrorMessage(
+            { status: res.status, message: data.error || data.message },
+            'Please try again.',
+          ),
+        );
       }
     } catch (err) {
-      Alert.alert('Network Error', err.message);
+      Alert.alert(
+        'Could not save bus routes',
+        getErrorMessage(err, 'Please check your connection and try again.'),
+      );
     } finally {
       setUploading(false);
     }

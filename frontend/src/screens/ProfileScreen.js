@@ -2,7 +2,7 @@
  * ProfileScreen — User profile view with account details and logout.
  * Displays user info in cards: name, email, role, bus number.
  */
-import React, { useState } from 'react';
+import React, { useState } from "react";
 import {
   View,
   TouchableOpacity,
@@ -10,17 +10,17 @@ import {
   Alert,
   ActivityIndicator,
   ScrollView,
-  StatusBar
-} from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { Ionicons } from '@expo/vector-icons';
-import { useAuth } from '../context/AuthContext';
-import { COLORS, SPACING, RADIUS, SHADOWS } from '../theme';
-import { Header, Subtitle, Body, MutedText } from '../components/UI/Typography';
-import Card from '../components/UI/Card';
-import { getDisplayBusNumber } from '../utils/busDisplay';
-import { API_BASE_URL } from '../api/api';
-import { fetchJson } from '../utils/errorHandler';
+  StatusBar,
+} from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { Ionicons } from "@expo/vector-icons";
+import { useAuth } from "../context/AuthContext";
+import { COLORS, SPACING, RADIUS, SHADOWS } from "../theme";
+import { Header, Subtitle, Body, MutedText } from "../components/UI/Typography";
+import Card from "../components/UI/Card";
+import { getDisplayBusNumber } from "../utils/busDisplay";
+import { API_BASE_URL } from "../api/api";
+import { fetchJson, getErrorMessage } from "../utils/errorHandler";
 
 export default function ProfileScreen() {
   const { user, logout, loading, token, updateUserData } = useAuth();
@@ -35,7 +35,9 @@ export default function ProfileScreen() {
       .then((data) => {
         if (!cancelled && data?.user) updateUserData(data.user);
       })
-      .catch((error) => console.warn('Unable to refresh profile:', error.message));
+      .catch((error) =>
+        console.warn("Unable to refresh profile:", error.message),
+      );
     return () => {
       cancelled = true;
     };
@@ -51,32 +53,30 @@ export default function ProfileScreen() {
     );
   }
 
-
   const handleLogout = async () => {
-    Alert.alert(
-      'Confirm Logout',
-      'Are you sure you want to log out?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Logout',
-          style: 'destructive',
-          onPress: async () => {
-            setIsLoggingOut(true);
-            try {
-              await logout();
-              // Navigation auto-switches to Login once token is cleared in AuthContext.
-              // No manual reset needed — dispatching RESET here causes 
-              // "The action 'RESET' was not handled by any navigator" error.
-            } catch (error) {
-              Alert.alert('Error', 'Failed to logout. Please try again.');
-            } finally {
-              setIsLoggingOut(false);
-            }
+    Alert.alert("Confirm Logout", "Are you sure you want to log out?", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Logout",
+        style: "destructive",
+        onPress: async () => {
+          setIsLoggingOut(true);
+          try {
+            await logout();
+            // Navigation auto-switches to Login once token is cleared in AuthContext.
+            // No manual reset needed — dispatching RESET here causes
+            // "The action 'RESET' was not handled by any navigator" error.
+          } catch (error) {
+            Alert.alert(
+              "Could not log out",
+              getErrorMessage(error, "Please try again."),
+            );
+          } finally {
+            setIsLoggingOut(false);
           }
-        }
-      ]
-    );
+        },
+      },
+    ]);
   };
 
   const InfoItem = ({ label, value, icon }) => (
@@ -86,7 +86,7 @@ export default function ProfileScreen() {
       </View>
       <View style={styles.infoTextWrapper}>
         <MutedText style={styles.infoLabel}>{label}</MutedText>
-        <Body style={styles.infoValue}>{value || 'N/A'}</Body>
+        <Body style={styles.infoValue}>{value || "N/A"}</Body>
       </View>
     </Card>
   );
@@ -98,23 +98,41 @@ export default function ProfileScreen() {
         <View style={styles.header}>
           <View style={styles.avatarWrapper}>
             <View style={styles.avatar}>
-              <Body style={styles.avatarText}>{user?.name?.charAt(0)?.toUpperCase() || 'U'}</Body>
+              <Body style={styles.avatarText}>
+                {user?.name?.charAt(0)?.toUpperCase() || "U"}
+              </Body>
             </View>
-
           </View>
-          <Header style={{ marginBottom: 4 }}>{user?.name || 'User'}</Header>
-          <Subtitle>{user?.email || 'N/A'}</Subtitle>
+          <Header style={{ marginBottom: 4 }}>{user?.name || "User"}</Header>
+          <Subtitle>{user?.email || "N/A"}</Subtitle>
         </View>
 
         <View style={styles.content}>
           <Header style={styles.sectionTitle}>Account Details</Header>
-          <InfoItem label="Full Name" value={user?.name} icon="person-outline" />
-          <InfoItem label="Email Address" value={user?.email} icon="mail-outline" />
-          <InfoItem label="Role" value={user?.role} icon="shield-checkmark-outline" />
-          <InfoItem label="Bus Number" value={getDisplayBusNumber({ previewNumber: user?.previewNumber ?? user?.preview_number, busNo: user?.bus_no })} icon="bus-outline" />
+          <InfoItem
+            label="Full Name"
+            value={user?.name}
+            icon="person-outline"
+          />
+          <InfoItem
+            label="Email Address"
+            value={user?.email}
+            icon="mail-outline"
+          />
+          <InfoItem
+            label="Bus Number"
+            value={getDisplayBusNumber({
+              previewNumber: user?.previewNumber ?? user?.preview_number,
+              busNo: user?.bus_no,
+            })}
+            icon="bus-outline"
+          />
 
           <TouchableOpacity
-            style={[styles.logoutButton, isLoggingOut && styles.logoutButtonDisabled]}
+            style={[
+              styles.logoutButton,
+              isLoggingOut && styles.logoutButtonDisabled,
+            ]}
             onPress={handleLogout}
             disabled={isLoggingOut}
             activeOpacity={0.8}
@@ -123,7 +141,11 @@ export default function ProfileScreen() {
               <ActivityIndicator color={COLORS.error} />
             ) : (
               <>
-                <Ionicons name="log-out-outline" size={20} color={COLORS.error} />
+                <Ionicons
+                  name="log-out-outline"
+                  size={20}
+                  color={COLORS.error}
+                />
                 <Body style={styles.logoutText}>Log Out</Body>
               </>
             )}
@@ -141,12 +163,12 @@ const styles = StyleSheet.create({
   },
   centerContainer: {
     flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
+    justifyContent: "center",
+    alignItems: "center",
     padding: SPACING.screenPadding,
   },
   header: {
-    alignItems: 'center',
+    alignItems: "center",
     paddingVertical: 40,
     backgroundColor: COLORS.white,
     borderBottomLeftRadius: 32,
@@ -154,7 +176,7 @@ const styles = StyleSheet.create({
     ...SHADOWS.soft,
   },
   avatarWrapper: {
-    position: 'relative',
+    position: "relative",
     marginBottom: 16,
   },
   avatar: {
@@ -162,18 +184,18 @@ const styles = StyleSheet.create({
     height: 100,
     borderRadius: 50,
     backgroundColor: COLORS.primary,
-    justifyContent: 'center',
-    alignItems: 'center',
+    justifyContent: "center",
+    alignItems: "center",
     borderWidth: 4,
-    borderColor: '#EEF2FF',
+    borderColor: "#EEF2FF",
   },
   avatarText: {
     fontSize: 40,
-    fontWeight: '800',
+    fontWeight: "800",
     color: COLORS.white,
   },
   editAvatar: {
-    position: 'absolute',
+    position: "absolute",
     bottom: 0,
     right: 0,
     backgroundColor: COLORS.primary,
@@ -190,8 +212,8 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   infoCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     padding: 16,
     marginBottom: 12,
   },
@@ -199,9 +221,9 @@ const styles = StyleSheet.create({
     width: 44,
     height: 44,
     borderRadius: 12,
-    backgroundColor: '#EEF2FF',
-    justifyContent: 'center',
-    alignItems: 'center',
+    backgroundColor: "#EEF2FF",
+    justifyContent: "center",
+    alignItems: "center",
     marginRight: 16,
   },
   infoTextWrapper: {
@@ -209,32 +231,32 @@ const styles = StyleSheet.create({
   },
   infoLabel: {
     marginBottom: 2,
-    textTransform: 'uppercase',
+    textTransform: "uppercase",
     letterSpacing: 0.5,
     fontSize: 10,
-    fontWeight: '700',
+    fontWeight: "700",
   },
   infoValue: {
     fontSize: 15,
-    fontWeight: '600',
+    fontWeight: "600",
   },
   logoutButton: {
     marginTop: 24,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
     padding: 16,
     borderRadius: RADIUS.button,
     borderWidth: 1,
     borderColor: COLORS.error,
-    backgroundColor: 'transparent',
+    backgroundColor: "transparent",
   },
   logoutButtonDisabled: {
     opacity: 0.5,
   },
   logoutText: {
     color: COLORS.error,
-    fontWeight: '700',
+    fontWeight: "700",
     marginLeft: 8,
   },
 });

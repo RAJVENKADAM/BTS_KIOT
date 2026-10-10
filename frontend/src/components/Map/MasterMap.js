@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef } from "react";
 import { WebView } from "react-native-webview";
 
+const KIOT_COLLEGE = { latitude: 11.554528, longitude: 78.019759 };
+
 const toPoint = (point) => {
   if (
     !point ||
@@ -32,6 +34,18 @@ const MAP_SOURCE = {
     .user { background: #2563eb; }
     .stop { background: #16a34a; }
     .bus { background: #ea580c; }
+    .college { background: #7c3aed; }
+    .route-stop {
+      width: 24px;
+      height: 24px;
+      border: 2px solid white;
+      border-radius: 50%;
+      background: #1d4ed8;
+      color: white;
+      font: 700 12px/24px Arial, sans-serif;
+      text-align: center;
+      box-shadow: 0 1px 5px #33415599;
+    }
     .leaflet-popup-content { font: 14px Arial, sans-serif; }
   </style>
 </head>
@@ -40,7 +54,7 @@ const MAP_SOURCE = {
   <script>
     (function () {
       var map = L.map('map', {
-        zoomControl: true,
+        zoomControl: false,
         zoomSnap: 0.25,
         zoomDelta: 0.5,
         wheelPxPerZoomLevel: 100,
@@ -52,6 +66,7 @@ const MAP_SOURCE = {
         inertiaMaxSpeed: 1200,
         easeLinearity: 0.2
       }).setView([11.554528, 78.019759], 13);
+      map.attributionControl.setPrefix(false);
 
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         maxZoom: 19,
@@ -59,6 +74,7 @@ const MAP_SOURCE = {
       }).addTo(map);
 
       var markers = {};
+      var routeStopMarkers = {};
       var routeLine = null;
       var routeRequestId = 0;
       var lastRequestedRoute = null;
@@ -118,8 +134,58 @@ const MAP_SOURCE = {
         markers[key] = marker;
       }
 
-      function updateRoadRoute(user, stop) {
-        if (!user || !stop) {
+      function updateRouteStops(stops) {
+        var activeKeys = {};
+        (Array.isArray(stops) ? stops : []).forEach(function (stop, index) {
+          if (!stop) return;
+          var key = String(stop.stopId || index);
+          activeKeys[key] = true;
+          var marker = routeStopMarkers[key];
+          var point = [stop.latitude, stop.longitude];
+          var popup = '<b>' + escapeHtml(stop.sequence || index + 1) + '. ' +
+            escapeHtml(stop.name || 'Bus stop') + '</b>';
+          if (marker) {
+            marker.setLatLng(point);
+            marker.setPopupContent(popup);
+            return;
+          }
+          marker = L.marker(point, {
+            icon: L.divIcon({
+              className: '',
+              html: '<div class="route-stop">' +
+                escapeHtml(stop.sequence || index + 1) + '</div>',
+              iconSize: [24, 24],
+              iconAnchor: [12, 12]
+            })
+          }).addTo(map).bindPopup(popup);
+          routeStopMarkers[key] = marker;
+        });
+        Object.keys(routeStopMarkers).forEach(function (key) {
+          if (activeKeys[key]) return;
+          map.removeLayer(routeStopMarkers[key]);
+          delete routeStopMarkers[key];
+        });
+      }
+
+      function updateRoadRoute(stops, college) {
+        var waypoints = (Array.isArray(stops) ? stops : [])
+          .filter(function (point) {
+            return point && isFinite(Number(point.latitude)) &&
+              isFinite(Number(point.longitude));
+          })
+          .map(function (point) {
+            return [Number(point.latitude), Number(point.longitude)];
+          });
+        if (college && isFinite(Number(college.latitude)) &&
+            isFinite(Number(college.longitude))) {
+          var lastWaypoint = waypoints[waypoints.length - 1];
+          if (!lastWaypoint || lastWaypoint[0] !== Number(college.latitude) ||
+              lastWaypoint[1] !== Number(college.longitude)) {
+            waypoints.push([Number(college.latitude), Number(college.longitude)]);
+          }
+        }
+
+        if (waypoints.length < 2) {
           routeRequestId += 1;
           lastRequestedRoute = null;
           if (routeLine) {
@@ -129,12 +195,9 @@ const MAP_SOURCE = {
           return;
         }
 
-        var routeKey = [
-          user.latitude,
-          user.longitude,
-          stop.latitude,
-          stop.longitude
-        ].join(',');
+        var routeKey = waypoints.map(function (point) {
+          return point.join(',');
+        }).join(';');
         if (routeKey === lastRequestedRoute) return;
         lastRequestedRoute = routeKey;
         var requestId = ++routeRequestId;
@@ -142,9 +205,11 @@ const MAP_SOURCE = {
           map.removeLayer(routeLine);
           routeLine = null;
         }
+        var coordinates = waypoints.map(function (point) {
+          return point[1] + ',' + point[0];
+        }).join(';');
         var url = 'https://router.project-osrm.org/route/v1/driving/' +
-          user.longitude + ',' + user.latitude + ';' +
-          stop.longitude + ',' + stop.latitude +
+          coordinates +
           '?overview=full&geometries=geojson';
 
         fetch(url)
@@ -199,11 +264,20 @@ const MAP_SOURCE = {
         data = data || {};
         updateMarker('user', data.user, 'user', 'You', 'Your current location');
         updateMarker(
+          'college',
+          data.college,
+          'college',
+          'KIOT College',
+          'Route destination'
+        );
+        updateRouteStops(data.routeStops);
+        var stopMarker = data.isCollegeDestination ? null : data.stop;
+        updateMarker(
           'stop',
-          data.stop,
+          stopMarker,
           'stop',
           'Recommended stop',
-          [
+          stopMarker ? [
             data.stopName || 'Recommended stop',
             'Approx. walk: ' + (data.walkingEtaMinutes == null
               ? 'time unavailable'
@@ -212,7 +286,7 @@ const MAP_SOURCE = {
                 ? ''
                 : ' · ' + formatDistance(data.walkingDistance)),
             'Coordinates: ' + formatCoordinates(data.stop)
-          ]
+          ] : []
         );
         updateMarker(
           'bus',
@@ -225,15 +299,22 @@ const MAP_SOURCE = {
           ].filter(function (line) { return line !== null; })
         );
 
-        updateRoadRoute(data.user, data.stop);
+        updateRoadRoute(data.routeStops, data.college);
 
-        var targetKey = data.stop
-          ? [data.stopId || '', data.stop.latitude, data.stop.longitude].join(':')
+        var targetKey = data.routeStops && data.routeStops.length
+          ? [data.busNumber || '', data.routeStops.map(function (stop) {
+              return [stop.stopId || '', stop.latitude, stop.longitude].join(',');
+            }).join(';'), data.college && data.college.latitude,
+            data.college && data.college.longitude].join(':')
           : null;
         if (targetKey && targetKey !== lastFocusedTarget) {
-          var focusPoints = [data.user, data.stop].filter(Boolean).map(function (point) {
+          var focusPoints = data.routeStops.concat(data.college ? [data.college] : [])
+            .filter(Boolean).map(function (point) {
             return [point.latitude, point.longitude];
           });
+          if (!focusPoints.length && data.stop) {
+            focusPoints.push([data.stop.latitude, data.stop.longitude]);
+          }
           map.fitBounds(focusPoints, {
             padding: [32, 32],
             maxZoom: 16,
@@ -268,12 +349,27 @@ export default function MasterMap({ recommendation }) {
       user: toPoint(result.userLocation),
       stop: toPoint(result.stop),
       bus: toPoint(result.gps),
+      college: toPoint(result.collegeLocation) || KIOT_COLLEGE,
+      routeStops: (Array.isArray(result.routeStops) ? result.routeStops : [])
+        .map((stop) => {
+          const point = toPoint(stop);
+          return point
+            ? {
+                ...point,
+                stopId: stop.stopId,
+                name: stop.name,
+                sequence: stop.sequence,
+              }
+            : null;
+        })
+        .filter(Boolean),
       stopId: result.stop?.stopId,
       stopName: result.stop?.name || "Recommended stop",
       busNumber: result.serviceBusNumbers?.length
         ? result.serviceBusNumbers.join(" + ")
         : result.busNumber || "Nearest active bus",
       userDistance: result.userDistanceToStop,
+      isCollegeDestination: result.isCollegeDestination === true,
       walkingDistance: result.walkingDistanceMeters,
       walkingEtaMinutes: result.walkingEtaMinutes,
       busStatus: result.status || "Unknown",

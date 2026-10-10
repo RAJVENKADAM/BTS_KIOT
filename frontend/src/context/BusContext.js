@@ -14,7 +14,7 @@ import io from "socket.io-client";
 import { API_BASE_URL } from "../api/api";
 import { useAuth } from "./AuthContext";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { isNetworkError, getErrorMessage } from "../utils/errorHandler";
+import { fetchJson, getErrorMessage } from "../utils/errorHandler";
 
 const BusContext = createContext();
 
@@ -168,30 +168,18 @@ export const BusProvider = ({ children }) => {
   const refreshBuses = async () => {
     dispatch({ type: "SET_LOADING", payload: true });
     try {
-      const response = await fetch(`${API_BASE_URL}/api/bus/get-all-buses`, {
+      const data = await fetchJson(`${API_BASE_URL}/api/bus/get-all-buses`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      const rawText = await response.text();
-      const data = rawText ? JSON.parse(rawText) : {};
-      if (response.ok) {
-        dispatch({ type: "SET_BUSES", payload: data.buses });
-        dispatch({ type: "SET_ERROR", payload: null });
-        const cacheKey = `buses_${user?.id || user?._id || "anonymous"}`;
-        await AsyncStorage.setItem(cacheKey, JSON.stringify(data.buses));
-      } else {
-        // Non-OK response → surface a descriptive message based on status.
-        const err = new Error(
-          data.error || `Request failed (${response.status})`,
-        );
-        err.status = response.status;
-        throw err;
-      }
+      dispatch({ type: "SET_BUSES", payload: data.buses });
+      dispatch({ type: "SET_ERROR", payload: null });
+      const cacheKey = `buses_${user?.id || user?._id || "anonymous"}`;
+      await AsyncStorage.setItem(cacheKey, JSON.stringify(data.buses));
     } catch (error) {
-      // Network error → clear connection message; otherwise show server message.
-      const message = isNetworkError(error)
-        ? "Cannot connect to the server. Please check your internet connection."
-        : getErrorMessage(error, "Failed to load buses.");
-      dispatch({ type: "SET_ERROR", payload: message });
+      dispatch({
+        type: "SET_ERROR",
+        payload: getErrorMessage(error, "Could not load buses."),
+      });
     } finally {
       dispatch({ type: "SET_LOADING", payload: false });
     }
@@ -200,14 +188,12 @@ export const BusProvider = ({ children }) => {
   const selectPreviewBus = async (previewNumber) => {
     dispatch({ type: "SET_LOADING", payload: true });
     try {
-      const response = await fetch(
+      await fetchJson(
         `${API_BASE_URL}/api/bus/track-by-preview/${previewNumber}`,
         {
           headers: { Authorization: `Bearer ${token}` },
         },
       );
-      const data = await response.json();
-
       const bus = state.buses.find((b) => b.previewNumber === previewNumber);
       dispatch({ type: "SET_SELECTED_PREVIEW", payload: previewNumber });
       dispatch({

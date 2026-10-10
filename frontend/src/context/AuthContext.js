@@ -13,7 +13,7 @@ import React, {
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
 import { API_BASE_URL } from "../api/api";
-import { isNetworkError } from "../utils/errorHandler";
+import { fetchJson, getErrorMessage } from "../utils/errorHandler";
 
 const AuthContext = createContext();
 
@@ -183,7 +183,7 @@ export const AuthProvider = ({ children }) => {
   // LOGIN
   const login = async (email, password) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
+      const data = await fetchJson(`${API_BASE_URL}/api/auth/login`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -194,54 +194,45 @@ export const AuthProvider = ({ children }) => {
         }),
       });
 
-      const rawText = await response.text();
-      let data = {};
-
-      try {
-        data = rawText ? JSON.parse(rawText) : {};
-      } catch (jsonError) {
+      if (!data.token || !data.user) {
         return {
           success: false,
-          error: "Invalid server response",
+          error: "The server returned an incomplete sign-in response. Please try again.",
         };
       }
 
-      if (response.ok) {
-        if (!data.token || !data.user) {
-          return {
-            success: false,
-            error: "Incomplete server response - missing token or user data",
-          };
-        }
-
-        if (typeof data.user.role !== "string" || typeof data.user.is_active !== "boolean") {
-          return { success: false, error: "Invalid account data returned by server" };
-        }
-        if (!data.user.is_active && data.user.role.toLowerCase() !== "superadmin") {
-          return { success: false, error: "Account deactivated. Contact admin." };
-        }
-        await writeToken(data.token);
-        await AsyncStorage.setItem("user", JSON.stringify(data.user));
-
-        setToken(data.token);
-        setUser(data.user);
-
+      if (
+        typeof data.user.role !== "string" ||
+        typeof data.user.is_active !== "boolean"
+      ) {
         return {
-          success: true,
-          data,
+          success: false,
+          error: "The server returned invalid account details. Please try again.",
         };
       }
+      if (
+        !data.user.is_active &&
+        data.user.role.toLowerCase() !== "superadmin"
+      ) {
+        return { success: false, error: "Account deactivated. Contact admin." };
+      }
+      await writeToken(data.token);
+      await AsyncStorage.setItem("user", JSON.stringify(data.user));
+
+      setToken(data.token);
+      setUser(data.user);
 
       return {
-        success: false,
-        error: data.error || data.message || "Login failed",
+        success: true,
+        data,
       };
     } catch (error) {
       return {
         success: false,
-        error: isNetworkError(error)
-          ? "Cannot connect to the server. Please check your internet connection."
-          : `Login failed: ${error.message}`,
+        error:
+          error?.status === 401
+            ? "Email or password is incorrect."
+            : getErrorMessage(error, "Unable to sign in. Please try again."),
       };
     }
   };
@@ -333,14 +324,21 @@ export const AuthProvider = ({ children }) => {
 
       return {
         success: false,
-        error: data.error || "Account deletion failed",
+        error: getErrorMessage(
+          {
+            status: response.status,
+            message: data.error || data.message,
+          },
+          "Could not delete your account. Please try again.",
+        ),
       };
     } catch (error) {
       return {
         success: false,
-        error: isNetworkError(error)
-          ? "Cannot connect to the server. Please check your internet connection."
-          : error.message || "Account deletion failed",
+        error: getErrorMessage(
+          error,
+          "Could not delete your account. Please try again.",
+        ),
       };
     }
   };

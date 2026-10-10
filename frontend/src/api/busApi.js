@@ -1,11 +1,6 @@
 // Dedicated bus API module
 import { API_BASE_URL } from "./api";
-import {
-  fetchJson,
-  isNetworkError,
-  getErrorMessage,
-  parseJsonResponse,
-} from "../utils/errorHandler";
+import { fetchJson } from "../utils/errorHandler";
 
 export const busApi = {
   /**
@@ -27,30 +22,9 @@ export const busApi = {
    * to prevent displaying another bus's location.
    */
   getBusLocation: async (token, busNo) => {
-    const response = await fetch(`${API_BASE_URL}/api/bus/location/${busNo}`, {
+    const data = await fetchJson(`${API_BASE_URL}/api/bus/location/${busNo}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    const data = await parseJsonResponse(response);
-
-    // Network error handling
-    if (isNetworkError(data)) throw data;
-
-    // Non-OK HTTP status
-    if (!response.ok) {
-      const err = new Error(
-        data.error ||
-          getErrorMessage(data) ||
-          `Request failed (${response.status})`,
-      );
-      err.status = response.status;
-      err.code =
-        data.error === "Bus not found" || response.status === 404
-          ? "BUS_NOT_FOUND"
-          : "SERVER";
-      err.serverMessage = data.error || data.message;
-      throw err;
-    }
-
     if (data.success === false) {
       const msg =
         data.error ||
@@ -58,6 +32,7 @@ export const busApi = {
         `No live data (${data.status || data.source || "unknown"})`;
       const err = new Error(msg);
       err.code = data.error === "Bus not found" ? "BUS_NOT_FOUND" : "NO_DATA";
+      if (err.code === "BUS_NOT_FOUND") err.status = 404;
       throw err;
     }
     return data;
