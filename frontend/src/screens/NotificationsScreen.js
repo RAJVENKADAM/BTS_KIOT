@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -16,12 +16,89 @@ import { COLORS } from "../theme";
 import { useBus } from "../context/BusContext";
 import { getErrorMessage } from "../utils/errorHandler";
 
+const DATE_TIME_ZONE = "Asia/Kolkata";
+
+function getDateKey(value) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: DATE_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map(({ type, value: part }) => [type, part]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function getDateLabel(value, dateKey) {
+  const today = getDateKey(new Date());
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (dateKey === today) return "Today";
+  if (dateKey === getDateKey(yesterday)) return "Yesterday";
+  return new Intl.DateTimeFormat("en-IN", {
+    timeZone: DATE_TIME_ZONE,
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  }).format(new Date(value));
+}
+
+function formatMessageTime(value) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  return new Intl.DateTimeFormat("en-IN", {
+    timeZone: DATE_TIME_ZONE,
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(date);
+}
+
 export default function NotificationsScreen() {
   const { token } = useAuth();
   const navigation = useNavigation();
   const { getSocket } = useBus();
   const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
+
+  const messageRows = useMemo(() => {
+    const rows = [];
+    let previousDateKey = null;
+    const messages = notifications
+      .filter(
+        (item) =>
+          typeof item?.message === "string" &&
+          item.message.trim().length > 0 &&
+          Number.isFinite(new Date(item.createdAt).getTime()),
+      )
+      .sort(
+        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+      );
+
+    messages.forEach((item) => {
+      const dateKey = getDateKey(item.createdAt);
+      if (dateKey !== previousDateKey) {
+        rows.push({
+          id: `date-${dateKey}`,
+          rowType: "date",
+          label: getDateLabel(item.createdAt, dateKey),
+        });
+        previousDateKey = dateKey;
+      }
+      rows.push(item);
+    });
+    return rows;
+  }, [notifications]);
+
+  const currentMessageId = useMemo(() => {
+    for (let index = messageRows.length - 1; index >= 0; index -= 1) {
+      if (!messageRows[index].rowType) return messageRows[index].id;
+    }
+    return null;
+  }, [messageRows]);
 
   const loadNotifications = useCallback(async () => {
     try {
@@ -87,7 +164,12 @@ export default function NotificationsScreen() {
     const socket = getSocket();
     if (!socket) return undefined;
     const handleNotification = (notification) => {
-      if (!notification?.message) return;
+      if (
+        typeof notification?.message !== "string" ||
+        !notification.message.trim()
+      ) {
+        return;
+      }
       const liveItem = {
         ...notification,
         id: notification.id || `live-${Date.now()}-${Math.random()}`,
@@ -95,7 +177,10 @@ export default function NotificationsScreen() {
         createdAt: notification.createdAt || new Date().toISOString(),
       };
       setNotifications((items) => {
-        if (notification.id && items.some((item) => String(item.id) === String(notification.id))) {
+        if (
+          notification.id &&
+          items.some((item) => String(item.id) === String(notification.id))
+        ) {
           return items;
         }
         return [liveItem, ...items];
@@ -105,34 +190,41 @@ export default function NotificationsScreen() {
     return () => socket.off("notification", handleNotification);
   }, [getSocket]);
 
-  const renderItem = ({ item }) => (
-    <TouchableOpacity
-      style={[styles.card, !item.read && styles.unreadCard]}
-      activeOpacity={0.85}
-      onPress={() => !item.read && markRead(item.id)}
-    >
-      <View style={styles.body}>
-        <Text style={styles.message}>{item.message}</Text>
-        {!!item.createdAt && (
-          <Text style={styles.meta}>
-            {new Intl.DateTimeFormat("en-IN", {
-              timeZone: "Asia/Kolkata",
-              hour: "numeric",
-              minute: "2-digit",
-              hour12: true,
-            }).format(new Date(item.createdAt))}
+  const renderItem = ({ item }) => {
+    if (item.rowType === "date") {
+      return (
+        <View style={styles.dateDivider}>
+          <Text style={styles.dateDividerText}>{item.label}</Text>
+        </View>
+      );
+    }
+
+    return (
+      <TouchableOpacity
+        style={styles.messageRow}
+        activeOpacity={0.85}
+        onPress={() => !item.read && markRead(item.id)}
+      >
+        <View
+          style={[
+            styles.messageBubble,
+            item.id === currentMessageId && styles.currentMessageBubble,
+          ]}
+        >
+          <Text style={[styles.message, !item.read && styles.unreadMessage]}>
+            {item.message.trim()}
           </Text>
-        )}
-        {!item.read && <Text style={styles.unreadLabel}>Unread</Text>}
-      </View>
-    </TouchableOpacity>
-  );
+          <Text style={styles.meta}>{formatMessageTime(item.createdAt)}</Text>
+        </View>
+      </TouchableOpacity>
+    );
+  };
 
   return (
     <View style={styles.container}>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => navigation.goBack()}>
-          <Ionicons name="arrow-back" size={24} color={COLORS.textHeader} />
+          <Ionicons name="arrow-back" size={24} color="#fff" />
         </TouchableOpacity>
         <Text style={styles.title}>Messages</Text>
         <TouchableOpacity
@@ -148,11 +240,11 @@ export default function NotificationsScreen() {
         <ActivityIndicator style={{ marginTop: 40 }} color={COLORS.primary} />
       ) : (
         <FlatList
-          data={notifications}
+          data={messageRows}
           keyExtractor={(item) => String(item.id)}
           renderItem={renderItem}
-          contentContainerStyle={notifications.length ? styles.list : styles.emptyList}
-          ListEmptyComponent={<Text style={styles.empty}>No new notifications.</Text>}
+          contentContainerStyle={messageRows.length ? styles.list : styles.emptyList}
+          ListEmptyComponent={<Text style={styles.empty}>No messages yet.</Text>}
         />
       )}
     </View>
@@ -160,44 +252,51 @@ export default function NotificationsScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.background },
+  container: { flex: 1, backgroundColor: "#F1F7FE" },
   header: {
     padding: 18,
     paddingTop: 50,
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    backgroundColor: COLORS.white,
-  },
-  title: { fontSize: 20, fontWeight: "700", color: COLORS.textHeader },
-  list: { padding: 16 },
-  emptyList: { flexGrow: 1, justifyContent: "center", alignItems: "center" },
-  empty: { color: COLORS.textBody, fontSize: 16 },
-  card: {
-    flexDirection: "row",
-    backgroundColor: COLORS.white,
-    borderRadius: 12,
-    padding: 14,
-    marginBottom: 12,
-  },
-  unreadCard: { borderLeftWidth: 4, borderLeftColor: COLORS.primary },
-  deleteAllButton: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6, backgroundColor: "#FEF2F2" },
-  deleteAllText: { color: COLORS.error, fontSize: 12, fontWeight: "700" },
-  icon: { marginRight: 12, paddingTop: 2 },
-  body: { flex: 1 },
-  message: { color: COLORS.textHeader, fontSize: 15, fontWeight: "600" },
-  unreadLabel: { color: COLORS.primary, fontSize: 12, fontWeight: "700", marginBottom: 2 },
-  meta: { color: COLORS.textBody, marginTop: 6 },
-  button: {
-    alignSelf: "flex-start",
-    flexDirection: "row",
-    gap: 6,
-    alignItems: "center",
-    marginTop: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
     backgroundColor: COLORS.primary,
   },
-  buttonText: { color: "#fff", fontWeight: "600" },
+  title: { fontSize: 20, fontWeight: "700", color: "#fff" },
+  list: { paddingHorizontal: 12, paddingVertical: 10 },
+  emptyList: { flexGrow: 1, justifyContent: "center", alignItems: "center" },
+  empty: { color: COLORS.textBody, fontSize: 16 },
+  dateDivider: {
+    alignSelf: "center",
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    marginVertical: 10,
+    borderRadius: 12,
+    backgroundColor: "#DBEAFE",
+  },
+  dateDividerText: { color: COLORS.primary, fontSize: 12, fontWeight: "600" },
+  messageRow: { alignItems: "flex-start", marginBottom: 8 },
+  messageBubble: {
+    maxWidth: "88%",
+    minWidth: "55%",
+    paddingHorizontal: 12,
+    paddingTop: 9,
+    paddingBottom: 5,
+    borderRadius: 10,
+    backgroundColor: "#DBEAFE",
+    elevation: 1,
+  },
+  currentMessageBubble: {
+    borderWidth: 2,
+    borderColor: COLORS.primary,
+  },
+  deleteAllButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+    backgroundColor: "#DBEAFE",
+  },
+  deleteAllText: { color: COLORS.primary, fontSize: 12, fontWeight: "700" },
+  message: { color: "#1F2933", fontSize: 15, lineHeight: 21, fontWeight: "500" },
+  unreadMessage: { fontWeight: "700" },
+  meta: { color: "#667781", fontSize: 11, textAlign: "right", marginTop: 3 },
 });

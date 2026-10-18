@@ -7,6 +7,7 @@ import { fetchJson, getErrorMessage } from "../utils/errorHandler";
 
 export async function importUsersExcelJson({ token, users, excelCustomName }) {
   const data = await fetchJson(`${API_BASE_URL}/api/superadmin/import-users`, {
+    timeoutMs: 120000,
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,

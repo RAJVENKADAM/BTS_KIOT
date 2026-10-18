@@ -180,6 +180,9 @@ export function createHttpError(response, data) {
   if (Array.isArray(data?.rowResults)) {
     err.rowResults = data.rowResults;
   }
+  if (data?.summary && typeof data.summary === "object") {
+    err.summary = data.summary;
+  }
   return err;
 }
 

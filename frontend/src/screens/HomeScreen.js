@@ -20,7 +20,7 @@
  * ───────────────────
  * - Joins/leaves socket room "bus_{busNo}" when selectedBusNo changes.
  * - Listens for "bus-update" events to refresh live bus status in real time.
- * - No polling — live updates are socket-driven; manual refresh via handleRefresh.
+ * - Live bus updates are socket-driven.
  *
  * Search & Marker Rules:
  * ───────────────────────
@@ -68,7 +68,6 @@ import BottomSheet, { BottomSheetView } from "@gorhom/bottom-sheet";
 import { getErrorMessage } from "../utils/errorHandler";
 import { getDisplayBusNumber } from "../utils/busDisplay";
 import notificationApi from "../api/notificationApi";
-import * as Location from "expo-location";
 
 const KIOT_LAT = 11.554528;
 const KIOT_LNG = 78.019759;
@@ -135,8 +134,6 @@ const HomeScreen = () => {
   const bottomSheetRef = useRef(null);
   const [showPlanInSheet, setShowPlanInSheet] = useState(false);
   const [planViewMode, setPlanViewMode] = useState(null); // 'activePlan' | 'stopsForBus' | null
-  const [nearbyBuses, setNearbyBuses] = useState([]);
-  const [loadingNearbyBuses, setLoadingNearbyBuses] = useState(false);
 
   // Compute where the search bar actually ends, so the sheet never expands behind it
   const { height: SCREEN_HEIGHT } = Dimensions.get("window");
@@ -588,14 +585,6 @@ const HomeScreen = () => {
     return () => socket.off("locationUpdate", handleLocationUpdate);
   }, [socket, busData, selectedBusNo, selectedPreviewNumber]);
 
-  const handleSocketRefresh = useCallback(() => {
-    if (!socket) return;
-    const busToRefresh = selectedPreviewNumber || selectedBusNo;
-    if (!busToRefresh) return;
-    setLocationStatus("loading");
-    socket.emit("request-bus-location", busToRefresh);
-  }, [socket, selectedPreviewNumber, selectedBusNo]);
-
   const loadGlobalActivePlan = useCallback(async () => {
     if (!token) return globalPlan || "PLAN A";
     try {
@@ -686,53 +675,6 @@ const HomeScreen = () => {
     }
   }, [loadGlobalActivePlan, loadActivePlanBuses]);
 
-  const findNearbyBuses = useCallback(async () => {
-    setLoadingNearbyBuses(true);
-    try {
-      const permission = await Location.requestForegroundPermissionsAsync();
-      if (permission.status !== "granted") {
-        throw new Error(
-          "Location permission is required to find nearby buses.",
-        );
-      }
-      const position = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.Balanced,
-      });
-      const buses = await loadActivePlanBuses(globalPlan);
-      const { latitude, longitude } = position.coords;
-      const result = buses
-        .map((bus) => ({
-          ...bus,
-          distance: calculateDistance(
-            latitude,
-            longitude,
-            Number(bus.latitude),
-            Number(bus.longitude),
-          ),
-        }))
-        .filter(
-          (bus) =>
-            Number.isFinite(bus.distance) &&
-            Number.isFinite(Number(bus.latitude)) &&
-            Number.isFinite(Number(bus.longitude)) &&
-            bus.distance <= 10,
-        )
-        .sort((a, b) => a.distance - b.distance);
-      setNearbyBuses(result);
-      setPlanBuses(result);
-      setPlanViewMode("activePlan");
-      setShowPlanInSheet(true);
-      bottomSheetRef.current?.snapToIndex?.(1);
-    } catch (error) {
-      setTrackingError(
-        getErrorMessage(error, "Could not find nearby buses."),
-      );
-      setNearbyBuses([]);
-    } finally {
-      setLoadingNearbyBuses(false);
-    }
-  }, [globalPlan, loadActivePlanBuses]);
-
   useEffect(() => {
     loadGlobalActivePlan();
   }, [loadGlobalActivePlan]);
@@ -801,125 +743,6 @@ const HomeScreen = () => {
     busStatusRef.current = nextStatus;
     return nextStatus;
   };
-
-  const handleRefresh = useCallback(async () => {
-    if (!selectedBusNo && !selectedPreviewNumber) return;
-    setLocationStatus("loading");
-    try {
-      let data;
-      if (selectedPreviewNumber) {
-        data = await busApi.trackByPreview(token, selectedPreviewNumber);
-      } else {
-        data = await busApi.getBusLocation(token, selectedBusNo);
-      }
-
-      const hasValidCoords =
-        data &&
-        data.latitude != null &&
-        data.longitude != null &&
-        Number.isFinite(Number(data.latitude)) &&
-        Number.isFinite(Number(data.longitude)) &&
-        data.latitude !== "NaN" &&
-        data.longitude !== "NaN";
-
-      const foundInBackend = !!(
-        data &&
-        (data.busNo || data.bus_no || data.busNumber)
-      );
-
-      if (data?.isBusActiveInCurrentPlan === false || data?.notActiveMessage) {
-        setTrackingError("Your bus is inactive.");
-        setBusData({ ...data, source: data?.source || "gps" });
-        setLastGoodLocation({ ...data, source: data?.source || "gps" });
-        setLocationStatus("offline");
-        setIsOffline(true);
-        setMarkerStatus("inactive");
-        setNoBusFound(false);
-        setIsBusFound(true);
-        return;
-      }
-
-      if (data?.isBusActiveInCurrentPlan === false) {
-        setTrackingError("Your bus is inactive.");
-        setBusData(hasValidCoords ? { ...data, _isOffline: true } : null);
-        setLastGoodLocation(
-          hasValidCoords ? { ...data, _isOffline: true } : null,
-        );
-        setLocationStatus("offline");
-        setIsOffline(true);
-        setMarkerStatus("inactive");
-        setNoBusFound(false);
-        setIsBusFound(foundInBackend);
-        return;
-      }
-
-      const staleGps = isGpsStale(data);
-
-      if (staleGps) {
-        setIsOffline(true);
-        setLocationStatus("offline");
-        if (hasValidCoords) {
-          setBusData({ ...data, source: data.source || "gps" });
-          setLastGoodLocation({ ...data, source: data.source || "gps" });
-          setNoBusFound(false);
-          setIsBusFound(true);
-        } else if (lastGoodLocation) {
-          setBusData(lastGoodLocation);
-          setNoBusFound(false);
-          setIsBusFound(true);
-        } else {
-          setBusData({ ...data, source: data.source || "offline" });
-          setNoBusFound(!foundInBackend);
-          setIsBusFound(foundInBackend);
-        }
-      } else if (hasValidCoords) {
-        const nextBusData = { ...data, source: data.source || "gps" };
-        setBusData(nextBusData);
-        setLastGoodLocation(nextBusData);
-        setLocationStatus("live");
-        setIsOffline(false);
-        setMarkerStatus("moving");
-        setTrackingError(null);
-        setNoBusFound(false);
-        setIsBusFound(true);
-        const statusFromAPI = data.busState;
-        const statusFromCoordinates = hasValidCoords
-          ? detectBusStatus(data.latitude, data.longitude)
-          : "offline";
-        setMarkerStatus(chooseBusStatus(statusFromAPI, statusFromCoordinates));
-      } else {
-        setBusData({ ...data, source: data.source || "offline" });
-        setLastGoodLocation(null);
-        setLocationStatus("offline");
-        setIsOffline(true);
-        setNoBusFound(!foundInBackend);
-        setIsBusFound(foundInBackend);
-      }
-    } catch (err) {
-      console.log("Refresh error:", err.message);
-      setTrackingError(
-        err?.status === 404
-          ? "Bus not found. Please check the bus number and try again."
-          : getErrorMessage(err, "Could not refresh the bus location."),
-      );
-      setNoBusFound(err?.status === 404);
-      if (lastGoodLocation) {
-        setBusData(lastGoodLocation);
-        setLocationStatus("offline");
-        setIsOffline(true);
-        setIsBusFound(true);
-      } else {
-        setLocationStatus("error");
-      }
-    }
-    await refreshBuses();
-  }, [
-    selectedBusNo,
-    selectedPreviewNumber,
-    token,
-    lastGoodLocation,
-    refreshBuses,
-  ]);
 
   const handleOpenPlanBus = useCallback(
     async (busNo) => {
@@ -1321,14 +1144,8 @@ const HomeScreen = () => {
   }, [
     displayBusData,
     displayBusLabel,
-    markerStatus,
     isOffline,
     isAdmin,
-    openActivePlanInSheet,
-    findNearbyBuses,
-    loadingNearbyBuses,
-    nearbyBuses,
-    navigation,
   ]);
 
   const planCardContent = React.useMemo(() => {
@@ -1412,51 +1229,6 @@ const HomeScreen = () => {
     navigation,
   ]);
 
-  const inactiveBusActions = (
-    <View style={styles.inactiveBusActions}>
-      <Text style={styles.inactiveBusActionsTitle}>Find another bus</Text>
-      <TouchableOpacity
-        style={styles.availableBusesButton}
-        onPress={async () => {
-          const latestPlan = await loadGlobalActivePlan();
-          navigation.navigate("PlanDetails", {
-            mode: "activePlan",
-            plan: latestPlan,
-          });
-        }}
-        activeOpacity={0.8}
-      >
-        <Text style={styles.availableBusesButtonText}>
-          Available buses in current plan
-        </Text>
-      </TouchableOpacity>
-      <TouchableOpacity
-        style={styles.nearbyBusesButton}
-        onPress={async () => {
-          const latestPlan = await loadGlobalActivePlan();
-          navigation.navigate("PlanDetails", {
-            mode: "activePlan",
-            plan: latestPlan,
-            showNearby: true,
-          });
-        }}
-        disabled={loadingNearbyBuses}
-        activeOpacity={0.8}
-      >
-        <Text style={styles.nearbyBusesButtonText}>
-          {loadingNearbyBuses
-            ? "Finding nearby active buses..."
-            : "Find nearby active buses"}
-        </Text>
-      </TouchableOpacity>
-      {nearbyBuses.length > 0 && (
-        <Text style={styles.nearbyResultsHint}>
-          Nearby active buses are shown in nearest-first order.
-        </Text>
-      )}
-    </View>
-  );
-
   return (
     <View style={styles.container}>
       <StatusBar
@@ -1517,37 +1289,8 @@ const HomeScreen = () => {
             activeOpacity={0.7}
             accessibilityLabel="Open Master"
           >
-            <Text style={styles.masterButtonText}>!</Text>
+            <Ionicons name="analytics-outline" size={18} color="#fff" />
           </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.iconButtonPrimary,
-              locationStatus === "loading" && { opacity: 0.6 },
-            ]}
-            onPress={handleSocketRefresh}
-            activeOpacity={0.7}
-            disabled={locationStatus === "loading"}
-          >
-            <Ionicons name="refresh" size={18} color="#fff" />
-          </TouchableOpacity>
-
-          {isAdmin && (
-            <TouchableOpacity
-              style={styles.planButton}
-              onPress={() =>
-                navigation.navigate("PlanDetails", {
-                  mode: "activePlan",
-                  plan: globalPlan,
-                })
-              }
-              activeOpacity={0.7}
-            >
-              <Text style={styles.planButtonText}>
-                {globalPlan?.replace("PLAN ", "") || "A"}
-              </Text>
-            </TouchableOpacity>
-          )}
 
           {!isAdmin && (
             <TouchableOpacity
@@ -1783,9 +1526,6 @@ const HomeScreen = () => {
                         Bus is inactive in the current plan.
                       </Text>
                     )}
-                    {!isAdmin &&
-                      markerStatus === "inactive" &&
-                      inactiveBusActions}
                   </View>
                 ) : error ? (
                   <Text style={[styles.infoText, styles.errorText]}>
@@ -1892,12 +1632,6 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     alignItems: "center",
   },
-  masterButtonText: {
-    color: "#fff",
-    fontSize: 10,
-    fontWeight: "800",
-    letterSpacing: 0.2,
-  },
   organizeButton: {
     flexDirection: "row",
     alignItems: "center",
@@ -1922,20 +1656,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
 
-  planButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: COLORS.primary,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  planButtonText: {
-    color: "#fff",
-    fontSize: 12,
-    fontWeight: "800",
-  },
   notificationButton: {
     width: 32,
     height: 32,
@@ -1981,57 +1701,6 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   inactivePlanText: { flex: 1, color: "#92400E", fontWeight: "600" },
-  inactiveBusActions: {
-    marginTop: 18,
-    padding: 14,
-    borderRadius: 12,
-    backgroundColor: "#F8FAFC",
-    borderWidth: 1,
-    borderColor: "#E2E8F0",
-  },
-  inactiveBusActionsTitle: {
-    color: COLORS.textHeader,
-    fontSize: 15,
-    fontWeight: "800",
-    marginBottom: 10,
-  },
-  availableBusesButton: {
-    minHeight: 44,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 9,
-    paddingHorizontal: 12,
-    backgroundColor: COLORS.primary,
-  },
-  availableBusesButtonText: {
-    color: "#fff",
-    fontSize: 13,
-    fontWeight: "800",
-    textAlign: "center",
-  },
-  nearbyBusesButton: {
-    minHeight: 44,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 9,
-    marginTop: 8,
-    paddingHorizontal: 12,
-    backgroundColor: "#E8F0FE",
-    borderWidth: 1,
-    borderColor: COLORS.primary,
-  },
-  nearbyBusesButtonText: {
-    color: COLORS.primary,
-    fontSize: 13,
-    fontWeight: "800",
-    textAlign: "center",
-  },
-  nearbyResultsHint: {
-    color: COLORS.textBody,
-    fontSize: 12,
-    marginTop: 9,
-    textAlign: "center",
-  },
   liveStopsButton: {
     alignSelf: "stretch",
     flexDirection: "row",
@@ -2047,35 +1716,6 @@ const styles = StyleSheet.create({
     color: COLORS.primary,
     fontSize: 13,
     fontWeight: "800",
-  },
-  busDiscoveryActions: {
-    marginTop: 10,
-    gap: 6,
-  },
-  discoveryButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingVertical: 7,
-  },
-  discoveryButtonText: {
-    color: COLORS.primary,
-    fontWeight: "700",
-    fontSize: 13,
-  },
-  nearbyBusRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    paddingVertical: 7,
-    paddingHorizontal: 8,
-    borderRadius: 8,
-    backgroundColor: "#F3F4F6",
-  },
-  nearbyBusName: { color: COLORS.textHeader, fontWeight: "700" },
-  nearbyBusDistance: { color: COLORS.textBody, fontSize: 12 },
-  refreshSpin: {
-    // Simple static style for the refresh icon while a refresh is in progress.
-    // (A real rotation animation would use RN Animated; kept minimal here.)
   },
   searchContainer: {
     flex: 1,

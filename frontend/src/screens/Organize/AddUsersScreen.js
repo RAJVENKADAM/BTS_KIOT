@@ -21,12 +21,28 @@ import UserCard from "../../components/UserCard";
 import Card from "../../components/UI/Card";
 import * as DocumentPicker from "expo-document-picker";
 
-import { readExcelFile, convertExcelToJson } from "../../utils/excelImport";
+import {
+  readExcelFile,
+  convertUserExcelToJson,
+} from "../../utils/excelImport";
 import { importUsersExcelJson } from "../../api/importApi";
 
 import { COLORS, SPACING, RADIUS, SHADOWS } from "../../theme";
 import { Header, Body, MutedText } from "../../components/UI/Typography";
 import { getErrorMessage } from "../../utils/errorHandler";
+
+function formatImportRowErrors(rowResults) {
+  if (!Array.isArray(rowResults)) return "";
+  const failures = rowResults.filter((row) => row?.status === "failed");
+  if (!failures.length) return "";
+  const details = failures
+    .slice(0, 6)
+    .map((row) => `Excel row ${(Number(row.index) || 0) + 2}: ${row.reason}`);
+  if (failures.length > details.length) {
+    details.push(`...and ${failures.length - details.length} more.`);
+  }
+  return `\n\nRow issues:\n${details.join("\n")}`;
+}
 
 export default function AddUsersScreen() {
   const [uploading, setUploading] = useState(false);
@@ -99,12 +115,12 @@ export default function AddUsersScreen() {
 
     try {
       const readResult = await readExcelFile(file);
-      // Column order doesn't matter; xlsx maps by header row.
-      // Your sheet headers are: name, email, busno, role, mobile_no, date_of_year
-      const rows = convertExcelToJson(readResult, {
-        normalizeHeaders: true,
-        skipEmptyRows: true,
-      });
+      const rows = convertUserExcelToJson(readResult);
+      if (!rows.length) {
+        throw new Error(
+          "No user rows found. The first row must contain column headings, followed by user data.",
+        );
+      }
 
       const response = await importUsersExcelJson({
         token,
@@ -120,19 +136,45 @@ export default function AddUsersScreen() {
       });
 
       if (response?.success) {
+        const summary = response.summary || {};
+        const rowErrors = formatImportRowErrors(summary.rowResults);
         Alert.alert(
-          "Import complete",
-          `totalRows: ${response.summary.totalRows}\ninserted: ${response.summary.insertedRows}\nupdated: ${response.summary.updatedRows}\nunchanged: ${response.summary.unchangedRows}\nfailed: ${response.summary.failedRows}`,
+          summary.failedRows
+            ? "Import completed with errors"
+            : "Import complete",
+          [
+            `Total rows: ${summary.totalRows ?? rows.length}`,
+            `Inserted: ${summary.insertedRows ?? 0}`,
+            `Updated: ${summary.updatedRows ?? 0}`,
+            `Unchanged: ${summary.unchangedRows ?? 0}`,
+            `Failed: ${summary.failedRows ?? 0}`,
+            rowErrors,
+          ]
+            .filter(Boolean)
+            .join("\n"),
         );
       }
 
       // Keep existing UI behavior; legacy Excel management list will stay as-is.
-      loadExcelUploads();
+      await loadExcelUploads();
     } catch (e) {
+      const rowErrors = formatImportRowErrors(
+        e?.summary?.rowResults || e?.rowResults,
+      );
+      const message = [
+        getErrorMessage(e, "The user import could not be completed."),
+        rowErrors,
+        e?.isTimeout
+          ? "The server may still have completed this import. Check the upload cards before retrying."
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n\n");
       Alert.alert(
         "Import failed",
-        getErrorMessage(e, "The user import could not be completed."),
+        message,
       );
+      if (e?.isTimeout) await loadExcelUploads();
     } finally {
       setUploading(false);
     }

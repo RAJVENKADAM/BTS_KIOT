@@ -173,6 +173,41 @@ function convertExcelToJson(workbookOrReadResult, options = {}) {
   return convertSheetToJson(worksheet, options);
 }
 
+function convertUserExcelToJson(workbookOrReadResult) {
+  const workbook = workbookOrReadResult?.workbook
+    ? workbookOrReadResult.workbook
+    : workbookOrReadResult;
+  const sheetName = workbook?.SheetNames?.[0];
+  const worksheet = sheetName ? workbook.Sheets[sheetName] : null;
+  if (!worksheet) return [];
+
+  const rows = XLSX.utils.sheet_to_json(worksheet, {
+    header: 1,
+    range: 1,
+    defval: "",
+    blankrows: false,
+  });
+  const columns = [
+    "name",
+    "email",
+    "busno",
+    "role",
+    "mobile_no",
+    "date_of_year",
+  ];
+
+  return rows
+    .filter((row) =>
+      Array.isArray(row) &&
+      row.some((value) => String(value ?? "").trim() !== ""),
+    )
+    .map((row) =>
+      Object.fromEntries(
+        columns.map((column, index) => [column, row[index] ?? ""]),
+      ),
+    );
+}
+
 /**
  * Convert column-based Excel data to routesByPlan format.
  *
@@ -241,8 +276,8 @@ function convertColumnsToPlans(rows) {
 export {
   readExcelFile,
   convertExcelToJson,
+  convertUserExcelToJson,
   convertColumnsToPlans,
   coerceDateYear,
   EXCEL_MIME,
 };
-

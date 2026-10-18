@@ -3,6 +3,7 @@ const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const ExcelUpload = require('../models/ExcelUpload');
 
+const IMPORT_PASSWORD_HASH_ROUNDS = 10;
 
 function isNonEmptyString(v) {
   return typeof v === 'string' && v.trim().length > 0;
@@ -69,13 +70,6 @@ async function importUsers(req, res) {
       });
     }
 
-    const excelUpload = await ExcelUpload.create({
-      file_name: 'users.xlsx',
-      custom_name: excelCustomName,
-      uploaded_by: userId,
-      is_active: true,
-    });
-
     if (!users.length) {
       return res.status(400).json({
         success: false,
@@ -129,6 +123,17 @@ async function importUsers(req, res) {
       }
     });
 
+    const emailSet = new Set();
+    for (const row of normalizedRows) {
+      if (!row.ok) continue;
+      if (emailSet.has(row.value.email)) {
+        row.ok = false;
+        row.error = `Duplicate email in this file: ${row.value.email}`;
+      } else {
+        emailSet.add(row.value.email);
+      }
+    }
+
     for (const r of normalizedRows) {
       if (!r.ok) {
         summary.failedRows += 1;
@@ -143,6 +148,13 @@ async function importUsers(req, res) {
       console.error('Validation results:', JSON.stringify(summary.rowResults));
       return res.status(400).json({ success: false, summary, error: 'All rows failed validation' });
     }
+
+    const excelUpload = await ExcelUpload.create({
+      file_name: 'users.xlsx',
+      custom_name: excelCustomName,
+      uploaded_by: userId,
+      is_active: true,
+    });
 
     // Intelligent upsert:
     // - key: email
@@ -162,25 +174,24 @@ async function importUsers(req, res) {
       const computedPassword = `${phoneDigits}${yearStr}`;
       // IMPORTANT: We're using User.bulkWrite (no Mongoose pre('save') middleware runs),
       // so we must hash password_hash manually.
-      const hashedPassword = await bcrypt.hash(computedPassword, 12);
 
       const next = {
         name: row.name,
         email,
         role: row.role,
         bus_no: row.bus_no,
-        password_hash: hashedPassword,
         is_active: true,
         temp_password: true,
         deleted_by_user: false,
       };
 
       if (!existing) {
+        const password_hash = await bcrypt.hash(computedPassword, IMPORT_PASSWORD_HASH_ROUNDS);
         updates.push({
           index: goodRows.indexOf(row),
           type: 'create',
           filter: { email },
-          update: { $set: next },
+          update: { $set: { ...next, password_hash } },
         });
         continue;
       }
@@ -209,6 +220,7 @@ async function importUsers(req, res) {
         continue;
       }
 
+      const password_hash = await bcrypt.hash(computedPassword, IMPORT_PASSWORD_HASH_ROUNDS);
       updates.push({
         index: goodRows.indexOf(row),
         type: 'update',
@@ -219,7 +231,7 @@ async function importUsers(req, res) {
             role: next.role,
             bus_no: next.bus_no,
             is_active: true,
-            password_hash: hashedPassword,
+            password_hash,
             temp_password: true,
             deleted_by_user: false,
           },
@@ -312,4 +324,3 @@ async function importUsers(req, res) {
 }
 
 module.exports = { importUsers };
-

@@ -925,109 +925,114 @@ export default function AddBusesScreen() {
       >
         <View style={styles.overlay}>
           <View style={styles.modalBox}>
-            <Text style={styles.header}>Bus Options</Text>
-            <Text style={styles.subHeader}>
-              Bus: {getDisplayBusNumber(selectedBus)}
-            </Text>
-
-            <TouchableOpacity
-              style={styles.optionButton}
-              onPress={openEditDetails}
+            <ScrollView
+              contentContainerStyle={styles.modalScrollContent}
+              showsVerticalScrollIndicator={false}
             >
-              <Ionicons
-                name="create-outline"
-                size={20}
-                color={COLORS.primary}
-              />
-              <Text style={styles.optionText}>Edit Details</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.optionButton}
-              onPress={openEditRoutes}
-            >
-              <Ionicons
-                name="git-branch-outline"
-                size={20}
-                color={COLORS.primary}
-              />
-              <Text style={styles.optionText}>
-                Edit Routes (Re-upload Excel)
+              <Text style={styles.header}>Bus Options</Text>
+              <Text style={styles.subHeader}>
+                Bus: {getDisplayBusNumber(selectedBus)}
               </Text>
-            </TouchableOpacity>
 
-            {isSuperadmin &&
-              !selectedBus?.isAltered &&
-              selectedBus?.status === "active" && (
-                <>
-                  <TouchableOpacity
-                    style={styles.optionButton}
-                    onPress={() => openAlterBus("alter")}
-                  >
-                    <Ionicons
-                      name="swap-horizontal-outline"
-                      size={20}
-                      color={COLORS.primary}
-                    />
-                    <View style={styles.optionCopy}>
-                      <Text style={styles.optionText}>Alter Bus</Text>
-                      <Text style={styles.optionHint}>
-                        Change location and choose which routes users see.
-                      </Text>
-                    </View>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.optionButton}
-                    onPress={() => openAlterBus("combine")}
-                  >
-                    <Ionicons
-                      name="git-merge-outline"
-                      size={20}
-                      color={COLORS.primary}
-                    />
-                    <View style={styles.optionCopy}>
-                      <Text style={styles.optionText}>Combine Bus</Text>
-                      <Text style={styles.optionHint}>
-                        Use the replacement location and choose displayed routes.
-                      </Text>
-                    </View>
-                  </TouchableOpacity>
-                </>
-              )}
-
-            {isSuperadmin && selectedBus?.isAltered && (
               <TouchableOpacity
                 style={styles.optionButton}
-                onPress={handleRestoreAltered}
-                disabled={restoringBus}
+                onPress={openEditDetails}
               >
                 <Ionicons
-                  name="refresh-outline"
+                  name="create-outline"
+                  size={20}
+                  color={COLORS.primary}
+                />
+                <Text style={styles.optionText}>Edit Details</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.optionButton}
+                onPress={openEditRoutes}
+              >
+                <Ionicons
+                  name="git-branch-outline"
                   size={20}
                   color={COLORS.primary}
                 />
                 <Text style={styles.optionText}>
-                  {restoringBus ? "Restoring..." : "Restore original bus"}
+                  Edit Routes (Re-upload Excel)
                 </Text>
               </TouchableOpacity>
-            )}
 
-            <TouchableOpacity
-              style={[styles.optionButton, styles.deleteButton]}
-              onPress={handleDeleteBus}
-            >
-              <Ionicons name="trash-outline" size={20} color={COLORS.error} />
-              <Text style={[styles.optionText, { color: COLORS.error }]}>
-                Delete
-              </Text>
-            </TouchableOpacity>
+              {isSuperadmin &&
+                !selectedBus?.isAltered &&
+                selectedBus?.status === "active" && (
+                  <>
+                    <TouchableOpacity
+                      style={styles.optionButton}
+                      onPress={() => openAlterBus("alter")}
+                    >
+                      <Ionicons
+                        name="swap-horizontal-outline"
+                        size={20}
+                        color={COLORS.primary}
+                      />
+                      <View style={styles.optionCopy}>
+                        <Text style={styles.optionText}>Alter Bus</Text>
+                        <Text style={styles.optionHint}>
+                          Change location and choose which routes users see.
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.optionButton}
+                      onPress={() => openAlterBus("combine")}
+                    >
+                      <Ionicons
+                        name="git-merge-outline"
+                        size={20}
+                        color={COLORS.primary}
+                      />
+                      <View style={styles.optionCopy}>
+                        <Text style={styles.optionText}>Combine Bus</Text>
+                        <Text style={styles.optionHint}>
+                          Use the replacement location and choose displayed routes.
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                  </>
+                )}
 
-            <TouchableOpacity
-              onPress={() => setShowOptionsModal(false)}
-              style={styles.closeTouch}
-            >
-              <Text style={styles.closeText}>Close</Text>
-            </TouchableOpacity>
+              {isSuperadmin && selectedBus?.isAltered && (
+                <TouchableOpacity
+                  style={styles.optionButton}
+                  onPress={handleRestoreAltered}
+                  disabled={restoringBus}
+                >
+                  <Ionicons
+                    name="refresh-outline"
+                    size={20}
+                    color={COLORS.primary}
+                  />
+                  <Text style={styles.optionText}>
+                    {restoringBus ? "Restoring..." : "Restore original bus"}
+                  </Text>
+                </TouchableOpacity>
+              )}
+
+              <TouchableOpacity
+                style={[styles.optionButton, styles.deleteButton]}
+                onPress={handleDeleteBus}
+              >
+                <Ionicons name="trash-outline" size={20} color={COLORS.error} />
+                <Text style={[styles.optionText, { color: COLORS.error }]}>
+                  Delete
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={() => setShowOptionsModal(false)}
+                style={styles.closeTouch}
+              >
+                <Text style={styles.closeText}>Close</Text>
+              </TouchableOpacity>
+            </ScrollView>
           </View>
         </View>
       </Modal>
