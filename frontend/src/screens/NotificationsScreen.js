@@ -27,7 +27,9 @@ function getDateKey(value) {
     month: "2-digit",
     day: "2-digit",
   }).formatToParts(date);
-  const values = Object.fromEntries(parts.map(({ type, value: part }) => [type, part]));
+  const values = Object.fromEntries(
+    parts.map(({ type, value: part }) => [type, part]),
+  );
   return `${values.year}-${values.month}-${values.day}`;
 }
 
@@ -75,7 +77,8 @@ export default function NotificationsScreen() {
           Number.isFinite(new Date(item.createdAt).getTime()),
       )
       .sort(
-        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+        (a, b) =>
+          new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
       );
 
     messages.forEach((item) => {
@@ -133,25 +136,29 @@ export default function NotificationsScreen() {
   };
 
   const removeAllNotifications = async () => {
-    Alert.alert("Delete all messages", "Delete every message from your inbox?", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete",
-        style: "destructive",
-        onPress: async () => {
-    try {
-      await notificationApi.removeAll(token);
-      setNotifications([]);
-    } catch (error) {
-      console.error("Failed to delete notification:", error);
-      Alert.alert(
-        "Could not delete messages",
-        getErrorMessage(error, "Please try again."),
-      );
-    }
+    Alert.alert(
+      "Delete all messages",
+      "Delete every message from your inbox?",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await notificationApi.removeAll(token);
+              setNotifications([]);
+            } catch (error) {
+              console.error("Failed to delete notification:", error);
+              Alert.alert(
+                "Could not delete messages",
+                getErrorMessage(error, "Please try again."),
+              );
+            }
+          },
         },
-      },
-    ]);
+      ],
+    );
   };
 
   useFocusEffect(
@@ -243,8 +250,12 @@ export default function NotificationsScreen() {
           data={messageRows}
           keyExtractor={(item) => String(item.id)}
           renderItem={renderItem}
-          contentContainerStyle={messageRows.length ? styles.list : styles.emptyList}
-          ListEmptyComponent={<Text style={styles.empty}>No messages yet.</Text>}
+          contentContainerStyle={
+            messageRows.length ? styles.list : styles.emptyList
+          }
+          ListEmptyComponent={
+            <Text style={styles.empty}>No messages yet.</Text>
+          }
         />
       )}
     </View>
@@ -252,7 +263,7 @@ export default function NotificationsScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#F1F7FE" },
+  container: { flex: 1, backgroundColor: "#ffffff" },
   header: {
     padding: 18,
     paddingTop: 50,
@@ -296,7 +307,12 @@ const styles = StyleSheet.create({
     backgroundColor: "#DBEAFE",
   },
   deleteAllText: { color: COLORS.primary, fontSize: 12, fontWeight: "700" },
-  message: { color: "#1F2933", fontSize: 15, lineHeight: 21, fontWeight: "500" },
+  message: {
+    color: "#1F2933",
+    fontSize: 15,
+    lineHeight: 21,
+    fontWeight: "500",
+  },
   unreadMessage: { fontWeight: "700" },
   meta: { color: "#667781", fontSize: 11, textAlign: "right", marginTop: 3 },
 });
