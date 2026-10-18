@@ -100,6 +100,19 @@ try {
 // Real-time bus updates are handled via Socket.IO directly.
 
 /* ---------------- BODY PARSING ---------------- */
+const spreadsheetImportJsonParser = express.json({
+  limit: "25mb",
+  verify: (req, res, buf) => {
+    req.rawBody = buf;
+  },
+  strict: false,
+});
+
+app.use(
+  ["/api/superadmin/import-users", "/api/bus/import-routes"],
+  spreadsheetImportJsonParser,
+);
+
 app.use(
   express.json({
     limit: "5mb",
