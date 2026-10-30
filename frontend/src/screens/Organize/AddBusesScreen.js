@@ -100,11 +100,6 @@ export default function AddBusesScreen() {
   const [parsingEditExcel, setParsingEditExcel] = useState(false);
   const [savingRoutes, setSavingRoutes] = useState(false);
 
-  // Global active plan
-  const [showGlobalPlanModal, setShowGlobalPlanModal] = useState(false);
-  const [globalPlan, setGlobalPlan] = useState("PLAN A");
-  const [savingGlobalPlan, setSavingGlobalPlan] = useState(false);
-
   const loadBuses = async () => {
     setLoading(true);
     try {
@@ -167,16 +162,6 @@ export default function AddBusesScreen() {
 
   useEffect(() => {
     loadBuses();
-    const loadGlobalPlan = async () => {
-      try {
-        const data = await busApi.getGlobalActivePlan(token);
-        if (data?.activePlan)
-          setGlobalPlan(String(data.activePlan).toUpperCase());
-      } catch (e) {
-        console.log("Failed to load active plan:", e.message);
-      }
-    };
-    loadGlobalPlan();
   }, [token, isSuperadmin]);
 
   // ---------- Excel parsing helpers ----------
@@ -552,12 +537,14 @@ export default function AddBusesScreen() {
         token,
         selectedBus.busNo,
         alterTargetBus.busNo,
-        {
-          routeSource,
-          ...(routeSource === "custom"
-            ? { routesByPlan: resolvedRoutes }
-            : {}),
-        },
+        busChangeMode === "combine"
+          ? {
+              routeSource,
+              ...(routeSource === "custom"
+                ? { routesByPlan: resolvedRoutes }
+                : {}),
+            }
+          : {},
       );
       setShowAlterModal(false);
       setShowRouteChoiceModal(false);
@@ -583,6 +570,11 @@ export default function AddBusesScreen() {
 
   const handleAlterBus = async (routeSource, uploadedRoutes) => {
     try {
+      if (busChangeMode === "alter") {
+        setShowRouteChoiceModal(false);
+        await saveAlteration();
+        return;
+      }
       let routes = uploadedRoutes;
       if (routeSource !== "custom") {
         const routeBus =
@@ -613,37 +605,6 @@ export default function AddBusesScreen() {
     setAlterationExcelFileName("");
     setShowOptionsModal(false);
     setShowAlterModal(true);
-  };
-
-  // ---------- Global active plan ----------
-  const openGlobalPlanModal = async () => {
-    setShowOptionsModal(false);
-    try {
-      const data = await busApi.getGlobalActivePlan(token);
-      if (data?.activePlan)
-        setGlobalPlan(String(data.activePlan).toUpperCase());
-    } catch (e) {
-      console.log("Failed to load active plan for global modal:", e.message);
-    }
-    setShowGlobalPlanModal(true);
-  };
-
-  const handleSelectGlobalPlan = async (plan) => {
-    if (plan === globalPlan) return;
-    setSavingGlobalPlan(true);
-    try {
-      const data = await busApi.setGlobalActivePlan(token, plan);
-      setGlobalPlan(String(data?.activePlan || plan).toUpperCase());
-      setShowGlobalPlanModal(false);
-      loadBuses();
-    } catch (e) {
-      Alert.alert(
-        "Failed",
-        getErrorMessage(e, "Could not update the global plan."),
-      );
-    } finally {
-      setSavingGlobalPlan(false);
-    }
   };
 
   // ---------- Delete ----------
@@ -817,15 +778,6 @@ export default function AddBusesScreen() {
           </>
         }
       />
-
-      <TouchableOpacity
-        style={styles.routeFab}
-        onPress={openGlobalPlanModal}
-        activeOpacity={0.8}
-      >
-        <Ionicons name="git-branch-outline" size={20} color="#fff" />
-        <Text style={styles.routeFabText}>{globalPlan}</Text>
-      </TouchableOpacity>
 
       <TouchableOpacity
         style={styles.fab}
@@ -1052,7 +1004,7 @@ export default function AddBusesScreen() {
             <Text style={styles.subHeader}>
               {busChangeMode === "combine"
                 ? "Select the bus to provide the live location, then choose which route stops users should see."
-                : "Select the replacement bus for live location, then choose which route stops users should see."}
+                : "Select the replacement bus for live location. The original bus stops remain unchanged."}
             </Text>
             <FlatList
               data={buses.filter(
@@ -1111,71 +1063,85 @@ export default function AddBusesScreen() {
         <View style={styles.overlay}>
           <View style={styles.modalBox}>
             <ScrollView contentContainerStyle={styles.modalScrollContent}>
-              <Text style={styles.header}>Choose Route Stops</Text>
-              <Text style={styles.subHeader}>
-                Bus {getDisplayBusNumber(selectedBus)} will use Bus{" "}
-                {getDisplayBusNumber(alterTargetBus)} for its live location.
-                Pick the route set that should be shown to its users.
+              <Text style={styles.header}>
+                {busChangeMode === "combine"
+                  ? "Choose the combined route"
+                  : "Confirm location-only change"}
               </Text>
-              <TouchableOpacity
-                style={styles.optionButton}
-                onPress={() => handleAlterBus("source")}
-                disabled={alteringBus || parsingAlterationExcel}
-              >
-                <Ionicons
-                  name="git-branch-outline"
-                  size={20}
-                  color={COLORS.primary}
-                />
-                <Text style={styles.optionText}>
-                  Use Bus {getDisplayBusNumber(selectedBus)} routes
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.optionButton}
-                onPress={() => handleAlterBus("target")}
-                disabled={alteringBus || parsingAlterationExcel}
-              >
-                <Ionicons
-                  name="git-branch-outline"
-                  size={20}
-                  color={COLORS.primary}
-                />
-                <Text style={styles.optionText}>
-                  Use Bus {getDisplayBusNumber(alterTargetBus)} routes
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.uploadBtn}
-                onPress={() => pickAndParseExcel(false, true)}
-                disabled={alteringBus || parsingAlterationExcel}
-              >
-                {parsingAlterationExcel ? (
-                  <ActivityIndicator color={COLORS.primary} />
-                ) : (
-                  <Text style={styles.optionText}>Upload new route Excel</Text>
-                )}
-              </TouchableOpacity>
-              {alterationExcelFileName ? (
-                <Text style={styles.fileName}>{alterationExcelFileName}</Text>
-              ) : null}
-              {renderPlansPreview(alterationRoutesByPlan)}
-              {alterationRoutesByPlan && (
+              <Text style={styles.subHeader}>
+                {busChangeMode === "combine"
+                  ? `Users of Bus ${getDisplayBusNumber(selectedBus)} and Bus ${getDisplayBusNumber(alterTargetBus)} will all use Bus ${getDisplayBusNumber(alterTargetBus)}. Choose which route the combined riders should follow.`
+                  : `Only the live location changes to Bus ${getDisplayBusNumber(alterTargetBus)}. Bus ${getDisplayBusNumber(selectedBus)}'s original stops stay unchanged.`}
+              </Text>
+              {busChangeMode === "alter" ? (
                 <TouchableOpacity
                   style={styles.button}
-                  onPress={() =>
-                    handleAlterBus("custom", alterationRoutesByPlan)
-                  }
-                  disabled={alteringBus || parsingAlterationExcel}
+                  onPress={() => handleAlterBus()}
+                  disabled={alteringBus}
                 >
                   {alteringBus ? (
                     <ActivityIndicator color="#fff" />
                   ) : (
                     <Text style={{ color: "#fff", fontWeight: "600" }}>
-                      Confirm uploaded routes
+                      Confirm location change
                     </Text>
                   )}
                 </TouchableOpacity>
+              ) : (
+                <>
+                <TouchableOpacity
+                  style={styles.optionButton}
+                  onPress={() => handleAlterBus("source")}
+                  disabled={alteringBus || parsingAlterationExcel}
+                >
+                  <Ionicons name="git-branch-outline" size={20} color={COLORS.primary} />
+                  <Text style={styles.optionText}>
+                    Use Bus {getDisplayBusNumber(selectedBus)} routes
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.optionButton}
+                  onPress={() => handleAlterBus("target")}
+                  disabled={alteringBus || parsingAlterationExcel}
+                >
+                  <Ionicons name="git-branch-outline" size={20} color={COLORS.primary} />
+                  <Text style={styles.optionText}>
+                    Use Bus {getDisplayBusNumber(alterTargetBus)} routes
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.uploadBtn}
+                  onPress={() => pickAndParseExcel(false, true)}
+                  disabled={alteringBus || parsingAlterationExcel}
+                >
+                  {parsingAlterationExcel ? (
+                    <ActivityIndicator color={COLORS.primary} />
+                  ) : (
+                    <Text style={styles.optionText}>Upload new route Excel</Text>
+                  )}
+                </TouchableOpacity>
+                {alterationExcelFileName ? (
+                  <Text style={styles.fileName}>{alterationExcelFileName}</Text>
+                ) : null}
+                {renderPlansPreview(alterationRoutesByPlan)}
+                {alterationRoutesByPlan && (
+                  <TouchableOpacity
+                    style={styles.button}
+                    onPress={() =>
+                      handleAlterBus("custom", alterationRoutesByPlan)
+                    }
+                    disabled={alteringBus || parsingAlterationExcel}
+                  >
+                    {alteringBus ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text style={{ color: "#fff", fontWeight: "600" }}>
+                        Confirm uploaded routes
+                      </Text>
+                    )}
+                  </TouchableOpacity>
+                )}
+                </>
               )}
               {alteringBus && <ActivityIndicator color={COLORS.primary} />}
               <TouchableOpacity
@@ -1302,59 +1268,6 @@ export default function AddBusesScreen() {
         </View>
       </Modal>
 
-      {/* ================= GLOBAL ACTIVE PLAN MODAL ================= */}
-      <Modal
-        transparent
-        animationType="fade"
-        visible={showGlobalPlanModal}
-        onRequestClose={() => setShowGlobalPlanModal(false)}
-      >
-        <View style={styles.overlay}>
-          <View style={styles.modalBox}>
-            <Text style={styles.header}>Set Active Route Plan</Text>
-            <Text style={styles.subHeader}>
-              This applies to the whole app. Only buses under the active plan
-              are treated as active.
-            </Text>
-
-            {["PLAN A", "PLAN B", "PLAN C", "PLAN D"].map((plan) => {
-              const active = plan === globalPlan;
-              return (
-                <TouchableOpacity
-                  key={plan}
-                  style={[
-                    styles.optionButton,
-                    active && styles.activePlanButton,
-                  ]}
-                  onPress={() => handleSelectGlobalPlan(plan)}
-                  disabled={savingGlobalPlan}
-                >
-                  <Ionicons
-                    name={active ? "radio-button-on" : "radio-button-off"}
-                    size={20}
-                    color={active ? COLORS.primary : COLORS.textBody}
-                  />
-                  <Text
-                    style={[
-                      styles.optionText,
-                      active && { color: COLORS.primary },
-                    ]}
-                  >
-                    {plan}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-
-            <TouchableOpacity
-              onPress={() => setShowGlobalPlanModal(false)}
-              style={styles.closeTouch}
-            >
-              <Text style={styles.closeText}>Close</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
     </View>
   );
 }
@@ -1435,29 +1348,6 @@ const styles = StyleSheet.create({
   },
   alteredGridItem: {
     marginRight: GAP,
-  },
-  routeFab: {
-    position: "absolute",
-    bottom: 90,
-    right: 24,
-    backgroundColor: COLORS.primary,
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 16,
-    height: 48,
-    borderRadius: 24,
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.2,
-    shadowRadius: 3,
-    elevation: 5,
-    gap: 8,
-  },
-  routeFabText: {
-    color: "#fff",
-    fontSize: 13,
-    fontWeight: "700",
-    textTransform: "uppercase",
   },
   fab: {
     position: "absolute",
@@ -1598,5 +1488,4 @@ const styles = StyleSheet.create({
     marginTop: 3,
   },
   deleteButton: { borderColor: "#FECACA", backgroundColor: "#FEF2F2" },
-  activePlanButton: { borderColor: COLORS.primary, backgroundColor: "#EEF2FF" },
 });

@@ -28,7 +28,7 @@ export default function PlanDetailsScreen({ route, navigation }) {
   const [items, setItems] = useState([]);
   const [error, setError] = useState(null);
 
-  const [planName, setPlanName] = useState(initialPlan || "PLAN A");
+  const [planName, setPlanName] = useState("Active service");
 
   const [routeBusPreviewNumber, setRouteBusPreviewNumber] = useState(null);
   const [isReplacementRoute, setIsReplacementRoute] = useState(false);
@@ -98,7 +98,7 @@ export default function PlanDetailsScreen({ route, navigation }) {
         });
 
         setItems(buses);
-        setPlanName(activePlan);
+        setPlanName("Service buses");
       } catch (err) {
         console.log("PlanDetails: failed to load buses", err?.message || err);
 
@@ -158,29 +158,7 @@ export default function PlanDetailsScreen({ route, navigation }) {
         if (Array.isArray(data?.stops)) {
           setItems(normalizeAndOrderStops(data.stops));
 
-          setPlanName(data?.activePlan || data?.currentPlan || "Current plan");
-
-          return;
-        }
-
-        /**
-         * Backward compatibility for:
-         *
-         * {
-         *   plans: {
-         *     "PLAN A": [...]
-         *   }
-         * }
-         */
-        if (data?.plans) {
-          const active =
-            data?.activePlan || data?.currentPlan || Object.keys(data.plans)[0];
-
-          const stops = data.plans[active] || [];
-
-          setItems(normalizeAndOrderStops(stops));
-
-          setPlanName(active);
+          setPlanName("Active stops");
 
           return;
         }
@@ -432,6 +410,11 @@ export default function PlanDetailsScreen({ route, navigation }) {
           <Text style={styles.stopName} numberOfLines={2}>
             {stopName}
           </Text>
+          {stop?.arrival_time ? (
+            <Text style={styles.stopArrivalTime}>
+              Arrival {stop.arrival_time}
+            </Text>
+          ) : null}
 
           {(stop?.latitude != null || stop?.lat != null) &&
             (stop?.longitude != null || stop?.lng != null) && (
@@ -466,7 +449,7 @@ export default function PlanDetailsScreen({ route, navigation }) {
         <View style={styles.headerTextContainer}>
           <Text style={styles.title}>
             {mode === "activePlan"
-              ? `Plan ${planName}`
+              ? "Active buses"
               : `Bus ${routeBusPreviewNumber ?? busNo ?? previewNumber ?? ""}`}
           </Text>
 
@@ -557,8 +540,7 @@ export default function PlanDetailsScreen({ route, navigation }) {
 
                     <Text style={styles.summaryDescription}>
                       {items.length} active{" "}
-                      {items.length === 1 ? "bus" : "buses"} currently assigned
-                      to {planName}.
+                      {items.length === 1 ? "bus" : "buses"} available for service.
                     </Text>
                   </View>
                 </View>
@@ -1064,6 +1046,13 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     color: COLORS.textHeader,
     lineHeight: 19,
+  },
+
+  stopArrivalTime: {
+    marginTop: 4,
+    color: COLORS.primary,
+    fontSize: 12,
+    fontWeight: "700",
   },
 
   coordinateText: {

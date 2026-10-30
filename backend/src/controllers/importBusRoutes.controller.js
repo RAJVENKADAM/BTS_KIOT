@@ -5,6 +5,7 @@ const User = require('../models/User');
 const Notification = require('../models/Notification');
 const { getIO } = require('../socket');
 const { randomUUID } = require("node:crypto");
+const { normalizeArrivalTime } = require("../utils/planMapping");
 const normalizeStopNameKey = require("../utils/normalizeStopName");
 const getRouteUpdateImpactBuses = require("../utils/routeUpdateImpact");
 
@@ -167,13 +168,18 @@ async function importBusRoutes(req, res) {
         const plan_name = normalizePlanName(row.plan_name);
         const stop_name = normalizeStopName(row.stop_name);
         const stop_order = normalizeStopOrder(row.stop_order);
+        const arrival_time = normalizeArrivalTime(row.arrival_time);
         const stopId = row.stopId || row.stop_id || null;
 
         if (!plan_name) throw new Error('Invalid plan_name');
         if (!stop_name) throw new Error('Invalid stop_name');
         if (stop_order === null || stop_order < 1) throw new Error('Invalid stop_order');
 
-        return { ok: true, idx, value: { plan_name, stop_name, stop_order, stopId } };
+        return {
+          ok: true,
+          idx,
+          value: { plan_name, stop_name, stop_order, stopId, arrival_time },
+        };
       } catch (e) {
         return { ok: false, idx, error: e.message || 'Validation error' };
       }
@@ -250,9 +256,26 @@ async function importBusRoutes(req, res) {
     await Bus.findOneAndUpdate(busFilter, busUpdate, { upsert: true, new: true });
     const bus = await Bus.findOne({ bus_no: normalizedBusNoValue });
     if (!bus) throw new Error('Bus upsert failed');
+    const previousRoutes = replaceRoutes
+      ? await BusRoute.find({ bus_id: bus._id })
+          .select("plan_name stop_name stop_order arrival_time")
+          .lean()
+      : [];
+    const previousArrivalByStop = new Map(
+      previousRoutes.map((row) => [
+        `${normalizePlanName(row.plan_name)}:${row.stop_order}:${normalizeStopNameKey(row.stop_name)}`,
+        row.arrival_time,
+      ]),
+    );
     const goodWithBus = resolvedStops.map((row) => ({
       ...row,
       bus_id: bus._id,
+      arrival_time:
+        row.arrival_time ||
+        previousArrivalByStop.get(
+          `${normalizePlanName(row.plan_name)}:${row.stop_order}:${normalizeStopNameKey(row.stop_name)}`,
+        ) ||
+        null,
     }));
 
     // If replaceRoutes is set, remove existing routes so edits fully replace old data.
@@ -288,14 +311,28 @@ async function importBusRoutes(req, res) {
         ops.push({
           updateOne: {
             filter: { bus_id: bus._id, plan_name: row.plan_name, stop_order: row.stop_order },
-            update: { $set: { bus_id: bus._id, plan_name: row.plan_name, stop_name: row.stop_name, stop_order: row.stop_order, stopId: row.stopId } },
+            update: {
+              $set: {
+                bus_id: bus._id,
+                plan_name: row.plan_name,
+                stop_name: row.stop_name,
+                stop_order: row.stop_order,
+                stopId: row.stopId,
+                ...(row.arrival_time ? { arrival_time: row.arrival_time } : {}),
+              },
+            },
             upsert: true,
           },
         });
         continue;
       }
 
-      const unchanged = cur.stop_name === row.stop_name && cur.stop_order === row.stop_order && cur.plan_name === row.plan_name && cur.stopId === row.stopId;
+      const unchanged =
+        cur.stop_name === row.stop_name &&
+        cur.stop_order === row.stop_order &&
+        cur.plan_name === row.plan_name &&
+        cur.stopId === row.stopId &&
+        (!row.arrival_time || cur.arrival_time === row.arrival_time);
       if (unchanged) {
         summary.unchangedRows += 1;
         continue;
@@ -304,7 +341,13 @@ async function importBusRoutes(req, res) {
       ops.push({
         updateOne: {
           filter: { bus_id: bus._id, plan_name: row.plan_name, stop_order: row.stop_order },
-          update: { $set: { stop_name: row.stop_name, stopId: row.stopId } },
+          update: {
+            $set: {
+              stop_name: row.stop_name,
+              stopId: row.stopId,
+              ...(row.arrival_time ? { arrival_time: row.arrival_time } : {}),
+            },
+          },
           upsert: false,
         },
       });

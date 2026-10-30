@@ -12,6 +12,7 @@
     "auth:test": "node test-login.js",
     "db:migrate:notification-previews": "node scripts/migrate-notification-previews.js",
     "db:migrate:stop-master": "node scripts/migrate-stop-master.js",
+    "db:migrate:sample-arrival-times": "node scripts/migrate-sample-arrival-times.js",
     "test": "node --test"
   },
   "keywords": [

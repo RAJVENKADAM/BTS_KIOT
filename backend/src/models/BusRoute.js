@@ -23,6 +23,10 @@ const busRouteSchema = new mongoose.Schema(
     stop_order: {
       type: Number,
       required: true
+    },
+    arrival_time: {
+      type: String,
+      default: null,
     }
   },
   { timestamps: true }

@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#111a2e" />
+    <meta
+      name="description"
+      content="BTMS super-admin bus service mapping dashboard."
+    />
+    <title>BTMS Admin · Plan Mapping</title>
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./config.js"></script>
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <div id="login-view" class="login-layout">
+      <section class="login-brand">
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true">B</span>
+          <span>BTMS <span class="brand-muted">OPERATIONS</span></span>
+        </div>
+        <div class="login-copy">
+          <span class="eyebrow">SUPER ADMIN CONSOLE</span>
+          <h1>One clear view<br />of every bus service.</h1>
+          <p>
+            Organize route clusters, assign operating buses, and publish
+            service changes to riders from one secure workspace.
+          </p>
+          <div class="login-assurance">
+            <span class="assurance-icon" aria-hidden="true">✓</span>
+            <span>Protected by your BTMS administrator account</span>
+          </div>
+        </div>
+        <span class="login-footer">BUS TRACKING MANAGEMENT SYSTEM</span>
+      </section>
+
+      <main class="login-panel">
+        <form id="login-form" class="login-form">
+          <span class="eyebrow">WELCOME BACK</span>
+          <h2>Sign in to BTMS</h2>
+          <p class="muted">Use your super-admin credentials to continue.</p>
+          <label class="field">
+            <span>Email address</span>
+            <input
+              id="login-email"
+              name="email"
+              type="email"
+              autocomplete="username"
+              placeholder="admin@kiot.ac.in"
+              required
+            />
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input
+              id="login-password"
+              name="password"
+              type="password"
+              autocomplete="current-password"
+              placeholder="Enter your password"
+              required
+            />
+          </label>
+          <div id="login-error" class="notice notice-error" role="alert" hidden></div>
+          <button id="login-submit" class="button button-primary button-wide" type="submit">
+            <span>Sign in securely</span><span aria-hidden="true">→</span>
+          </button>
+          <p class="login-help">
+            Need access? Contact your BTMS system administrator.
+          </p>
+        </form>
+      </main>
+    </div>
+
+    <div id="dashboard-view" class="app-layout" hidden>
+      <aside class="sidebar">
+        <a class="brand-lockup sidebar-brand" href="./" aria-label="BTMS admin home">
+          <span class="brand-mark" aria-hidden="true">B</span>
+          <span>BTMS <span class="brand-muted">OPERATIONS</span></span>
+        </a>
+        <div class="sidebar-section-label">WORKSPACE</div>
+        <nav class="side-nav" aria-label="Admin pages">
+          <a class="nav-link nav-link-active" href="#plan-mapping">
+            <span class="nav-icon" aria-hidden="true">⌘</span>
+            <span>Plan mapping</span>
+          </a>
+        </nav>
+        <div class="sidebar-bottom">
+          <div class="security-card">
+            <span class="security-icon" aria-hidden="true">✓</span>
+            <div><strong>Secure workspace</strong><small>Super-admin access only</small></div>
+          </div>
+          <div class="profile-card">
+            <span id="profile-avatar" class="avatar">A</span>
+            <span class="profile-info"><strong id="profile-name">Administrator</strong><small>Super admin</small></span>
+            <button id="logout-button" class="icon-button" type="button" aria-label="Sign out" title="Sign out">↗</button>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div class="breadcrumbs"><span>Workspace</span><span aria-hidden="true">/</span><strong>Plan mapping</strong></div>
+          <div class="topbar-actions">
+            <span class="live-status"><span class="live-dot"></span>Connected</span>
+            <button id="refresh-button" class="button button-quiet" type="button">
+              <span aria-hidden="true">↻</span> Refresh
+            </button>
+          </div>
+        </header>
+
+        <div class="page-content">
+          <section class="page-heading">
+            <div>
+              <span class="eyebrow">SERVICE CONFIGURATION</span>
+              <h1>Plan mapping</h1>
+              <p>Build service clusters and guide every rider to the right bus.</p>
+            </div>
+            <span id="last-updated" class="updated-label"></span>
+          </section>
+
+          <section class="stats-grid" aria-label="Bus mapping summary">
+            <article class="stat-card">
+              <span class="stat-icon stat-icon-blue" aria-hidden="true">▰</span>
+              <span class="stat-label">ACTIVE BUSES</span>
+              <strong id="stat-active-buses">—</strong>
+              <small>Available for service</small>
+            </article>
+            <article class="stat-card">
+              <span class="stat-icon stat-icon-violet" aria-hidden="true">⌘</span>
+              <span class="stat-label">SERVICE CLUSTERS</span>
+              <strong id="stat-clusters">—</strong>
+              <small>Across all mapped plans</small>
+            </article>
+            <article class="stat-card">
+              <span class="stat-icon stat-icon-amber" aria-hidden="true">⇄</span>
+              <span class="stat-label">UNMAPPED BUSES</span>
+              <strong id="stat-unmapped">—</strong>
+              <small>Plan A buses not in a cluster</small>
+            </article>
+            <article class="stat-card">
+              <span class="stat-icon stat-icon-green" aria-hidden="true">◎</span>
+              <span class="stat-label">ASSIGNED RIDERS</span>
+              <strong id="stat-riders">—</strong>
+              <small>Students with a bus assignment</small>
+            </article>
+          </section>
+
+          <section class="global-card">
+            <div class="global-copy">
+              <span class="global-icon" aria-hidden="true">◉</span>
+              <div>
+                <h2>Global operating service</h2>
+                <p>Choose the service all riders should use today.</p>
+              </div>
+            </div>
+            <div class="global-controls">
+              <div id="global-plan-options" class="plan-options" role="group" aria-label="Choose operating service"></div>
+              <button id="apply-global-plan" class="button button-primary" type="button" disabled>
+                Apply service <span aria-hidden="true">→</span>
+              </button>
+            </div>
+          </section>
+
+          <section class="mapping-section">
+            <div class="section-heading">
+              <div>
+                <span class="eyebrow">VISUAL ROUTE ORGANIZER</span>
+                <h2>Bus clusters</h2>
+                <p>Each root provides the location, stops, and arrival times for its member buses.</p>
+              </div>
+              <button id="create-cluster-button" class="button button-primary" type="button">
+                <span aria-hidden="true">＋</span> Create new cluster
+              </button>
+            </div>
+
+            <div class="plan-tabs" role="tablist" aria-label="Choose plan to view">
+              <button class="plan-tab" role="tab" data-plan="PLAN A" aria-selected="false">
+                <span class="tab-letter">A</span><span><strong>Separate service</strong><small>No clusters</small></span>
+              </button>
+              <button class="plan-tab" role="tab" data-plan="PLAN B" aria-selected="true">
+                <span class="tab-letter">B</span><span><strong>Plan B</strong><small>Route clusters</small></span>
+              </button>
+              <button class="plan-tab" role="tab" data-plan="PLAN C" aria-selected="false">
+                <span class="tab-letter">C</span><span><strong>Plan C</strong><small>Route clusters</small></span>
+              </button>
+              <button class="plan-tab" role="tab" data-plan="PLAN D" aria-selected="false">
+                <span class="tab-letter">D</span><span><strong>Plan D</strong><small>Route clusters</small></span>
+              </button>
+            </div>
+
+            <div id="page-notice" class="notice" role="status" hidden></div>
+            <div id="cluster-list" class="cluster-list" aria-live="polite"></div>
+          </section>
+
+          <footer class="page-footer">
+            <span>BTMS · Bus Tracking Management System</span>
+            <span>Service changes are checked against rider assignments before saving.</span>
+          </footer>
+        </div>
+      </main>
+    </div>
+
+    <dialog id="cluster-dialog" class="cluster-dialog">
+      <form id="cluster-form" method="dialog">
+        <div class="dialog-heading">
+          <div><span class="eyebrow">SERVICE CONFIGURATION</span><h2 id="dialog-title">Create cluster</h2></div>
+          <button id="close-dialog" class="icon-button dialog-close" type="button" aria-label="Close dialog">×</button>
+        </div>
+        <p class="muted">Select a route root, then assign Plan A-only buses to share its service.</p>
+        <label class="field">
+          <span>Cluster name</span>
+          <input id="cluster-name" name="clusterName" maxlength="80" placeholder="e.g. North route" required />
+        </label>
+        <label class="field">
+          <span id="root-bus-label">Root bus · Plan B route required</span>
+          <select id="root-bus" name="rootBusId" required></select>
+        </label>
+        <div class="field">
+          <span>Plan A-only buses <span class="field-hint">Riders keep their assignment; service is supplied by the root.</span></span>
+          <div id="member-bus-list" class="member-list"></div>
+        </div>
+        <div id="dialog-error" class="notice notice-error" role="alert" hidden></div>
+        <div class="dialog-actions">
+          <button id="cancel-dialog" class="button button-quiet" type="button">Cancel</button>
+          <button id="save-cluster" class="button button-primary" type="submit">Save cluster</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>

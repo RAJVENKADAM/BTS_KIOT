@@ -41,6 +41,17 @@ function coerceDateYear(value) {
   return null;
 }
 
+function formatExcelArrivalTime(value) {
+  if (typeof value === "number" && value >= 0 && value < 1) {
+    const totalMinutes = Math.round(value * 24 * 60) % (24 * 60);
+    const hour24 = Math.floor(totalMinutes / 60);
+    const minute = totalMinutes % 60;
+    const hour12 = hour24 % 12 || 12;
+    return `${hour12}:${String(minute).padStart(2, "0")}${hour24 >= 12 ? "PM" : "AM"}`;
+  }
+  return String(value).trim();
+}
+
 async function readExcelFile(fileOrDocPickerAsset, options = {}) {
   const { encoding = 'base64' } = options;
 
@@ -228,21 +239,28 @@ function convertUserExcelToJson(workbookOrReadResult) {
 function convertColumnsToPlans(rows) {
   if (!Array.isArray(rows) || !rows.length) return {};
 
-  // Collect all unique column headers (plan names) from all rows
-  const planNames = [];
+  const planColumns = new Map();
   const seen = new Set();
   for (const row of rows) {
     for (const key of Object.keys(row || {})) {
       const trimmed = (key || '').trim();
-      if (trimmed && !seen.has(trimmed)) {
+      if (!trimmed) continue;
+      const timeMatch = trimmed.match(/^(.+?)\s+(?:TIME|TIMING|ARRIVAL\s+TIME)$/i);
+      if (timeMatch) {
+        const plan = timeMatch[1].trim();
+        const columns = planColumns.get(plan) || { name: plan, time: null };
+        columns.time = trimmed;
+        planColumns.set(plan, columns);
+      } else if (!seen.has(trimmed)) {
         seen.add(trimmed);
-        planNames.push(trimmed);
+        const columns = planColumns.get(trimmed) || { name: trimmed, time: null };
+        planColumns.set(trimmed, columns);
       }
     }
   }
 
   const routesByPlan = {};
-  for (const plan of planNames) {
+  for (const { name: plan, time: timeColumn } of planColumns.values()) {
     const stops = [];
     let order = 1;
     for (const row of rows) {
@@ -258,9 +276,22 @@ function convertColumnsToPlans(rows) {
         }
       }
       if (stopName !== undefined && stopName !== null && String(stopName).trim() !== '') {
+        let arrivalTime;
+        if (timeColumn) {
+          arrivalTime = row[timeColumn];
+          if (arrivalTime === undefined) {
+            const timeKey = Object.keys(row).find(
+              (key) => key.toLowerCase() === timeColumn.toLowerCase(),
+            );
+            if (timeKey) arrivalTime = row[timeKey];
+          }
+        }
         stops.push({
           stop_name: String(stopName).trim(),
           stop_order: order,
+          ...(arrivalTime !== undefined && arrivalTime !== null && String(arrivalTime).trim()
+            ? { arrival_time: formatExcelArrivalTime(arrivalTime) }
+            : {}),
         });
         order += 1;
       }

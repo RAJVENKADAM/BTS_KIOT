@@ -27,7 +27,6 @@ const initialState = {
   etaToCollege: null,
   loading: false,
   error: null,
-  selectedPlan: "PLAN A", // Default plan
 };
 
 const busReducer = (state, action) => {
@@ -68,8 +67,6 @@ const busReducer = (state, action) => {
         etaToUser: action.payload.etaToUser,
         etaToCollege: action.payload.etaToCollege,
       };
-    case "SET_SELECTED_PLAN":
-      return { ...state, selectedPlan: action.payload };
     case "RESET":
       return initialState;
     default:
@@ -223,10 +220,6 @@ export const BusProvider = ({ children }) => {
     dispatch({ type: "SET_SELECTED_BUS", payload: bus || null });
   };
 
-  const setSelectedPlan = (plan) => {
-    dispatch({ type: "SET_SELECTED_PLAN", payload: plan });
-  };
-
   const updateLocation = (location) => {
     dispatch({ type: "SET_LOCATION", payload: location });
   };
@@ -253,7 +246,6 @@ export const BusProvider = ({ children }) => {
     refreshBuses,
     selectPreviewBus,
     selectBus,
-    setSelectedPlan,
     updateLocation,
     getSocket,
   };

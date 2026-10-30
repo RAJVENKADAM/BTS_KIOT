@@ -65,6 +65,21 @@ const busSchema = new mongoose.Schema(
       }],
       default: []
     },
+    combined_route_source: {
+      type: String,
+      enum: ["source", "target", "custom"],
+      default: null,
+    },
+    combined_routes: {
+      type: [{
+        plan_name: { type: String, required: true },
+        stop_name: { type: String, required: true },
+        stop_order: { type: Number, required: true },
+        stopId: { type: String, default: null },
+        arrival_time: { type: String, default: null },
+      }],
+      default: [],
+    },
     altered_at: {
       type: Date,
       default: null

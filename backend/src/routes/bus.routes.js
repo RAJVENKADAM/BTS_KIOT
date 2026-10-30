@@ -2,9 +2,31 @@ const express = require('express');
 const multer = require('multer');
 
 const BusController = require('../controllers/bus.controller');
+const PlanMappingController = require('../controllers/planMapping.controller');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth');
 
 const router = express.Router();
+
+router.get(
+  '/plan-mappings',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  PlanMappingController.getPlanMappingData,
+);
+
+router.post(
+  '/plan-mappings',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  PlanMappingController.savePlanMapping,
+);
+
+router.delete(
+  '/plan-mappings/:clusterId',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  PlanMappingController.deletePlanMapping,
+);
 
 /**
  * -----------------------

@@ -245,8 +245,6 @@ class GpsSyncWorker {
         };
 
         if (io) {
-          io.to(`master_${String(busId)}`).emit("locationUpdate", publicPayload);
-
           // Emit to public preview room only if preview number exists.
           if (bus.preview_number != null) {
             const room = `preview_${String(bus.preview_number)}`;

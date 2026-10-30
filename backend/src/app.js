@@ -32,11 +32,15 @@ app.disable("etag");
 /* ---------------- SECURITY (PRODUCTION HARDENING) ---------------- */
 app.use(helmet());
 
-const corsOrigin = process.env.CORS_ORIGIN || "";
+const corsOrigins = [
+  ...String(process.env.CORS_ORIGIN || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+  "https://rajvenkadam.github.io",
+];
 const corsOptions = {
-  origin: corsOrigin
-    ? corsOrigin.split(",").map((s) => s.trim())
-    : false,
+  origin: [...new Set(corsOrigins)],
   methods: ["GET", "POST", "PUT", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization"],
   credentials: true,
@@ -169,7 +173,6 @@ app.use("/api/organize", require("./routes/organize.routes"));
 app.use("/api/excel-management", require("./routes/excelManagement.routes"));
 app.use("/api/bus", require("./routes/bus.routes"));
 app.use("/api/bus", require("./routes/busImport.routes"));
-app.use("/api/master", require("./routes/master.routes"));
 app.use("/api/stops", require("./routes/stopMaster.routes"));
 app.use("/api/superadmin", require("./routes/superadminImport.routes"));
 app.use("/api/superadmin", require("./routes/superadminUsers.routes"));
