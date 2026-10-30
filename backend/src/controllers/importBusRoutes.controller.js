@@ -1,8 +1,12 @@
 const Bus = require('../models/Bus');
 const BusRoute = require('../models/BusRoute');
 const StopMaster = require('../models/StopMaster');
+const User = require('../models/User');
+const Notification = require('../models/Notification');
+const { getIO } = require('../socket');
 const { randomUUID } = require("node:crypto");
 const normalizeStopNameKey = require("../utils/normalizeStopName");
+const getRouteUpdateImpactBuses = require("../utils/routeUpdateImpact");
 
 function isNonEmptyString(v) {
   return typeof v === 'string' && v.trim().length > 0;
@@ -28,6 +32,70 @@ function normalizeStopOrder(v) {
 
 function buildRouteKey(busId, plan_name, stop_order) {
   return `${busId}__${plan_name}__${stop_order}`;
+}
+
+async function notifyStudentsOfRouteUpdate(updatedBus) {
+  const incomingChanges = await Bus.find({
+    altered_to_bus_id: updatedBus._id,
+    alteration_type: { $in: ["alter", "combine"] },
+  })
+    .select("_id bus_no preview_number alteration_type alteration_route_source")
+    .lean();
+  const affectedBuses = getRouteUpdateImpactBuses(
+    updatedBus,
+    incomingChanges,
+  );
+  const identifiers = [
+    ...new Set(
+      affectedBuses.flatMap((bus) =>
+        [bus.bus_no, bus.preview_number]
+          .filter((value) => value !== null && value !== undefined)
+          .map(String),
+      ),
+    ),
+  ];
+  if (!identifiers.length) return;
+
+  const users = await User.find({
+    bus_no: {
+      $in: identifiers.map(
+        (identifier) =>
+          new RegExp(
+            `^${identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+            "i",
+          ),
+      ),
+    },
+    role: "student",
+    is_active: true,
+  }).select("_id");
+  if (!users.length) return;
+
+  const isCombined =
+    updatedBus.alteration_type === "combine" ||
+    affectedBuses.some((bus) => bus.alteration_type === "combine");
+  const notificationType = isCombined ? "bus_combined" : "bus_altered";
+  const message = `Route stops for Bus ${updatedBus.preview_number ?? updatedBus.bus_no} have been updated. Check your bus route for the latest stops.`;
+  await Notification.insertMany(
+    users.map((user) => ({
+      user_id: user._id,
+      type: notificationType,
+      message,
+      new_bus_no: updatedBus.bus_no,
+      new_preview: updatedBus.preview_number ?? null,
+    })),
+  );
+
+  const io = getIO();
+  if (io) {
+    users.forEach((user) => {
+      io.to(`user_${String(user._id)}`).emit("notification", {
+        type: notificationType,
+        message,
+        newPreview: updatedBus.preview_number ?? null,
+      });
+    });
+  }
 }
 
 async function importBusRoutes(req, res) {
@@ -167,14 +235,17 @@ async function importBusRoutes(req, res) {
     }
 
     const busFilter = { bus_no: normalizedBusNoValue };
+    const existingBus = await Bus.findOne(busFilter)
+      .select("_id bus_no preview_number altered_to_bus_id alteration_type alteration_route_source")
+      .lean();
     const busUpdate = {
       $set: {
         bus_name: busNo,
         gps_device_id,
         reg_no: regNo || null,
         preview_number: previewNumber || null,
-        status: 'active',
       },
+      $setOnInsert: { status: "active" },
     };
     await Bus.findOneAndUpdate(busFilter, busUpdate, { upsert: true, new: true });
     const bus = await Bus.findOne({ bus_no: normalizedBusNoValue });
@@ -191,6 +262,9 @@ async function importBusRoutes(req, res) {
 
     // Bus created/updated with no routes → success (routes can be added later).
     if (!goodWithBus.length) {
+      if (existingBus && replaceRoutes) {
+        await notifyStudentsOfRouteUpdate(bus);
+      }
       return res.status(200).json({
         success: true,
         busNo: normalizedBusNoValue,
@@ -240,6 +314,10 @@ async function importBusRoutes(req, res) {
       const result = await BusRoute.bulkWrite(ops, { ordered: false });
       summary.insertedRows = (result.upsertedCount || 0);
       summary.updatedRows = (result.modifiedCount || 0);
+    }
+
+    if (existingBus && (replaceRoutes || ops.length)) {
+      await notifyStudentsOfRouteUpdate(bus);
     }
 
     return res.status(200).json({ success: true, summary });
