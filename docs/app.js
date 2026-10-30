@@ -28,7 +28,7 @@
 
   async function request(path, options = {}) {
     if (!API_BASE_URL) {
-      throw new Error("Set API_BASE_URL in admin-dashboard/config.js before using the dashboard.");
+      throw new Error("Set API_BASE_URL in docs/config.js before using the dashboard.");
     }
     const headers = new Headers(options.headers || {});
     if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
