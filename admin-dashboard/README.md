@@ -6,11 +6,16 @@ a Node.js build step and is published from this directory by
 
 ## GitHub Pages
 
-1. In the GitHub repository, open **Settings → Pages**.
-2. Set the Pages build and deployment source to **GitHub Actions**.
-3. Push the dashboard and workflow to `main`, or run **Deploy BTMS admin
+1. Ensure GitHub Pages is allowed for the repository by its owner or organization.
+   The workflow enables Pages and selects GitHub Actions on its first run.
+2. Push the dashboard and workflow to `main`, or run **Deploy BTMS admin
    dashboard** from the **Actions** tab.
-4. Open `https://rajvenkadam.github.io/BTS_KIOT/`.
+3. Open `https://rajvenkadam.github.io/BTS_KIOT/`.
+
+If the first run still reports that Pages cannot be enabled, open the repository's
+**Settings → Pages**, select **GitHub Actions** as the build and deployment
+source, save, and rerun the workflow. Organization policy may require an owner
+to enable Pages first.
 
 The workflow publishes only `admin-dashboard/` as the Pages site.
 
