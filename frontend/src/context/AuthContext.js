@@ -135,6 +135,13 @@ export const AuthProvider = ({ children }) => {
       if (storedToken && storedUser) {
         try {
           const parsedUser = JSON.parse(storedUser);
+          if (
+            typeof parsedUser?.role === "string" &&
+            parsedUser.role.toLowerCase() === "superadmin"
+          ) {
+            await clearAuthStorage();
+            return;
+          }
 
           // Verify token with backend before restoring session
           const verifyRes = await fetch(`${API_BASE_URL}/api/auth/verify`, {
@@ -210,10 +217,13 @@ export const AuthProvider = ({ children }) => {
           error: "The server returned invalid account details. Please try again.",
         };
       }
-      if (
-        !data.user.is_active &&
-        data.user.role.toLowerCase() !== "superadmin"
-      ) {
+      if (data.user.role.toLowerCase() === "superadmin") {
+        return {
+          success: false,
+          error: "Super Admin management is available on the web dashboard only.",
+        };
+      }
+      if (!data.user.is_active) {
         return { success: false, error: "Account deactivated. Contact admin." };
       }
       await writeToken(data.token);

@@ -43,10 +43,7 @@ export default function LoginScreen() {
 
       if (result.success) {
         const userData = result.data.user;
-        if (
-          userData.role.toLowerCase() !== "superadmin" &&
-          !userData.is_active
-        ) {
+        if (!userData.is_active) {
           setError("Account inactive. Contact support.");
           setLoading(false);
           return;

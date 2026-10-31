@@ -4,8 +4,7 @@
  * Architecture & Data Flow:
  * ─────────────────────────
  * 1. UI renders an OpenStreetMap (Leaflet via WebView) as fullscreen background.
- * 2. Top bar overlay provides search input (bus number or preview number) +
- *    "Organize" (admin only) + Profile nav icons.
+ * 2. Top bar overlay provides bus search and Profile/Notifications navigation.
  * 3. @gorhom/bottom-sheet houses status info: bus card with distance-to-college,
  *    online/offline status, error/loading states.
  *
@@ -24,8 +23,8 @@
  *
  * Search & Marker Rules:
  * ───────────────────────
- * - Non-admin users auto-load bus_no from user profile; can only see their bus.
- * - Superadmin searches explicitly; "not found" clears all previous markers.
+ * - Assigned buses auto-load from the user profile; users may search buses.
+ * - "Not found" clears all previous markers.
  * - Marker only shows when shouldShowBusMarker evaluates to true — never falls
  *    back to stale lastGoodLocation for a failed search.
  *
@@ -63,7 +62,6 @@ import { useBus } from "../context/BusContext";
 import busApi from "../api/busApi";
 import { COLORS, SHADOWS } from "../theme";
 import { useAuth } from "../context/AuthContext";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import BottomSheet, { BottomSheetView } from "@gorhom/bottom-sheet";
 import { getErrorMessage } from "../utils/errorHandler";
 import { getDisplayBusNumber } from "../utils/busDisplay";
@@ -104,8 +102,6 @@ const isGpsStale = (data) => {
 const HomeScreen = () => {
   const { token, user, updateUserData } = useAuth();
   const navigation = useNavigation();
-  const role = (user?.role || "student").toLowerCase();
-  const isAdmin = role === "superadmin";
   const { error, refreshBuses, getSocket } = useBus();
   const socket = getSocket ? getSocket() : null;
 
@@ -117,7 +113,6 @@ const HomeScreen = () => {
   const [selectedPreviewNumber, setSelectedPreviewNumber] = useState(null);
   const [selectedBusNo, setSelectedBusNo] = useState(null);
   const [lastGoodLocation, setLastGoodLocation] = useState(null);
-  const [isSuperadminSearched, setIsSuperadminSearched] = useState(false);
   const [isBusFound, setIsBusFound] = useState(false);
   const [locationStatus, setLocationStatus] = useState("idle");
   const [markerStatus, setMarkerStatus] = useState("moving");
@@ -180,44 +175,6 @@ const HomeScreen = () => {
   }, [selectedBusNo]);
   const searchCounterRef = useRef(0);
 
-  const busStorageKey = useCallback(
-    (key) => {
-      if (!isAdmin) return null;
-      const uid = user?.id || user?._id || "anon";
-      return `bus_${uid}_${key}`;
-    },
-    [isAdmin, user?.id, user?._id],
-  );
-
-  useEffect(() => {
-    const persistBusData = async () => {
-      if (locationStatus === "loading") return;
-      try {
-        if (selectedBusNo) {
-          const key = busStorageKey("selectedBusNo");
-          if (key) await AsyncStorage.setItem(key, selectedBusNo);
-        }
-        if (selectedPreviewNumber) {
-          const key = busStorageKey("selectedPreviewNumber");
-          if (key) await AsyncStorage.setItem(key, selectedPreviewNumber);
-        }
-        if (busData && locationStatus !== "error") {
-          const key = busStorageKey("savedBusData");
-          if (key) await AsyncStorage.setItem(key, JSON.stringify(busData));
-        }
-      } catch (err) {
-        console.log("Error persisting bus data:", err);
-      }
-    };
-    persistBusData();
-  }, [
-    selectedBusNo,
-    selectedPreviewNumber,
-    busData,
-    locationStatus,
-    busStorageKey,
-  ]);
-
   useEffect(() => {
     setBusData(null);
     setLastGoodLocation(null);
@@ -234,12 +191,6 @@ const HomeScreen = () => {
     busStatusRef.current = "moving";
     selectedBusNoRef.current = null;
 
-    if (isAdmin) {
-      setSelectedBusNo(null);
-      setLocationStatus("idle");
-      return;
-    }
-
     if (user?.bus_no) {
       setSelectedBusNo(user.bus_no);
       setSelectedPreviewNumber(null);
@@ -249,11 +200,10 @@ const HomeScreen = () => {
       setSelectedPreviewNumber(null);
       setLocationStatus("idle");
     }
-  }, [user?.id, user?._id, user?.bus_no, isAdmin]);
+  }, [user?.id, user?._id, user?.bus_no]);
 
   const autoLoadedBusKeyRef = useRef(null);
   useEffect(() => {
-    if (isAdmin) return;
     const assignedBusNo = (user?.bus_no || "").trim().toUpperCase() || null;
     if (assignedBusNo) {
       selectedBusNoRef.current = assignedBusNo;
@@ -373,11 +323,7 @@ const HomeScreen = () => {
     return () => {
       cancelled = true;
     };
-  }, [user?.id, user?._id, user?.bus_no, token, isAdmin]);
-
-  useEffect(() => {
-    if (isAdmin) setIsSuperadminSearched(false);
-  }, [isAdmin]);
+  }, [user?.id, user?._id, user?.bus_no, token]);
 
   useEffect(() => {
     if (!socket || (!selectedBusNo && !selectedPreviewNumber)) return;
@@ -403,30 +349,25 @@ const HomeScreen = () => {
       setUnreadNotifications((count) => count + 1);
       if (notification?.type === "plan_changed" && user?.bus_no) {
         const assignedBusNo = String(user.bus_no).toUpperCase();
-        const isViewingAssignedBus =
-          !isAdmin ||
-          String(selectedBusNo || "").toUpperCase() === assignedBusNo;
-        if (isViewingAssignedBus) {
-          setSelectedBusNo(assignedBusNo);
-          setSelectedPreviewNumber(null);
-          setTrackingError(null);
-          setLocationStatus("loading");
-          Promise.all([
-            busApi.getBusLocation(token, assignedBusNo),
-            busApi.getBusRoutes(token, assignedBusNo),
-          ])
-            .then(([nextBus, nextRoutes]) => {
-              setBusData(nextBus);
-              setLastGoodLocation(nextBus);
-              setRoutesData(nextRoutes);
-              setIsBusFound(true);
-              setIsOffline(isGpsStale(nextBus));
-              setLocationStatus(isGpsStale(nextBus) ? "offline" : "live");
-            })
-            .catch((error) =>
-              console.error("Failed to refresh bus after service change:", error),
-            );
-        }
+        setSelectedBusNo(assignedBusNo);
+        setSelectedPreviewNumber(null);
+        setTrackingError(null);
+        setLocationStatus("loading");
+        Promise.all([
+          busApi.getBusLocation(token, assignedBusNo),
+          busApi.getBusRoutes(token, assignedBusNo),
+        ])
+          .then(([nextBus, nextRoutes]) => {
+            setBusData(nextBus);
+            setLastGoodLocation(nextBus);
+            setRoutesData(nextRoutes);
+            setIsBusFound(true);
+            setIsOffline(isGpsStale(nextBus));
+            setLocationStatus(isGpsStale(nextBus) ? "offline" : "live");
+          })
+          .catch((error) =>
+            console.error("Failed to refresh bus after service change:", error),
+          );
       }
       if (
         ["bus_altered", "bus_combined"].includes(notification?.type) &&
@@ -485,7 +426,6 @@ const HomeScreen = () => {
   }, [
     socket,
     user,
-    isAdmin,
     updateUserData,
     token,
     selectedBusNo,
@@ -515,14 +455,14 @@ const HomeScreen = () => {
   }, [socket, token, selectedBusNo, selectedPreviewNumber, user?.bus_no]);
 
   useEffect(() => {
-    if (!token || isAdmin) return;
+    if (!token) return;
     notificationApi
       .getUnreadCount(token)
       .then((data) => setUnreadNotifications(data.unreadCount || 0))
       .catch((error) =>
         console.error("Failed to load notification count:", error),
       );
-  }, [token, isAdmin]);
+  }, [token]);
 
   useEffect(() => {
     if (!selectedBusNo || !token) return;
@@ -613,31 +553,7 @@ const HomeScreen = () => {
 
   useEffect(() => {
     refreshBuses();
-    const loadPersistedBusData = async () => {
-      if (!isAdmin) return;
-      try {
-        const savedBusNo = await AsyncStorage.getItem(
-          busStorageKey("selectedBusNo"),
-        );
-        const savedPreviewNumber = await AsyncStorage.getItem(
-          busStorageKey("selectedPreviewNumber"),
-        );
-        const savedBusData = await AsyncStorage.getItem(
-          busStorageKey("savedBusData"),
-        );
-        if (savedBusNo) setSelectedBusNo(savedBusNo);
-        if (savedPreviewNumber) setSelectedPreviewNumber(savedPreviewNumber);
-        if (savedBusData) {
-          const parsedData = JSON.parse(savedBusData);
-          setBusData(parsedData);
-          setLastGoodLocation(parsedData);
-        }
-      } catch (err) {
-        console.log("Error loading persisted bus data:", err);
-      }
-    };
-    loadPersistedBusData();
-  }, [busStorageKey, isAdmin]);
+  }, [refreshBuses]);
 
   const normalizeBusState = (state) => {
     const normalized = typeof state === "string" ? state.toLowerCase() : "";
@@ -694,8 +610,6 @@ const HomeScreen = () => {
     setRoutesData(null);
     sameCoordinateCountRef.current = 0;
     lastCoordinateRef.current = null;
-    if (isAdmin) setIsSuperadminSearched(true);
-
     if (isPreviewSearch) {
       setSelectedPreviewNumber(query);
       setSelectedBusNo(null);
@@ -885,13 +799,9 @@ const HomeScreen = () => {
     busStatusRef.current = "moving";
     selectedBusNoRef.current = null;
     closeAllOverlayPanels();
-    if (isAdmin) setIsSuperadminSearched(false);
-  }, [isAdmin, closeAllOverlayPanels]);
+  }, [closeAllOverlayPanels]);
 
-  const shouldShowBusMarker = (() => {
-    if (!isAdmin) return !!selectedBusNo || !!selectedPreviewNumber;
-    return isSuperadminSearched && (!!selectedBusNo || !!selectedPreviewNumber);
-  })();
+  const shouldShowBusMarker = !!selectedBusNo || !!selectedPreviewNumber;
 
   const displayBusData = shouldShowBusMarker ? busData : null;
   const displayBusLabel = getDisplayBusNumber({
@@ -928,9 +838,7 @@ const HomeScreen = () => {
               color="#92400E"
             />
             <Text style={styles.inactivePlanText}>
-              {isAdmin
-                ? displayBusData.notActiveMessage
-                : "Bus is not in active."}
+              {displayBusData.notActiveMessage || "Bus is not active today."}
             </Text>
           </View>
         )}
@@ -981,15 +889,17 @@ const HomeScreen = () => {
     displayBusData,
     displayBusLabel,
     isOffline,
-    isAdmin,
   ]);
 
   const planCardContent = React.useMemo(() => {
     if (!routesData && !isBusFound) return null;
     const isOfflineMode = isOffline || !displayBusData;
+    const showTrackingError = isOfflineMode && Boolean(trackingError);
+    const showNoStopsHint = Boolean(routesData) && !routesData.hasStops && isBusFound;
+    if (!showTrackingError && !showNoStopsHint) return null;
     return (
       <View style={styles.planCard}>
-        {isOfflineMode && trackingError ? (
+        {showTrackingError ? (
           <View style={styles.lastPlanNote}>
             <Ionicons
               name="information-circle-outline"
@@ -999,7 +909,7 @@ const HomeScreen = () => {
             <Text style={styles.lastPlanNoteText}>{trackingError}</Text>
           </View>
         ) : null}
-        {!routesData?.hasStops && isBusFound && (
+        {showNoStopsHint && (
           <Text style={styles.planEmptyHint}>
             No active stops are available for this bus today.
           </Text>
@@ -1068,44 +978,23 @@ const HomeScreen = () => {
         </View>
 
         <View style={styles.rightIcons}>
-          {!isAdmin && (
-            <TouchableOpacity
-              style={styles.notificationButton}
-              onPress={() => {
-                setUnreadNotifications(0);
-                navigation.navigate("Notifications");
-              }}
-              activeOpacity={0.7}
-            >
-              <Ionicons name="notifications-outline" size={19} color="#fff" />
-              {unreadNotifications > 0 && (
-                <View style={styles.notificationBadge}>
-                  <Text style={styles.notificationBadgeText}>
-                    {unreadNotifications > 9 ? "9+" : unreadNotifications}
-                  </Text>
-                </View>
-              )}
-            </TouchableOpacity>
-          )}
-
-          {isAdmin && (
-            <>
-              <TouchableOpacity
-                style={styles.organizeButton}
-                onPress={() => navigation.navigate("PlanMapping")}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.organizeText}>Plan Mapping</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.organizeButton}
-                onPress={() => navigation.navigate("Organize")}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.organizeText}>Organize</Text>
-              </TouchableOpacity>
-            </>
-          )}
+          <TouchableOpacity
+            style={styles.notificationButton}
+            onPress={() => {
+              setUnreadNotifications(0);
+              navigation.navigate("Notifications");
+            }}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="notifications-outline" size={19} color="#fff" />
+            {unreadNotifications > 0 && (
+              <View style={styles.notificationBadge}>
+                <Text style={styles.notificationBadgeText}>
+                  {unreadNotifications > 9 ? "9+" : unreadNotifications}
+                </Text>
+              </View>
+            )}
+          </TouchableOpacity>
 
           <TouchableOpacity
             style={styles.iconButtonPrimary}
@@ -1180,12 +1069,6 @@ const HomeScreen = () => {
                   <Text style={styles.noPlansText}>
                     No active stops are available for this bus today.
                   </Text>
-                  {isAdmin && (
-                    <Text style={styles.noPlansHint}>
-                      Go to Organize → Buses → Edit Routes to upload a routes
-                      Excel.
-                    </Text>
-                  )}
                 </View>
               ) : (
                 <ScrollView
@@ -1220,9 +1103,7 @@ const HomeScreen = () => {
                 <View>
                   <Text style={styles.sheetLabel}>Live Bus Tracking</Text>
                   <Text style={styles.sheetSubLabel}>
-                    {isAdmin
-                      ? "search for bus to view time location"
-                      : selectedBusNo || selectedPreviewNumber
+                    {selectedBusNo || selectedPreviewNumber
                         ? `tracking bus ${displayBusLabel}`
                         : assignedBusDisplay === "—"
                           ? "no bus assigned"
@@ -1285,11 +1166,9 @@ const HomeScreen = () => {
                   </View>
                 ) : !selectedBusNo && !selectedPreviewNumber ? (
                   <Text style={styles.infoText}>
-                    {isAdmin
-                      ? "Search any bus to track its live location."
-                      : assignedBusDisplay === "—"
-                        ? "No bus assigned"
-                        : `Tracking your bus ${assignedBusDisplay}...`}
+                    {assignedBusDisplay === "—"
+                      ? "No bus assigned"
+                      : `Tracking your bus ${assignedBusDisplay}...`}
                   </Text>
                 ) : locationStatus === "loading" && !routesData ? (
                   <Text style={styles.infoText}>Loading live location...</Text>
