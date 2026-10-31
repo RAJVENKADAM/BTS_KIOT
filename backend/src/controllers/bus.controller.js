@@ -9,7 +9,7 @@ const Notification = require("../models/Notification");
 const PlanMapping = require("../models/PlanMapping");
 const { getIO } = require("../socket");
 const {
-  getCoverageErrors,
+  getPlanChangeNotifications,
   loadPlanState,
 } = require("../services/planMappingService");
 const resolveBusServiceRoutes = require("../utils/resolveBusServiceRoutes");
@@ -36,6 +36,10 @@ function normalizePlanName(plan) {
     .trim()
     .toUpperCase();
   return value || "PLAN A";
+}
+
+function getInactivePlanMessage(plan) {
+  return `Your bus is inactive for ${plan}. It has no route or mapped replacement for today's service. Contact the Super Admin for assistance.`;
 }
 
 async function getCurrentGlobalPlan() {
@@ -766,56 +770,7 @@ async function setGlobalActivePlan(req, res) {
     }
 
     const mappingState = await loadPlanState();
-    const uncovered = getCoverageErrors(mappingState, normalized);
-    if (uncovered.length) {
-      return res.status(409).json({
-        success: false,
-        error: "This plan cannot be activated until every assigned user has an operating bus. Map the uncovered buses first.",
-        uncoveredBuses: [...new Set(uncovered.map((item) => item.busNumber))],
-      });
-    }
-
-    const busById = new Map(
-      mappingState.buses.map((bus) => [String(bus._id), bus]),
-    );
-    const busIdByIdentifier = new Map();
-    for (const bus of mappingState.buses) {
-      busIdByIdentifier.set(String(bus.bus_no).trim().toUpperCase(), String(bus._id));
-      if (bus.preview_number != null) {
-        busIdByIdentifier.set(
-          String(bus.preview_number).trim().toUpperCase(),
-          String(bus._id),
-        );
-      }
-    }
-    const notifications = mappingState.users.map((student) => {
-      const assignedId = busIdByIdentifier.get(
-        String(student.bus_no).trim().toUpperCase(),
-      );
-      const effectiveId = getEffectiveBusId(
-        assignedId,
-        normalized,
-        mappingState.clusters,
-      );
-      const assignedBus = busById.get(assignedId);
-      const effectiveBus = busById.get(effectiveId);
-      const busChanged = assignedId !== effectiveId;
-      const displayBus = effectiveBus?.preview_number ?? effectiveBus?.bus_no;
-      const message = busChanged
-        ? `Today, your usual bus is not available. Use Bus ${displayBus} instead. Open Home and tap View Stops to see its active stops and arrival times; wait at your preferred stop at its listed time.`
-        : "Your bus is operating today. Open Home and tap View Stops to see the active stops and arrival times; wait at your preferred stop at its listed time.";
-
-      return {
-        user_id: student._id,
-        type: "plan_changed",
-        message,
-        old_bus_no: assignedBus?.bus_no ?? null,
-        new_bus_no: effectiveBus?.bus_no ?? null,
-        old_preview: assignedBus?.preview_number ?? null,
-        new_preview: effectiveBus?.preview_number ?? null,
-        is_bus_active: true,
-      };
-    });
+    const notifications = getPlanChangeNotifications(mappingState, normalized);
 
     const updated = await AppSetting.findOneAndUpdate(
       { key: GLOBAL_ACTIVE_PLAN_KEY },
@@ -1299,7 +1254,7 @@ async function getBusRoutes(req, res) {
       isReplacementRoute,
       routeSelectionLabel,
       isBusActiveInCurrentPlan: !!isBusActiveInCurrentPlan,
-      notActiveMessage: isBusActiveInCurrentPlan ? null : "Your bus is not operating today. Contact your administrator for an assignment.",
+      notActiveMessage: isBusActiveInCurrentPlan ? null : getInactivePlanMessage(activePlan),
       ...(isSuperadmin ? { plans: plansMap } : {}),
       stops: plansMap[activePlanKey] || [],
       hasStops: (plansMap[activePlanKey] || []).length > 0,
@@ -1435,7 +1390,7 @@ async function getLiveLocation(req, res) {
       ? {
           isAltered: true,
           alterationType: "plan_mapping",
-          message: `Use Bus ${effectiveBus.preview_number ?? mappedBus.preview_number ?? "the assigned bus"} today. Its location and active stops are shown here.`,
+          message: `Your route plan has changed. Use Bus ${effectiveBus.preview_number ?? mappedBus.preview_number ?? "the assigned bus"} today. Home shows this bus's location; tap View stops to find a nearby stop and wait at the listed time.`,
           newPreview: effectiveBus.preview_number ?? null,
           effectivePreview: effectiveBus.preview_number ?? null,
         }
@@ -1500,7 +1455,7 @@ async function getLiveLocation(req, res) {
       isBusActiveInCurrentPlan: !!isBusActiveInCurrentPlan,
       notActiveMessage: isBusActiveInCurrentPlan
         ? null
-        : "Your bus is not operating today. Contact your administrator for an assignment.",
+        : getInactivePlanMessage(activePlan),
       previewNumber: effectiveBus.preview_number,
       effectivePreviewNumber: effectiveBus.preview_number,
       ...(isSuperadmin ? { effectiveBusNo: effectiveBus.bus_no } : {}),
@@ -1567,7 +1522,7 @@ async function trackByPreview(req, res) {
       ? {
           isAltered: true,
           alterationType: "plan_mapping",
-          message: `Use Bus ${effectiveBus.preview_number ?? mappedBus.preview_number ?? "the assigned bus"} today. Its location and active stops are shown here.`,
+          message: `Your route plan has changed. Use Bus ${effectiveBus.preview_number ?? mappedBus.preview_number ?? "the assigned bus"} today. Home shows this bus's location; tap View stops to find a nearby stop and wait at the listed time.`,
           newPreview: effectiveBus.preview_number ?? null,
           effectivePreview: effectiveBus.preview_number ?? null,
         }
@@ -1605,7 +1560,7 @@ async function trackByPreview(req, res) {
       isBusActiveInCurrentPlan: !!isBusActiveInCurrentPlan,
       notActiveMessage: isBusActiveInCurrentPlan
         ? null
-        : "Your bus is not operating today. Contact your administrator for an assignment.",
+        : getInactivePlanMessage(activePlan),
       latitude: location?.latitude ?? null,
       longitude: location?.longitude ?? null,
       speed: location?.speed ?? 0,

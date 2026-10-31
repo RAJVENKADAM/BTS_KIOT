@@ -312,10 +312,16 @@ const HomeScreen = () => {
         setLocationStatus("error");
         setNoBusFound(err?.status === 404);
         setTrackingError(
-          err?.status === 404
-            ? "Bus not found. Please check the bus number and try again."
-            : getErrorMessage(err, "Could not load this bus."),
+          err?.status === 404 && user?.bus_no
+            ? `Your assigned bus ${assignedBusNo} is no longer available. It is inactive for today's service; contact the Super Admin for assistance.`
+            : err?.status === 404
+              ? "Bus not found. Please check the bus number and try again."
+              : getErrorMessage(err, "Could not load this bus."),
         );
+        if (err?.status === 404 && user?.bus_no) {
+          setMarkerStatus("inactive");
+          setIsOffline(true);
+        }
         setIsBusFound(false);
       }
     })();
@@ -358,16 +364,40 @@ const HomeScreen = () => {
           busApi.getBusRoutes(token, assignedBusNo),
         ])
           .then(([nextBus, nextRoutes]) => {
+            const inactive =
+              nextBus?.isBusActiveInCurrentPlan === false ||
+              Boolean(nextBus?.notActiveMessage);
+            const offline = inactive || isGpsStale(nextBus);
             setBusData(nextBus);
             setLastGoodLocation(nextBus);
             setRoutesData(nextRoutes);
             setIsBusFound(true);
-            setIsOffline(isGpsStale(nextBus));
-            setLocationStatus(isGpsStale(nextBus) ? "offline" : "live");
+            setIsOffline(offline);
+            setLocationStatus(offline ? "offline" : "live");
+            setMarkerStatus(inactive ? "inactive" : offline ? "offline" : "moving");
+            setTrackingError(
+              inactive
+                ? nextBus?.notActiveMessage || "Your bus is inactive for today's service."
+                : null,
+            );
           })
-          .catch((error) =>
-            console.error("Failed to refresh bus after service change:", error),
-          );
+          .catch((error) => {
+            console.error("Failed to refresh bus after service change:", error);
+            if (error?.status === 404) {
+              setBusData(null);
+              setLastGoodLocation(null);
+              setRoutesData(null);
+              setIsBusFound(false);
+              setIsOffline(true);
+              setLocationStatus("offline");
+              setMarkerStatus("inactive");
+              setTrackingError(
+                `Your assigned bus ${assignedBusNo} is no longer available. It is inactive for today's service; contact the Super Admin for assistance.`,
+              );
+            } else {
+              setTrackingError(getErrorMessage(error, "Could not refresh your bus after the plan change."));
+            }
+          });
       }
       if (
         ["bus_altered", "bus_combined"].includes(notification?.type) &&
@@ -443,8 +473,33 @@ const HomeScreen = () => {
         .then((nextBusData) => {
           setBusData(nextBusData);
           setLastGoodLocation(nextBusData);
+          const inactive =
+            nextBusData?.isBusActiveInCurrentPlan === false ||
+            Boolean(nextBusData?.notActiveMessage);
+          setTrackingError(
+            inactive
+              ? nextBusData?.notActiveMessage || "Your bus is inactive for today's service."
+              : null,
+          );
+          setMarkerStatus(inactive ? "inactive" : "moving");
+          setIsOffline(inactive || isGpsStale(nextBusData));
+          setLocationStatus(inactive || isGpsStale(nextBusData) ? "offline" : "live");
         })
-        .catch((error) => console.error("Failed to refresh assigned bus:", error));
+        .catch((error) => {
+          console.error("Failed to refresh assigned bus:", error);
+          if (error?.status === 404 && user?.bus_no) {
+            setBusData(null);
+            setLastGoodLocation(null);
+            setRoutesData(null);
+            setIsBusFound(false);
+            setIsOffline(true);
+            setLocationStatus("offline");
+            setMarkerStatus("inactive");
+            setTrackingError(
+              `Your assigned bus ${user.bus_no} is no longer available. It is inactive for today's service; contact the Super Admin for assistance.`,
+            );
+          }
+        });
       busApi
         .getBusRoutes(token, identifier)
         .then(setRoutesData)

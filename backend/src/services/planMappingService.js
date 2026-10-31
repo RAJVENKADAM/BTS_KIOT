@@ -108,8 +108,70 @@ function getEffectiveBusForPlan(busId, planName, clusters, busesById) {
   return busesById[effectiveBusId] ? effectiveBusId : null;
 }
 
+function getPlanChangeNotifications(state, planName) {
+  const normalizedPlan = String(planName || "").trim().toUpperCase();
+  const busById = new Map(state.buses.map((bus) => [String(bus._id), bus]));
+
+  return state.users.flatMap((user, index) => {
+    const assignedBusId = state.busIdsByUser[index];
+    const assignedBus = assignedBusId ? busById.get(assignedBusId) : null;
+    const effectiveBusId = assignedBusId
+      ? getEffectiveBusId(assignedBusId, normalizedPlan, state.clusters)
+      : null;
+    const effectiveBus = effectiveBusId ? busById.get(effectiveBusId) : null;
+    const effectiveState = effectiveBusId
+      ? state.busesById[effectiveBusId]
+      : null;
+    const hasEffectiveRoute =
+      effectiveState?.status === "active" &&
+      effectiveState.plans.includes(normalizedPlan);
+
+    if (
+      hasEffectiveRoute &&
+      (effectiveBusId !== assignedBusId ||
+        assignedBus?.status === "inactive")
+    ) {
+      const displayBus =
+        effectiveBus?.preview_number ?? effectiveBus?.bus_no ?? effectiveBusId;
+      return [{
+        user_id: user._id,
+        type: "plan_changed",
+        message:
+          `Your route plan has changed to ${normalizedPlan}. Use Bus ${displayBus}. ` +
+          "In Home, you can see this bus's location. Tap View stops to see the route, " +
+          "find a nearby stop, and wait there at the listed time.",
+        old_bus_no: assignedBus?.bus_no ?? user.bus_no ?? null,
+        new_bus_no: effectiveBus?.bus_no ?? null,
+        old_preview: assignedBus?.preview_number ?? null,
+        new_preview: effectiveBus?.preview_number ?? null,
+        plan_name: normalizedPlan,
+        is_bus_active: true,
+      }];
+    }
+
+    if (hasEffectiveRoute) return [];
+
+    const assignedDisplay =
+      assignedBus?.preview_number ?? assignedBus?.bus_no ?? user.bus_no ?? "assigned bus";
+    return [{
+      user_id: user._id,
+      type: "plan_changed",
+      message: assignedBus
+        ? `Your assigned bus ${assignedDisplay} has no ${normalizedPlan} route or mapped replacement, so it is inactive today. Contact the Super Admin for assistance.`
+        : `Your assigned bus ${assignedDisplay} is no longer available and has no ${normalizedPlan} service, so it is inactive today. Contact the Super Admin for assistance.`,
+      old_bus_no: assignedBus?.bus_no ?? user.bus_no ?? null,
+      new_bus_no: null,
+      old_preview: assignedBus?.preview_number ?? null,
+      new_preview: null,
+      plan_name: normalizedPlan,
+      is_bus_active: false,
+    }];
+  });
+}
+
 module.exports = {
   getCoverageErrors,
   getEffectiveBusForPlan,
+  getPlanChangeNotifications,
   loadPlanState,
 };

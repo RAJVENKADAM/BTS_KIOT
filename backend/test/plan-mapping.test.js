@@ -6,6 +6,7 @@ const {
   normalizeArrivalTime,
   validateCluster,
 } = require("../src/utils/planMapping");
+const { getPlanChangeNotifications } = require("../src/services/planMappingService");
 
 const buses = {
   "root-b": { plans: ["PLAN B"] },
@@ -105,6 +106,46 @@ test("reports assigned buses without an effective route before a plan change", (
     ),
     ["student-2"],
   );
+});
+
+test("plan changes notify only riders whose bus changes or becomes inactive", () => {
+  const state = {
+    buses: [
+      { _id: "direct", bus_no: "BUS-DIRECT", preview_number: "1", status: "active" },
+      { _id: "member", bus_no: "BUS-MEMBER", preview_number: "2", status: "active" },
+      { _id: "root", bus_no: "BUS-ROOT", preview_number: "3", status: "active" },
+      { _id: "inactive", bus_no: "BUS-INACTIVE", preview_number: "4", status: "active" },
+    ],
+    busesById: {
+      direct: { plans: ["PLAN B"], status: "active" },
+      member: { plans: ["PLAN A"], status: "active" },
+      root: { plans: ["PLAN B"], status: "active" },
+      inactive: { plans: ["PLAN A"], status: "active" },
+    },
+    busIdsByUser: ["direct", "member", "inactive", null],
+    clusters: [
+      { plan_name: "PLAN B", root_bus_id: "root", member_bus_ids: ["member"] },
+    ],
+    users: [
+      { _id: "user-direct", bus_no: "BUS-DIRECT" },
+      { _id: "user-member", bus_no: "BUS-MEMBER" },
+      { _id: "user-inactive", bus_no: "BUS-INACTIVE" },
+      { _id: "user-deleted", bus_no: "BUS-DELETED" },
+    ],
+  };
+
+  const notifications = getPlanChangeNotifications(state, "PLAN B");
+
+  assert.deepEqual(notifications.map(({ user_id, is_bus_active }) => [user_id, is_bus_active]), [
+    ["user-member", true],
+    ["user-inactive", false],
+    ["user-deleted", false],
+  ]);
+  assert.match(notifications[0].message, /Use Bus 3/);
+  assert.match(notifications[0].message, /View stops/);
+  assert.equal(notifications[0].new_preview, "3");
+  assert.match(notifications[1].message, /inactive today/);
+  assert.match(notifications[2].message, /no longer available/);
 });
 
 test("normalizes imported stop times and rejects malformed values", () => {
