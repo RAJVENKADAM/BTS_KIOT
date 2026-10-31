@@ -196,20 +196,30 @@
       byId("cluster-list").innerHTML = '<div class="loading-state">Loading routes and bus assignments…</div>';
     }
     try {
-      const result = await request("/api/bus/plan-mappings");
+      const [result, globalPlan] = await Promise.all([
+        request("/api/bus/plan-mappings"),
+        request("/api/bus/global-plan"),
+      ]);
+      const activePlan = globalPlan.activePlan;
+      if (!PLANS.includes(activePlan)) {
+        throw new Error("The server returned an unsupported active service.");
+      }
       state.data = {
-        activePlan: result.activePlan,
+        activePlan,
         buses: result.buses || [],
         clusters: result.clusters || [],
       };
-      if (!PLANS.includes(state.data.activePlan)) {
-        throw new Error("The server returned an unsupported active service.");
-      }
       if (!PLANS.includes(state.selectedPlan)) {
         state.selectedPlan = state.data.activePlan;
       }
       state.selectedGlobalPlan = state.data.activePlan;
       render();
+      if (result.activePlan !== activePlan) {
+        showNotice(
+          `The global plan is ${activePlan.replace("PLAN ", "Plan ")}, but plan-mapping data reports ${String(result.activePlan || "unknown")}. Refresh the dashboard or contact the system administrator if this continues.`,
+          true,
+        );
+      }
       byId("last-updated").textContent = `Updated ${new Intl.DateTimeFormat(undefined, {
         hour: "numeric",
         minute: "2-digit",
@@ -584,6 +594,12 @@
       });
       if (result.activePlan !== plan) {
         throw new Error("The server did not confirm the selected operating service.");
+      }
+      const persistedPlan = await request("/api/bus/global-plan");
+      if (persistedPlan.activePlan !== plan) {
+        throw new Error(
+          `The update response confirmed ${plan}, but the server still reports ${persistedPlan.activePlan || "an unknown plan"}. The active service was not verified.`,
+        );
       }
       state.data.activePlan = result.activePlan;
       state.selectedGlobalPlan = result.activePlan;
