@@ -7,6 +7,7 @@ const AppSetting = require("../models/AppSetting");
 const User = require("../models/User");
 const Notification = require("../models/Notification");
 const PlanMapping = require("../models/PlanMapping");
+const BusChange = require("../models/BusChange");
 const { getIO } = require("../socket");
 const {
   getPlanChangeNotifications,
@@ -18,6 +19,7 @@ const {
 } = require("../utils/resolveBusServiceRoutes");
 const selectAlterationRoutes = require("../utils/selectAlterationRoutes");
 const findVerifiedStop = require("../utils/findVerifiedStop");
+const normalizeReplacementAssignments = require("../utils/normalizeReplacementAssignments");
 const normalizeStopName = require("../utils/normalizeStopName");
 const {
   getEffectiveBusId,
@@ -375,6 +377,12 @@ async function uploadBusRoutes(req, res) {
     let bus = await Bus.findOne({ bus_no: busNo.toUpperCase() });
 
     if (bus) {
+      if (await findActiveChangeForBus(bus._id)) {
+        return res.status(409).json({
+          success: false,
+          error: "Roll back the temporary bus change before editing this bus.",
+        });
+      }
       // Update existing bus
       bus.gps_device_id = deviceId;
       bus.reg_no = regNo;
@@ -409,6 +417,16 @@ async function updateBusNumber(req, res) {
   try {
     const { busNo } = req.params;
     const { newBusNo, previewNumber } = req.body;
+    const currentBus = await Bus.findOne({ bus_no: busNo.toUpperCase() });
+    if (!currentBus) {
+      return res.status(404).json({ success: false, error: "Bus not found." });
+    }
+    if (await findActiveChangeForBus(currentBus._id)) {
+      return res.status(409).json({
+        success: false,
+        error: "Roll back the temporary bus change before editing this bus.",
+      });
+    }
 
     let finalBusNo = busNo;
 
@@ -458,6 +476,17 @@ async function getAllBuses(req, res) {
       preview_number: 1,
       bus_no: 1,
     });
+    const isSuperadmin = req.user && String(req.user.role || '').toLowerCase() === 'superadmin';
+    const activeChangeBusIds = new Set();
+    if (isSuperadmin) {
+      const activeChanges = await BusChange.find({
+        status: { $in: ["applying", "active"] },
+      }).select("sourceBusId targetBusId").lean();
+      activeChanges.forEach((change) => {
+        activeChangeBusIds.add(String(change.sourceBusId));
+        activeChangeBusIds.add(String(change.targetBusId));
+      });
+    }
 
     // Batch fetch all live locations at once (fixes N+1 query)
     const busIds = buses.map((b) => b._id);
@@ -492,11 +521,11 @@ async function getAllBuses(req, res) {
         alterationType: bus.altered_to_bus_id
           ? bus.alteration_type || "alter"
           : null,
+        isTemporaryChange: activeChangeBusIds.has(String(bus._id)),
       };
     });
 
     // Privacy: remove internal identifiers for non-superadmin users
-    const isSuperadmin = req.user && String(req.user.role || '').toLowerCase() === 'superadmin';
     const safeBuses = isSuperadmin
       ? enrichedBuses
       : enrichedBuses.map((b) => ({
@@ -610,6 +639,12 @@ async function deleteBus(req, res) {
     if (!bus) {
       return res.status(404).json({ error: `Bus ${busNo} not found` });
     }
+    if (await findActiveChangeForBus(bus._id)) {
+      return res.status(409).json({
+        success: false,
+        error: "Roll back the temporary bus change before deleting this bus.",
+      });
+    }
 
     await User.updateMany(
       { bus_no: new RegExp(`^${escapeRegExp(bus.bus_no)}$`, "i") },
@@ -653,13 +688,17 @@ async function deleteBus(req, res) {
 async function activateBus(req, res) {
   try {
     const { busNo } = req.params;
-
-    const bus = await Bus.findOneAndUpdate(
-      { bus_no: busNo.toUpperCase() },
-      { status: "active" },
-      { new: true },
-    );
+    const bus = await Bus.findOne({ bus_no: busNo.toUpperCase() });
     if (!bus) return res.status(404).json({ error: "Bus not found" });
+    if (await findActiveChangeForBus(bus._id)) {
+      return res.status(409).json({
+        success: false,
+        error: "Roll back the temporary bus change before changing this bus status.",
+      });
+    }
+
+    bus.status = "active";
+    await bus.save();
     await notifyAssignedUsersOfBusStatus(bus, "active");
 
     res.json({ message: "Bus activated" });
@@ -673,13 +712,17 @@ async function activateBus(req, res) {
 async function deactivateBus(req, res) {
   try {
     const { busNo } = req.params;
-
-    const bus = await Bus.findOneAndUpdate(
-      { bus_no: busNo.toUpperCase() },
-      { status: "inactive" },
-      { new: true },
-    );
+    const bus = await Bus.findOne({ bus_no: busNo.toUpperCase() });
     if (!bus) return res.status(404).json({ error: "Bus not found" });
+    if (await findActiveChangeForBus(bus._id)) {
+      return res.status(409).json({
+        success: false,
+        error: "Roll back the temporary bus change before changing this bus status.",
+      });
+    }
+
+    bus.status = "inactive";
+    await bus.save();
     await notifyAssignedUsersOfBusStatus(bus, "inactive");
 
     res.json({ message: "Bus deactivated" });
@@ -705,11 +748,17 @@ async function updatePreviewNumber(req, res) {
   try {
     const { busNo } = req.params;
     const { previewNumber } = req.body;
+    const bus = await Bus.findOne({ bus_no: busNo.toUpperCase() });
+    if (!bus) return res.status(404).json({ success: false, error: "Bus not found." });
+    if (await findActiveChangeForBus(bus._id)) {
+      return res.status(409).json({
+        success: false,
+        error: "Roll back the temporary bus change before editing this bus.",
+      });
+    }
 
-    await Bus.updateOne(
-      { bus_no: busNo.toUpperCase() },
-      { preview_number: previewNumber },
-    );
+    bus.preview_number = previewNumber;
+    await bus.save();
 
     res.json({ message: "Preview updated successfully" });
   } catch (error) {
@@ -845,7 +894,252 @@ function normalizeAlterationRoutes(routesByPlan) {
   return routes.length ? routes : null;
 }
 
+function snapshotBus(bus) {
+  return {
+    busId: bus._id,
+    busNo: bus.bus_no,
+    status: bus.status,
+    alteredToBusId: bus.altered_to_bus_id ?? null,
+    alteredToPreview: bus.altered_to_preview ?? null,
+    alterationType: bus.alteration_type ?? null,
+    alterationRouteSource: bus.alteration_route_source ?? null,
+    alterationRoutes: (bus.alteration_routes || []).map((route) =>
+      typeof route.toObject === "function" ? route.toObject() : { ...route },
+    ),
+    alteredAt: bus.altered_at ?? null,
+    combinedRouteSource: bus.combined_route_source ?? null,
+    combinedRoutes: (bus.combined_routes || []).map((route) =>
+      typeof route.toObject === "function" ? route.toObject() : { ...route },
+    ),
+  };
+}
+
+function restoreBusSnapshot(bus, snapshot) {
+  bus.status = snapshot.status;
+  bus.altered_to_bus_id = snapshot.alteredToBusId;
+  bus.altered_to_preview = snapshot.alteredToPreview;
+  bus.alteration_type = snapshot.alterationType;
+  bus.alteration_route_source = snapshot.alterationRouteSource;
+  bus.alteration_routes = snapshot.alterationRoutes;
+  bus.altered_at = snapshot.alteredAt;
+  bus.combined_route_source = snapshot.combinedRouteSource;
+  bus.combined_routes = snapshot.combinedRoutes;
+}
+
+async function findActiveChangeForBus(busId) {
+  return BusChange.findOne({
+    status: { $in: ["applying", "active"] },
+    $or: [{ sourceBusId: busId }, { targetBusId: busId }],
+  }).select("_id");
+}
+
+async function notifyBusChange(user, {
+  type,
+  message,
+  oldBusNo = null,
+  newBusNo = null,
+  oldPreview = null,
+  newPreview = null,
+  assignmentBusNo = null,
+}) {
+  await Notification.create({
+    user_id: user._id,
+    type,
+    message,
+    old_bus_no: oldBusNo,
+    new_bus_no: newBusNo,
+    old_preview: oldPreview,
+    new_preview: newPreview,
+  });
+  const io = getIO();
+  if (io) {
+    io.to(`user_${String(user._id)}`).emit("notification", {
+      type,
+      message,
+      oldPreview,
+      newPreview,
+      assignmentBusNo,
+    });
+  }
+}
+
+async function getTemporaryBusChanges(req, res) {
+  try {
+    const activeChanges = await BusChange.find({
+      status: { $in: ["applying", "active"] },
+    }).sort({ createdAt: -1 }).lean();
+    const recordedSourceIds = new Set(
+      activeChanges.map((change) => String(change.sourceBusId)),
+    );
+    const legacyAlterations = await Bus.find({
+      alteration_type: "alter",
+      altered_to_bus_id: { $ne: null },
+    })
+      .select("bus_no preview_number altered_to_bus_id altered_to_preview altered_at")
+      .sort({ altered_at: -1 })
+      .lean();
+
+    const changes = activeChanges.map((change) => ({
+      id: String(change._id),
+      type: change.type,
+      status: change.status,
+      sourceBusNo: change.sourceBusNo,
+      sourcePreview: change.sourcePreview,
+      targetBusNo: change.targetBusNo,
+      targetPreview: change.targetPreview,
+      routeSource: change.routeSource,
+      affectedUsersCount: change.affectedUsersCount,
+      createdAt: change.createdAt,
+      legacy: false,
+    }));
+    for (const bus of legacyAlterations) {
+      if (recordedSourceIds.has(String(bus._id))) continue;
+      const target = await Bus.findById(bus.altered_to_bus_id)
+        .select("bus_no preview_number")
+        .lean();
+      const riders = await findStudentsAssignedToBus(bus);
+      changes.push({
+        id: `legacy:${bus.bus_no}`,
+        type: "alter",
+        status: "active",
+        sourceBusNo: bus.bus_no,
+        sourcePreview: bus.preview_number,
+        targetBusNo: target?.bus_no ?? null,
+        targetPreview: target?.preview_number ?? bus.altered_to_preview,
+        routeSource: null,
+        affectedUsersCount: riders.length,
+        createdAt: bus.altered_at,
+        legacy: true,
+      });
+    }
+
+    return res.json({ success: true, changes });
+  } catch (error) {
+    console.error("getTemporaryBusChanges error:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Could not load temporary bus changes.",
+    });
+  }
+}
+
+async function rollbackTemporaryBusChange(req, res) {
+  try {
+    const change = await BusChange.findById(req.params.changeId);
+    if (!change || !["applying", "active"].includes(change.status)) {
+      return res.status(404).json({
+        success: false,
+        error: "Active temporary bus change not found.",
+      });
+    }
+
+    const buses = await Bus.find({
+      _id: { $in: change.busSnapshots.map((snapshot) => snapshot.busId) },
+    });
+    const busesById = new Map(buses.map((bus) => [String(bus._id), bus]));
+    const users = await User.find({
+      _id: { $in: change.assignmentSnapshots.map((snapshot) => snapshot.userId) },
+    }).select("_id bus_no role is_active");
+    const usersById = new Map(users.map((user) => [String(user._id), user]));
+    const assignmentConflicts = change.assignmentSnapshots.filter((snapshot) => {
+      const user = usersById.get(String(snapshot.userId));
+      if (!user) return false;
+      const current = user.bus_no ? String(user.bus_no).toUpperCase() : null;
+      const before = snapshot.beforeBusNo
+        ? String(snapshot.beforeBusNo).toUpperCase()
+        : null;
+      const after = snapshot.afterBusNo
+        ? String(snapshot.afterBusNo).toUpperCase()
+        : null;
+      return current !== before && current !== after;
+    });
+    if (assignmentConflicts.length) {
+      return res.status(409).json({
+        success: false,
+        error: `${assignmentConflicts.length} affected rider(s) have since been reassigned. Resolve those assignments before rolling back.`,
+      });
+    }
+    if (buses.length !== change.busSnapshots.length) {
+      return res.status(409).json({
+        success: false,
+        error: "A bus involved in this temporary change no longer exists; rollback cannot safely restore it.",
+      });
+    }
+
+    for (const snapshot of change.busSnapshots) {
+      const bus = busesById.get(String(snapshot.busId));
+      restoreBusSnapshot(bus, snapshot);
+      await bus.save();
+    }
+
+    const restoredBusByNo = new Map(
+      change.busSnapshots.map((snapshot) => [
+        String(snapshot.busNo).toUpperCase(),
+        snapshot.busNo,
+      ]),
+    );
+    for (const snapshot of change.assignmentSnapshots) {
+      const user = usersById.get(String(snapshot.userId));
+      if (!user) continue;
+      user.bus_no = snapshot.beforeBusNo
+        ? restoredBusByNo.get(String(snapshot.beforeBusNo).toUpperCase()) || snapshot.beforeBusNo
+        : null;
+      await user.save();
+    }
+
+    change.status = "rolled_back";
+    change.rolledBackAt = new Date();
+    await change.save();
+
+    for (const snapshot of change.assignmentSnapshots) {
+      const user = usersById.get(String(snapshot.userId));
+      if (!user) continue;
+      const restoredBus = snapshot.beforeBusNo
+        ? buses.find((bus) =>
+          [bus.bus_no, bus.preview_number].some(
+            (identifier) =>
+              String(identifier || "").toUpperCase() ===
+              String(snapshot.beforeBusNo).toUpperCase(),
+          ),
+        )
+        : null;
+      const message = restoredBus
+        ? `The temporary bus change has ended. Your previous assignment to Bus ${restoredBus.preview_number ?? restoredBus.bus_no} is restored.`
+        : "The temporary bus change has ended. You do not have a bus assignment; please contact administration.";
+      await notifyBusChange(user, {
+        type: restoredBus ? "bus_change_rolled_back" : "bus_unassigned",
+        message,
+        oldBusNo: snapshot.afterBusNo,
+        newBusNo: snapshot.beforeBusNo,
+        oldPreview: change.targetPreview,
+        newPreview: restoredBus?.preview_number ?? null,
+        assignmentBusNo: snapshot.beforeBusNo,
+      });
+    }
+
+    const io = getIO();
+    if (io) {
+      io.emit("bus-update", {
+        actionType: "BUS_RESTORED",
+        previewNumber: change.sourcePreview,
+      });
+    }
+    return res.json({
+      success: true,
+      message: `Bus ${change.sourcePreview ?? change.sourceBusNo} restored to its normal service.`,
+      notifiedStudents: change.assignmentSnapshots.length,
+    });
+  } catch (error) {
+    console.error("rollbackTemporaryBusChange error:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Could not roll back this temporary bus change.",
+    });
+  }
+}
+
 async function changeBus(req, res, alterationType) {
+  let change;
   try {
     const sourceBus = await findBusByIdentifier(req.params.busNo);
     const targetBus = await findBusByIdentifier(req.body?.newBusNo);
@@ -885,8 +1179,47 @@ async function changeBus(req, res, alterationType) {
         error: 'Both buses need a preview number before they can be changed.',
       });
     }
+    if (sourceBus.combined_route_source || targetBus.combined_route_source) {
+      return res.status(409).json({
+        success: false,
+        error: "Rollback the existing temporary bus change before using either bus again.",
+      });
+    }
+    const activeChanges = await BusChange.find({
+      status: { $in: ["applying", "active"] },
+    }).select("sourceBusId targetBusId").lean();
+    const activeChangeBusIds = new Set(
+      activeChanges.flatMap((change) => [
+        String(change.sourceBusId),
+        String(change.targetBusId),
+      ]),
+    );
+    if (
+      activeChangeBusIds.has(String(sourceBus._id)) ||
+      activeChangeBusIds.has(String(targetBus._id))
+    ) {
+      return res.status(409).json({
+        success: false,
+        error: "Rollback the existing temporary bus change before using either bus again.",
+      });
+    }
+    const legacyAlterationTargets = await Bus.distinct("altered_to_bus_id", {
+      alteration_type: "alter",
+      altered_to_bus_id: { $ne: null },
+    });
+    const legacyTargetIds = new Set(legacyAlterationTargets.map(String));
+    if (
+      legacyTargetIds.has(String(sourceBus._id)) ||
+      legacyTargetIds.has(String(targetBus._id))
+    ) {
+      return res.status(409).json({
+        success: false,
+        error: "This bus is already supporting a legacy alteration. Restore that bus before using it here.",
+      });
+    }
 
-    const { routeSource, routesByPlan } = req.body || {};
+    const { routeSource, routesByPlan, replacementAssignments } = req.body || {};
+    const activePlan = await getCurrentGlobalPlan();
     const isCombined = alterationType === "combine";
     if (!isCombined && routeSource !== undefined) {
       return res.status(400).json({
@@ -924,6 +1257,15 @@ async function changeBus(req, res, alterationType) {
       return res.status(400).json({
         success: false,
         error: "Upload a valid route file containing at least one stop.",
+      });
+    }
+    if (
+      routeSource === "custom" &&
+      !hasRouteForPlan(alterationRoutes, activePlan)
+    ) {
+      return res.status(409).json({
+        success: false,
+        error: "The uploaded routes need stops for today's active service.",
       });
     }
     if (routeSource === "custom") {
@@ -977,7 +1319,6 @@ async function changeBus(req, res, alterationType) {
       selectedRoutes = alterationRoutes;
     }
 
-    const activePlan = await getCurrentGlobalPlan();
     if (!isCombined) {
       const incomingAlterations = await Bus.countDocuments({
         altered_to_bus_id: targetBus._id,
@@ -1004,21 +1345,78 @@ async function changeBus(req, res, alterationType) {
     }
 
     const sourceUsers = await findStudentsAssignedToBus(sourceBus);
-    const targetUsers = isCombined
-      ? await findStudentsAssignedToBus(targetBus)
-      : [];
-    const users = [
-      ...new Map(
-        [...sourceUsers, ...targetUsers].map((user) => [
-          String(user._id),
-          user,
-        ]),
-      ).values(),
-    ];
-    const notificationType = isCombined ? "bus_combined" : "bus_altered";
-    const previewMessage = isCombined
-      ? `Buses ${sourceBus.preview_number} and ${targetBus.preview_number} are combined. All affected riders should use Bus ${targetBus.preview_number}. Open Home and tap View Stops for its location, active stops, and arrival times.`
-      : `Bus ${sourceBus.preview_number} is using Bus ${targetBus.preview_number}'s live location. Your original stops remain unchanged. Open Home and tap View Stops to see stop times.`;
+    const targetUsers = await findStudentsAssignedToBus(targetBus);
+    const assignmentByUserId = new Map();
+    const candidateAssignmentBuses = await Bus.find({
+      status: "active",
+      _id: {
+        $nin: [
+          sourceBus._id,
+          targetBus._id,
+          ...[...activeChangeBusIds],
+          ...legacyAlterationTargets,
+        ],
+      },
+      altered_to_bus_id: null,
+      combined_route_source: null,
+    }).select("_id bus_no preview_number").lean();
+    const availableAssignmentBuses = [];
+    for (const bus of candidateAssignmentBuses) {
+      const routeBus = await resolvePlanMappingBus(bus, activePlan);
+      const routes = await getRoutesForBus(routeBus);
+      if (hasRouteForPlan(routes, activePlan)) {
+        availableAssignmentBuses.push(bus);
+      }
+    }
+    const allowedAssignmentBusNos = new Set([
+      sourceBus.bus_no.toUpperCase(),
+      ...availableAssignmentBuses.map((bus) => bus.bus_no.toUpperCase()),
+    ]);
+
+    if (!isCombined) {
+      try {
+        const requestedAssignments = normalizeReplacementAssignments(
+          replacementAssignments,
+          targetUsers,
+          allowedAssignmentBusNos,
+        );
+        requestedAssignments.forEach((busNo, userId) => {
+          assignmentByUserId.set(userId, busNo);
+        });
+      } catch (error) {
+        return res.status(400).json({ success: false, error: error.message });
+      }
+    } else {
+      sourceUsers.forEach((user) => {
+        assignmentByUserId.set(String(user._id), targetBus.bus_no);
+      });
+    }
+
+    const assignmentSnapshots = [
+      ...sourceUsers,
+      ...targetUsers,
+    ].map((user) => ({
+      userId: user._id,
+      beforeBusNo: user.bus_no ?? null,
+      afterBusNo: assignmentByUserId.has(String(user._id))
+        ? assignmentByUserId.get(String(user._id))
+        : user.bus_no ?? null,
+    }));
+    const busSnapshots = [snapshotBus(sourceBus), snapshotBus(targetBus)];
+    change = await BusChange.create({
+      type: alterationType,
+      status: "applying",
+      sourceBusId: sourceBus._id,
+      sourceBusNo: sourceBus.bus_no,
+      sourcePreview: sourceBus.preview_number,
+      targetBusId: targetBus._id,
+      targetBusNo: targetBus.bus_no,
+      targetPreview: targetBus.preview_number,
+      routeSource: isCombined ? routeSource : null,
+      busSnapshots,
+      assignmentSnapshots,
+      affectedUsersCount: assignmentSnapshots.length,
+    });
 
     if (isCombined) {
       targetBus.combined_route_source = routeSource;
@@ -1030,12 +1428,6 @@ async function changeBus(req, res, alterationType) {
         arrival_time: route.arrival_time || null,
       }));
       await targetBus.save();
-      if (sourceUsers.length) {
-        await User.updateMany(
-          { _id: { $in: sourceUsers.map((user) => user._id) } },
-          { $set: { bus_no: targetBus.bus_no } },
-        );
-      }
       sourceBus.status = "active";
       sourceBus.altered_to_bus_id = null;
       sourceBus.altered_to_preview = null;
@@ -1057,36 +1449,75 @@ async function changeBus(req, res, alterationType) {
       await sourceBus.save();
     }
 
-    const notifications = users.map((user) => {
-      const userWasOnSourceBus = sourceUsers.some(
+    for (const [userId, busNo] of assignmentByUserId) {
+      await User.updateOne(
+        { _id: userId },
+        { $set: { bus_no: busNo } },
+      );
+    }
+
+    const uniqueUsers = new Map(
+      [...sourceUsers, ...targetUsers].map((user) => [String(user._id), user]),
+    );
+    const previewMessage = isCombined
+      ? `Bus ${sourceBus.preview_number} has been combined with Bus ${targetBus.preview_number}. Your location and stops now follow Bus ${targetBus.preview_number}.`
+      : `Bus ${sourceBus.preview_number} is using Bus ${targetBus.preview_number}'s live location. Your original stops remain unchanged.`;
+    for (const user of uniqueUsers.values()) {
+      const isSourceRider = sourceUsers.some(
         (sourceUser) => String(sourceUser._id) === String(user._id),
       );
-      const previousBus = userWasOnSourceBus ? sourceBus : targetBus;
-      return {
-        user_id: user._id,
-        type: notificationType,
-        message: previewMessage,
-        old_bus_no: previousBus.bus_no,
-        new_bus_no: targetBus.bus_no,
-        old_preview: previousBus.preview_number ?? null,
-        new_preview: targetBus.preview_number ?? null,
-      };
-    });
-    if (notifications.length) await Notification.insertMany(notifications);
-
-    const io = getIO();
-    if (io) {
-      users.forEach((user) => {
-        // Emit a privacy-preserving notification: include preview numbers only so the student
-        // can be informed without revealing internal bus numbers.
-        io.to(`user_${user._id.toString()}`).emit('notification', {
-          type: notificationType,
-          message: previewMessage,
-          oldPreview: sourceBus.preview_number ?? null,
-          newPreview: targetBus.preview_number ?? null,
+      if (isCombined && isSourceRider) {
+        await notifyBusChange(user, {
+          type: "bus_combined",
+          message: `You are now combined with Bus ${targetBus.preview_number}. Your Home page shows its location and the selected stops.`,
+          oldBusNo: sourceBus.bus_no,
+          newBusNo: targetBus.bus_no,
+          oldPreview: sourceBus.preview_number,
+          newPreview: targetBus.preview_number,
+          assignmentBusNo: targetBus.bus_no,
         });
+        continue;
+      }
+      if (!isCombined && !isSourceRider) {
+        const assignedBusNo = assignmentByUserId.get(String(user._id));
+        if (!assignedBusNo) {
+          await notifyBusChange(user, {
+            type: "bus_unassigned",
+            message: "You currently have no bus assigned. Please contact administration for assistance.",
+            oldBusNo: targetBus.bus_no,
+            oldPreview: targetBus.preview_number,
+            assignmentBusNo: null,
+          });
+          continue;
+        }
+        const assignedBus = assignedBusNo === sourceBus.bus_no
+          ? sourceBus
+          : availableAssignmentBuses.find((bus) => bus.bus_no === assignedBusNo);
+        await notifyBusChange(user, {
+          type: "bus_reassigned",
+          message: `Your previous bus assignment has changed. You are now assigned to Bus ${assignedBus?.preview_number ?? assignedBusNo}. Your Home page will show that bus's location and stops.`,
+          oldBusNo: targetBus.bus_no,
+          newBusNo: assignedBusNo,
+          oldPreview: targetBus.preview_number,
+          newPreview: assignedBus?.preview_number ?? null,
+          assignmentBusNo: assignedBusNo,
+        });
+        continue;
+      }
+      await notifyBusChange(user, {
+        type: isCombined ? "bus_combined" : "bus_altered",
+        message: previewMessage,
+        oldBusNo: sourceBus.bus_no,
+        newBusNo: targetBus.bus_no,
+        oldPreview: sourceBus.preview_number,
+        newPreview: targetBus.preview_number,
+        assignmentBusNo: user.bus_no,
       });
     }
+    change.status = "active";
+    await change.save();
+
+    const io = getIO();
     if (io) {
       io.emit("bus-update", {
         actionType: isCombined ? "BUS_COMBINED" : "BUS_ALTERED",
@@ -1102,10 +1533,19 @@ async function changeBus(req, res, alterationType) {
       newBusNo: targetBus.bus_no,
       sourcePreview: sourceBus.preview_number,
       newPreview: targetBus.preview_number,
-      notifiedStudents: users.length,
+      notifiedStudents: uniqueUsers.size,
+      temporaryChangeId: String(change._id),
     });
   } catch (error) {
     console.error(`${alterationType} bus error:`, error);
+    if (change && change.status !== "rolled_back") {
+      change.status = "active";
+      try {
+        await change.save();
+      } catch (recordError) {
+        console.error("Could not mark partial bus change for rollback:", recordError);
+      }
+    }
     res.status(500).json({
       success: false,
       error: `Failed to ${alterationType} the bus.`,
@@ -1126,6 +1566,12 @@ async function restoreAlteredBus(req, res) {
     const bus = await findBusByIdentifier(req.params.busNo);
     if (!bus) {
       return res.status(404).json({ success: false, error: "Bus not found." });
+    }
+    if (await findActiveChangeForBus(bus._id)) {
+      return res.status(409).json({
+        success: false,
+        error: "Use the temporary bus changes page to roll back this operation.",
+      });
     }
     if (!bus.altered_to_bus_id) {
       return res.status(400).json({ success: false, error: "This bus is not combined." });
@@ -1201,6 +1647,12 @@ async function getBusRoutes(req, res) {
       return res
         .status(404)
         .json({ success: false, error: `Bus ${busNo} not found` });
+    }
+    if (await findActiveChangeForBus(bus._id)) {
+      return res.status(409).json({
+        success: false,
+        error: "Roll back the temporary bus change before editing this bus.",
+      });
     }
 
     const activePlan = await getCurrentGlobalPlan();
@@ -1607,4 +2059,6 @@ module.exports = {
   alterBus,
   combineBus,
   restoreAlteredBus,
+  getTemporaryBusChanges,
+  rollbackTemporaryBusChange,
 };

@@ -10,7 +10,15 @@ const notificationSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ['bus_altered', 'bus_combined', 'plan_changed', 'bus_status'],
+      enum: [
+        'bus_altered',
+        'bus_combined',
+        'bus_reassigned',
+        'bus_unassigned',
+        'bus_change_rolled_back',
+        'plan_changed',
+        'bus_status',
+      ],
       required: true,
     },
     message: {

@@ -3,6 +3,7 @@ const BusRoute = require('../models/BusRoute');
 const StopMaster = require('../models/StopMaster');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
+const BusChange = require('../models/BusChange');
 const { getIO } = require('../socket');
 const { randomUUID } = require("node:crypto");
 const { normalizeArrivalTime } = require("../utils/planMapping");
@@ -120,6 +121,25 @@ async function importBusRoutes(req, res) {
     }
 
     const normalizedBusNoValue = normalizeBusNo(busNo);
+    const busFilter = { bus_no: normalizedBusNoValue };
+    const existingBus = await Bus.findOne(busFilter)
+      .select("_id bus_no preview_number altered_to_bus_id alteration_type alteration_route_source")
+      .lean();
+    if (existingBus) {
+      const activeChange = await BusChange.findOne({
+        status: { $in: ["applying", "active"] },
+        $or: [
+          { sourceBusId: existingBus._id },
+          { targetBusId: existingBus._id },
+        ],
+      }).select("_id");
+      if (activeChange) {
+        return res.status(409).json({
+          success: false,
+          error: "Roll back the temporary bus change before editing this bus's routes.",
+        });
+      }
+    }
 
     // Normalize routes into routesByPlan map
     let normalizedRoutesByPlan = {};
@@ -240,10 +260,6 @@ async function importBusRoutes(req, res) {
       resolvedStops.push({ ...row, stopId: stop.stopId, stop_name: stop.name });
     }
 
-    const busFilter = { bus_no: normalizedBusNoValue };
-    const existingBus = await Bus.findOne(busFilter)
-      .select("_id bus_no preview_number altered_to_bus_id alteration_type alteration_route_source")
-      .lean();
     const busUpdate = {
       $set: {
         bus_name: busNo,

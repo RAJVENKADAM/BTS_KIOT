@@ -399,55 +399,86 @@ const HomeScreen = () => {
             }
           });
       }
-      if (
-        ["bus_altered", "bus_combined"].includes(notification?.type) &&
-        user
-      ) {
-        const newPreview = notification.newPreview;
-        if (newPreview) {
-          const isCombined = notification.type === "bus_combined";
+      const busChangeTypes = [
+        "bus_altered",
+        "bus_combined",
+        "bus_reassigned",
+        "bus_unassigned",
+        "bus_change_rolled_back",
+      ];
+      if (busChangeTypes.includes(notification?.type) && user) {
+        const isUnassigned = notification.type === "bus_unassigned";
+        const assignmentBusNo = isUnassigned
+          ? null
+          : notification.assignmentBusNo ||
+            (notification.type === "bus_combined"
+              ? notification.newPreview
+              : user.bus_no);
+        const assignmentChanged = [
+          "bus_combined",
+          "bus_reassigned",
+          "bus_unassigned",
+          "bus_change_rolled_back",
+        ].includes(notification.type);
+
+        if (assignmentChanged) {
           updateUserData({
             ...user,
-            ...(isCombined ? { bus_no: String(newPreview) } : {}),
-            previewNumber: newPreview,
+            bus_no: assignmentBusNo ? String(assignmentBusNo) : null,
+            ...(isUnassigned
+              ? { previewNumber: null, preview_number: null }
+              : notification.newPreview
+                ? { previewNumber: notification.newPreview }
+                : {}),
           });
-          const assignedBusNo = String(user.bus_no || "").toUpperCase();
-          const isViewingAssignedBus =
-            Boolean(assignedBusNo) &&
-            (String(selectedBusNo || "").toUpperCase() === assignedBusNo ||
-              (notification.oldPreview != null &&
-                String(selectedPreviewNumber || "") ===
-                  String(notification.oldPreview)));
-          if (isViewingAssignedBus) {
-            setSelectedBusNo(isCombined ? String(newPreview) : assignedBusNo);
-            setSelectedPreviewNumber(isCombined ? String(newPreview) : null);
-            setSearchQuery(String(newPreview));
-            setTrackingError(null);
-            setLocationStatus("loading");
-            busApi
-              .getBusLocation(
-                token,
-                isCombined ? String(newPreview) : assignedBusNo,
-              )
-              .then((data) => {
-                const isOffline = isGpsStale(data);
-                setBusData({
-                  ...data,
-                  _isOffline: isOffline,
-                  _markerStatus: isOffline ? "offline" : "moving",
-                });
-                setLastGoodLocation(data);
-                setIsOffline(isOffline);
-                setLocationStatus(isOffline ? "offline" : "live");
-                setTrackingError(null);
-              })
-              .catch((error) =>
-                console.error(
-                  "Failed to refresh bus after route change:",
-                  error,
-                ),
-              );
-          }
+        }
+
+        if (isUnassigned) {
+          setSelectedBusNo(null);
+          setSelectedPreviewNumber(null);
+          setBusData(null);
+          setLastGoodLocation(null);
+          setRoutesData(null);
+          setIsBusFound(false);
+          setIsOffline(false);
+          setLocationStatus("idle");
+          setTrackingError(null);
+          setSearchQuery("");
+          return;
+        }
+
+        const busNoToRefresh = String(
+          assignmentChanged ? assignmentBusNo : user.bus_no || "",
+        ).trim();
+        if (busNoToRefresh) {
+          setSelectedBusNo(busNoToRefresh);
+          setSelectedPreviewNumber(null);
+          setSearchQuery(
+            String(notification.newPreview || busNoToRefresh),
+          );
+          setTrackingError(null);
+          setLocationStatus("loading");
+          Promise.all([
+            busApi.getBusLocation(token, busNoToRefresh),
+            busApi.getBusRoutes(token, busNoToRefresh),
+          ])
+            .then(([nextBus, nextRoutes]) => {
+              const isOffline = isGpsStale(nextBus);
+              setBusData({
+                ...nextBus,
+                _isOffline: isOffline,
+                _markerStatus: isOffline ? "offline" : "moving",
+              });
+              setLastGoodLocation(nextBus);
+              setRoutesData(nextRoutes);
+              setIsBusFound(true);
+              setIsOffline(isOffline);
+              setLocationStatus(isOffline ? "offline" : "live");
+              setTrackingError(null);
+            })
+            .catch((error) =>
+              console.error("Failed to refresh bus after temporary change:", error),
+            );
         }
       }
     };
@@ -1161,7 +1192,7 @@ const HomeScreen = () => {
                     {selectedBusNo || selectedPreviewNumber
                         ? `tracking bus ${displayBusLabel}`
                         : assignedBusDisplay === "—"
-                          ? "no bus assigned"
+                          ? "no bus assigned — contact administration"
                           : `tracking your bus ${assignedBusDisplay}`}
                   </Text>
                 </View>
@@ -1222,7 +1253,7 @@ const HomeScreen = () => {
                 ) : !selectedBusNo && !selectedPreviewNumber ? (
                   <Text style={styles.infoText}>
                     {assignedBusDisplay === "—"
-                      ? "No bus assigned"
+                      ? "No bus is assigned to you. Please contact administration for assistance."
                       : `Tracking your bus ${assignedBusDisplay}...`}
                   </Text>
                 ) : locationStatus === "loading" && !routesData ? (

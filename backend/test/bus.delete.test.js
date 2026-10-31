@@ -5,6 +5,7 @@ const BusLiveLocation = require("../src/models/BusLiveLocation");
 const BusRoute = require("../src/models/BusRoute");
 const PlanMapping = require("../src/models/PlanMapping");
 const User = require("../src/models/User");
+const BusChange = require("../src/models/BusChange");
 const { deleteBus } = require("../src/controllers/bus.controller");
 
 function createResponse() {
@@ -24,6 +25,7 @@ function createResponse() {
 test("permanently deletes a bus and cleans up its dependent records", async () => {
   const originals = {
     busFindOne: Bus.findOne,
+    changeFindOne: BusChange.findOne,
     busUpdateMany: Bus.updateMany,
     busDeleteOne: Bus.deleteOne,
     userUpdateMany: User.updateMany,
@@ -39,6 +41,12 @@ test("permanently deletes a bus and cleans up its dependent records", async () =
     calls.push(["bus.findOne", filter]);
     return bus;
   };
+  BusChange.findOne = (filter) => ({
+    select: async () => {
+      calls.push(["busChange.findOne", filter]);
+      return null;
+    },
+  });
   User.updateMany = async (...args) => calls.push(["user.updateMany", ...args]);
   PlanMapping.updateMany = async (...args) => calls.push(["mapping.updateMany", ...args]);
   PlanMapping.deleteMany = async (...args) => calls.push(["mapping.deleteMany", ...args]);
@@ -55,6 +63,7 @@ test("permanently deletes a bus and cleans up its dependent records", async () =
     assert.equal(response.payload.success, true);
     assert.deepEqual(calls.map(([name]) => name), [
       "bus.findOne",
+      "busChange.findOne",
       "user.updateMany",
       "mapping.updateMany",
       "mapping.deleteMany",
@@ -63,16 +72,17 @@ test("permanently deletes a bus and cleans up its dependent records", async () =
       "location.deleteMany",
       "bus.deleteOne",
     ]);
-    assert.equal(calls[1][1].bus_no.test("bus-12"), true);
-    assert.deepEqual(calls[1][2], { $set: { bus_no: null } });
-    assert.deepEqual(calls[2][1], { member_bus_ids: bus._id });
-    assert.deepEqual(calls[2][2], { $pull: { member_bus_ids: bus._id } });
-    assert.deepEqual(calls[3][1], { root_bus_id: bus._id });
-    assert.deepEqual(calls[5][1], { bus_id: bus._id });
+    assert.equal(calls[2][1].bus_no.test("bus-12"), true);
+    assert.deepEqual(calls[2][2], { $set: { bus_no: null } });
+    assert.deepEqual(calls[3][1], { member_bus_ids: bus._id });
+    assert.deepEqual(calls[3][2], { $pull: { member_bus_ids: bus._id } });
+    assert.deepEqual(calls[4][1], { root_bus_id: bus._id });
     assert.deepEqual(calls[6][1], { bus_id: bus._id });
-    assert.deepEqual(calls[7][1], { _id: bus._id });
+    assert.deepEqual(calls[7][1], { bus_id: bus._id });
+    assert.deepEqual(calls[8][1], { _id: bus._id });
   } finally {
     Bus.findOne = originals.busFindOne;
+    BusChange.findOne = originals.changeFindOne;
     Bus.updateMany = originals.busUpdateMany;
     Bus.deleteOne = originals.busDeleteOne;
     User.updateMany = originals.userUpdateMany;

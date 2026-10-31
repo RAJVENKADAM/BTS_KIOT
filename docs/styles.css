@@ -443,6 +443,30 @@ button { color: inherit; }
 .admin-form > .button { justify-self: start; min-height: 44px; padding: 0 18px; font-size: 14px; }
 .notice { margin: 13px 0 0; padding: 11px 13px; border: 1px solid #cdebdc; border-radius: 8px; color: #16794f; background: #f0faf5; font-size: 11px; line-height: 1.5; }
 .notice-error { border-color: #f0cbcb; color: #a33d42; background: #fff6f5; }
+.change-mode-tabs { display: flex; gap: 8px; margin: 0 0 16px; padding: 5px; border: 1px solid #dce3ee; border-radius: 11px; background: #e9eef6; }
+.change-mode-tab { min-height: 40px; padding: 0 17px; border: 0; border-radius: 8px; color: #596980; background: transparent; font-size: 13px; font-weight: 600; cursor: pointer; }
+.change-mode-tab[aria-selected="true"] { color: #2058be; background: #fff; box-shadow: 0 2px 8px rgb(34 54 88 / 9%); }
+.change-form-card { margin-bottom: 27px; }
+.change-form-card .section-heading { align-items: flex-start; margin-bottom: 20px; }
+.change-impact-panel { display: grid; gap: 12px; padding: 15px; border: 1px solid #d8e4f4; border-radius: 10px; background: #f5f8fd; }
+.change-impact-panel > strong, .change-impact-panel > div > strong { color: #293d5c; font-size: 13px; }
+.change-impact-panel > p, .change-impact-panel > div > p { margin: 4px 0 0; color: #64738a; font-size: 12px; line-height: 1.55; }
+.assignment-list { display: grid; max-height: 330px; gap: 7px; overflow: auto; }
+.assignment-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(230px, .75fr); align-items: center; gap: 12px; padding: 10px 11px; border: 1px solid #e1e8f2; border-radius: 8px; background: #fff; }
+.assignment-user { display: grid; min-width: 0; gap: 3px; }
+.assignment-user strong { overflow: hidden; color: #34425b; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.assignment-user small { overflow: hidden; color: #8591a4; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.assignment-row select { width: 100%; min-height: 39px; padding: 0 9px; border: 1px solid #dce2eb; border-radius: 7px; color: #34425b; background: #fff; font-size: 12px; }
+.assignment-row select:focus { border-color: #7ca4f3; outline: 0; box-shadow: 0 0 0 3px rgb(39 104 232 / 11%); }
+.temporary-change-list { display: grid; gap: 10px; }
+.temporary-change-card { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 17px; border: 1px solid #dce3ee; border-radius: 11px; background: #fff; box-shadow: 0 4px 14px rgb(34 54 88 / 5%); }
+.temporary-change-copy { display: grid; min-width: 0; gap: 5px; }
+.change-type-pill { justify-self: start; padding: 4px 8px; border-radius: 999px; color: #235bbf; background: #eaf1ff; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+.temporary-change-copy h3 { margin: 2px 0 0; color: #253650; font-size: 15px; font-weight: 650; }
+.temporary-change-copy p { margin: 0; color: #66748a; font-size: 12px; line-height: 1.5; }
+.temporary-change-copy small { color: #8a95a8; font-size: 11px; }
+.temporary-change-card > .button { flex: 0 0 auto; }
+.bus-options-warning { grid-column: 1 / -1; margin: 0; padding: 11px 12px; border: 1px solid #f1dfb7; border-radius: 8px; color: #795b1a; background: #fff9eb; font-size: 12px; line-height: 1.5; }
 .toast { position: fixed; right: 22px; bottom: 22px; z-index: 10; max-width: min(430px, calc(100vw - 32px)); padding: 12px 16px; border: 1px solid #d6e7dd; border-radius: 10px; color: #176f4c; background: #fff; box-shadow: 0 10px 35px rgb(25 42 73 / 16%); font-size: 12px; opacity: 0; pointer-events: none; transform: translateY(8px); transition: opacity .2s, transform .2s; }
 .toast.show { opacity: 1; transform: translateY(0); }
 .toast.toast-error { border-color: #f0cbcb; color: #a33d42; }
@@ -540,6 +564,11 @@ button { color: inherit; }
   .action-grid, .form-grid { grid-template-columns: 1fr; }
   .form-card { padding: 16px; }
   .existing-records .section-heading, .record-summary { align-items: flex-start; flex-direction: column; }
+  .change-mode-tabs { width: 100%; }
+  .change-mode-tab { flex: 1; padding: 0 8px; }
+  .assignment-row { grid-template-columns: 1fr; gap: 8px; }
+  .temporary-change-card { align-items: stretch; flex-direction: column; gap: 12px; }
+  .temporary-change-card > .button { width: 100%; }
   .record-actions { width: 100%; flex-wrap: wrap; }
   .page-footer { flex-direction: column; }
   .login-layout { grid-template-columns: 1fr; }

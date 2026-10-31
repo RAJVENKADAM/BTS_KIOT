@@ -4,6 +4,10 @@ const multer = require('multer');
 const BusController = require('../controllers/bus.controller');
 const PlanMappingController = require('../controllers/planMapping.controller');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth');
+const {
+  parseBusRoutesWorkbookUpload,
+  uploadBusRoutesWorkbook,
+} = require("../middleware/spreadsheetImport");
 
 const router = express.Router();
 
@@ -118,6 +122,20 @@ router.put(
   BusController.updateBusDetails
 );
 
+router.get(
+  '/temporary-changes',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  BusController.getTemporaryBusChanges,
+);
+
+router.post(
+  '/temporary-changes/:changeId/rollback',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  BusController.rollbackTemporaryBusChange,
+);
+
 router.post(
   '/alter-bus/:busNo',
   authenticateToken,
@@ -129,6 +147,8 @@ router.post(
   '/combine-bus/:busNo',
   authenticateToken,
   authorizeRoles('superadmin'),
+  uploadBusRoutesWorkbook,
+  parseBusRoutesWorkbookUpload,
   BusController.combineBus
 );
 
