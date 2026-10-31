@@ -193,6 +193,13 @@
                 <button id="add-user-submit" class="button button-primary" type="submit">Import users</button>
               </form>
             </section>
+            <section class="existing-records">
+              <div class="section-heading">
+                <div><h2>Existing users</h2><p>Edit user details or deactivate an account.</p></div>
+                <button id="refresh-users" class="button button-quiet" type="button">Refresh users</button>
+              </div>
+              <div id="users-list" class="record-list" aria-live="polite"></div>
+            </section>
           </section>
 
           <section class="admin-page" data-page-content="add-buses" hidden>
@@ -220,6 +227,13 @@
                 <div id="add-bus-result" class="form-result" role="status" hidden></div>
                 <button id="add-bus-submit" class="button button-primary" type="submit">Create bus</button>
               </form>
+            </section>
+            <section class="existing-records">
+              <div class="section-heading">
+                <div><h2>Existing buses</h2><p>Edit bus details, update route workbooks, or change bus availability.</p></div>
+                <button id="refresh-buses" class="button button-quiet" type="button">Refresh buses</button>
+              </div>
+              <div id="buses-list" class="record-list" aria-live="polite"></div>
             </section>
           </section>
 
@@ -294,6 +308,66 @@
         </div>
       </main>
     </div>
+
+    <dialog id="edit-user-dialog" class="cluster-dialog">
+      <form id="edit-user-form">
+        <div class="dialog-heading">
+          <div><span class="eyebrow">USER MANAGEMENT</span><h2>Edit user</h2></div>
+          <button class="icon-button dialog-close" type="button" data-close-dialog="edit-user-dialog" aria-label="Close dialog">×</button>
+        </div>
+        <label class="field"><span>Full name</span><input name="name" required /></label>
+        <label class="field"><span>Role</span>
+          <select name="role" required>
+            <option value="student">Student</option>
+            <option value="primary_admin">Primary admin</option>
+            <option value="superadmin">Super admin</option>
+          </select>
+        </label>
+        <label class="field"><span>Bus number</span><input name="bus_no" /></label>
+        <div id="edit-user-error" class="notice notice-error" role="alert" hidden></div>
+        <div class="dialog-actions">
+          <button class="button button-quiet" type="button" data-close-dialog="edit-user-dialog">Cancel</button>
+          <button id="edit-user-submit" class="button button-primary" type="submit">Save user</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="edit-bus-dialog" class="cluster-dialog">
+      <form id="edit-bus-form">
+        <div class="dialog-heading">
+          <div><span class="eyebrow">BUS MANAGEMENT</span><h2>Edit bus details</h2></div>
+          <button class="icon-button dialog-close" type="button" data-close-dialog="edit-bus-dialog" aria-label="Close dialog">×</button>
+        </div>
+        <label class="field"><span>Display number</span><input name="previewNumber" /></label>
+        <label class="field"><span>GPS device ID</span><input name="gpsDeviceId" required /></label>
+        <label class="field"><span>Registration number</span><input name="regNo" /></label>
+        <div id="edit-bus-error" class="notice notice-error" role="alert" hidden></div>
+        <div class="dialog-actions">
+          <button class="button button-quiet" type="button" data-close-dialog="edit-bus-dialog">Cancel</button>
+          <button id="edit-bus-submit" class="button button-primary" type="submit">Save bus</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="edit-routes-dialog" class="cluster-dialog">
+      <form id="edit-routes-form">
+        <div class="dialog-heading">
+          <div><span class="eyebrow">BUS MANAGEMENT</span><h2>Update route workbook</h2></div>
+          <button class="icon-button dialog-close" type="button" data-close-dialog="edit-routes-dialog" aria-label="Close dialog">×</button>
+        </div>
+        <p id="edit-routes-bus-label" class="muted"></p>
+        <label class="field">
+          <span>Replacement route workbook</span>
+          <input name="routesFile" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required />
+          <small class="field-hint">Routes in this workbook will replace the bus’s existing uploaded routes.</small>
+        </label>
+        <div id="edit-routes-error" class="notice notice-error" role="alert" hidden></div>
+        <div class="dialog-actions">
+          <button class="button button-quiet" type="button" data-close-dialog="edit-routes-dialog">Cancel</button>
+          <button id="edit-routes-submit" class="button button-primary" type="submit">Replace routes</button>
+        </div>
+      </form>
+    </dialog>
 
     <dialog id="cluster-dialog" class="cluster-dialog">
       <form id="cluster-form" method="dialog">

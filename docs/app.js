@@ -8,6 +8,10 @@
     token: sessionStorage.getItem(TOKEN_KEY),
     user: null,
     data: { activePlan: "PLAN A", buses: [], clusters: [] },
+    users: [],
+    adminBuses: [],
+    selectedUserId: null,
+    selectedBusNo: null,
     selectedPlan: "PLAN B",
     selectedGlobalPlan: null,
     page: "dashboard",
@@ -112,6 +116,8 @@
     state.token = null;
     state.user = null;
     state.data = { activePlan: "PLAN A", buses: [], clusters: [] };
+    state.users = [];
+    state.adminBuses = [];
     sessionStorage.removeItem(TOKEN_KEY);
   }
 
@@ -202,6 +208,7 @@
       }
       state.selectedGlobalPlan = state.data.activePlan;
       render();
+      await loadAdminRecords();
       byId("last-updated").textContent = `Updated ${new Intl.DateTimeFormat(undefined, {
         hour: "numeric",
         minute: "2-digit",
@@ -217,6 +224,90 @@
       refresh.disabled = false;
       refresh.innerHTML = '<span aria-hidden="true">↻</span> Refresh';
     }
+  }
+
+  async function loadAdminRecords() {
+    const usersList = byId("users-list");
+    const busesList = byId("buses-list");
+    if (usersList) usersList.innerHTML = '<div class="loading-state">Loading users…</div>';
+    if (busesList) busesList.innerHTML = '<div class="loading-state">Loading buses…</div>';
+    const [usersResult, busesResult] = await Promise.allSettled([
+      request("/api/superadmin/users"),
+      request("/api/bus/get-all-buses"),
+    ]);
+
+    if (usersResult.status === "fulfilled") {
+      state.users = usersResult.value.users || [];
+      renderUsers();
+    } else if (usersList) {
+      usersList.innerHTML = `<div class="empty-state"><strong>Could not load users</strong><p>${escapeHtml(usersResult.reason.message || "Refresh and try again.")}</p></div>`;
+    }
+
+    if (busesResult.status === "fulfilled") {
+      const buses = [
+        ...(busesResult.value.buses || []),
+        ...(busesResult.value.alteredBuses || []),
+      ];
+      state.adminBuses = buses.map((bus) => {
+        const mapping = state.data.buses.find(
+          (item) => String(item.busNo || "").toUpperCase() === String(bus.busNo || "").toUpperCase(),
+        );
+        return {
+          ...bus,
+          id: mapping?.id,
+          plans: mapping?.plans || [],
+          assignedUsers: mapping?.assignedUsers || 0,
+        };
+      });
+      renderBuses();
+    } else if (busesList) {
+      busesList.innerHTML = `<div class="empty-state"><strong>Could not load buses</strong><p>${escapeHtml(busesResult.reason.message || "Refresh and try again.")}</p></div>`;
+    }
+  }
+
+  function renderUsers() {
+    const container = byId("users-list");
+    if (!container) return;
+    if (!state.users.length) {
+      container.innerHTML = '<div class="empty-state">No active users found.</div>';
+      return;
+    }
+    container.innerHTML = state.users.map((user) => `
+      <article class="record-card">
+        <div class="record-copy">
+          <strong>${escapeHtml(user.name || "Unnamed user")}</strong>
+          <span>${escapeHtml(user.email || "")}</span>
+          <small>${escapeHtml(user.role || "—")} · Bus ${escapeHtml(user.bus_no || "—")}</small>
+        </div>
+        <div class="record-actions">
+          <button type="button" class="button button-quiet" data-user-action="edit" data-user-id="${escapeHtml(user.id)}">Edit</button>
+          <button type="button" class="text-button danger" data-user-action="deactivate" data-user-id="${escapeHtml(user.id)}">Deactivate</button>
+        </div>
+      </article>
+    `).join("");
+  }
+
+  function renderBuses() {
+    const container = byId("buses-list");
+    if (!container) return;
+    if (!state.adminBuses.length) {
+      container.innerHTML = '<div class="empty-state">No buses found.</div>';
+      return;
+    }
+    container.innerHTML = state.adminBuses.map((bus) => `
+      <article class="record-card">
+        <div class="record-copy">
+          <strong>${escapeHtml(busName(bus))} · ${escapeHtml(bus.busNo || "—")}</strong>
+          <span>${escapeHtml(bus.status || "unknown")} · ${escapeHtml((bus.plans || []).join(", ") || "No routes uploaded")}</span>
+          <small>GPS ${escapeHtml(bus.gpsDeviceId || "—")} · ${escapeHtml(bus.regNo || "No registration")} · ${escapeHtml(bus.assignedUsers || 0)} assigned riders</small>
+        </div>
+        <div class="record-actions">
+          <button type="button" class="button button-quiet" data-bus-action="edit" data-bus-no="${escapeHtml(bus.busNo)}">Edit details</button>
+          <button type="button" class="button button-quiet" data-bus-action="routes" data-bus-no="${escapeHtml(bus.busNo)}">Edit routes</button>
+          <button type="button" class="text-button" data-bus-action="${bus.status === "active" ? "deactivate" : "activate"}" data-bus-no="${escapeHtml(bus.busNo)}">${bus.status === "active" ? "Deactivate" : "Activate"}</button>
+        </div>
+      </article>
+    `).join("");
   }
 
   function activeClusters() {
@@ -587,6 +678,170 @@
     }
   }
 
+  function openUserEditor(userId) {
+    const user = state.users.find((item) => item.id === userId);
+    if (!user) return;
+    state.selectedUserId = userId;
+    const form = byId("edit-user-form");
+    form.elements.name.value = user.name || "";
+    form.elements.role.value = user.role || "student";
+    form.elements.bus_no.value = user.bus_no || "";
+    byId("edit-user-error").hidden = true;
+    byId("edit-user-dialog").showModal();
+  }
+
+  async function saveUserEdit(event) {
+    event.preventDefault();
+    const submit = byId("edit-user-submit");
+    const error = byId("edit-user-error");
+    const form = event.currentTarget;
+    error.hidden = true;
+    submit.disabled = true;
+    submit.textContent = "Saving…";
+    try {
+      await request(`/api/superadmin/users/${encodeURIComponent(state.selectedUserId)}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          name: form.elements.name.value.trim(),
+          role: form.elements.role.value,
+          bus_no: form.elements.bus_no.value.trim() || null,
+        }),
+      });
+      byId("edit-user-dialog").close();
+      showToast("User updated.");
+      await loadAdminRecords();
+    } catch (requestError) {
+      error.textContent = requestError.message || "Could not update this user.";
+      error.hidden = false;
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "Save user";
+    }
+  }
+
+  async function deactivateUser(userId) {
+    const user = state.users.find((item) => item.id === userId);
+    if (!user || !window.confirm(`Deactivate ${user.name || user.email}?`)) return;
+    try {
+      await request(`/api/superadmin/users/${encodeURIComponent(userId)}`, {
+        method: "DELETE",
+      });
+      showToast("User deactivated.");
+      await loadAdminRecords();
+    } catch (requestError) {
+      showToast(requestError.message || "Could not deactivate this user.", true);
+    }
+  }
+
+  function openBusEditor(busNo) {
+    const bus = state.adminBuses.find((item) => item.busNo === busNo);
+    if (!bus) return;
+    state.selectedBusNo = busNo;
+    const form = byId("edit-bus-form");
+    form.elements.previewNumber.value = bus.previewNumber ?? "";
+    form.elements.gpsDeviceId.value = bus.gpsDeviceId ?? "";
+    form.elements.regNo.value = bus.regNo ?? "";
+    byId("edit-bus-error").hidden = true;
+    byId("edit-bus-dialog").showModal();
+  }
+
+  async function saveBusEdit(event) {
+    event.preventDefault();
+    const submit = byId("edit-bus-submit");
+    const error = byId("edit-bus-error");
+    const form = event.currentTarget;
+    error.hidden = true;
+    submit.disabled = true;
+    submit.textContent = "Saving…";
+    try {
+      await request(`/api/bus/update-bus-details/${encodeURIComponent(state.selectedBusNo)}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          previewNumber: form.elements.previewNumber.value.trim() || null,
+          gpsDeviceId: form.elements.gpsDeviceId.value.trim(),
+          regNo: form.elements.regNo.value.trim() || null,
+        }),
+      });
+      byId("edit-bus-dialog").close();
+      showToast("Bus details updated.");
+      await loadData({ quiet: true });
+    } catch (requestError) {
+      error.textContent = requestError.message || "Could not update this bus.";
+      error.hidden = false;
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "Save bus";
+    }
+  }
+
+  function openRouteEditor(busNo) {
+    const bus = state.adminBuses.find((item) => item.busNo === busNo);
+    if (!bus) return;
+    state.selectedBusNo = busNo;
+    byId("edit-routes-form").reset();
+    byId("edit-routes-bus-label").textContent = `${busName(bus)} · existing routes will be replaced`;
+    byId("edit-routes-error").hidden = true;
+    byId("edit-routes-dialog").showModal();
+  }
+
+  async function replaceBusRoutes(event) {
+    event.preventDefault();
+    const submit = byId("edit-routes-submit");
+    const error = byId("edit-routes-error");
+    const form = event.currentTarget;
+    const bus = state.adminBuses.find((item) => item.busNo === state.selectedBusNo);
+    const file = form.elements.routesFile.files?.[0];
+    error.hidden = true;
+    if (!bus || !file) {
+      error.textContent = "Choose a route workbook before continuing.";
+      error.hidden = false;
+      return;
+    }
+
+    const payload = new FormData();
+    payload.set("busNo", bus.busNo);
+    payload.set("previewNumber", bus.previewNumber ?? "");
+    payload.set("deviceId", bus.gpsDeviceId ?? "");
+    payload.set("regNo", bus.regNo ?? "");
+    payload.set("replaceRoutes", "true");
+    payload.set("routesFile", file);
+    submit.disabled = true;
+    submit.textContent = "Updating…";
+    try {
+      const response = await request("/api/bus/import-routes", {
+        method: "POST",
+        body: payload,
+      });
+      const failedRows = Number(response.summary?.failedRows || 0);
+      if (failedRows) {
+        throw new Error(`The route workbook had ${failedRows} invalid row(s). Review the workbook; successfully processed routes may already have been saved.`);
+      }
+      byId("edit-routes-dialog").close();
+      showToast("Bus routes replaced.");
+      await loadData({ quiet: true });
+    } catch (requestError) {
+      error.textContent = requestError.message || "Could not replace the bus routes.";
+      error.hidden = false;
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "Replace routes";
+    }
+  }
+
+  async function changeBusStatus(busNo, activate) {
+    const action = activate ? "activate" : "deactivate";
+    if (!window.confirm(`${activate ? "Activate" : "Deactivate"} bus ${busNo}?`)) return;
+    try {
+      await request(`/api/bus/${action}-bus/${encodeURIComponent(busNo)}`, {
+        method: "PUT",
+      });
+      showToast(`Bus ${busNo} ${activate ? "activated" : "deactivated"}.`);
+      await loadData({ quiet: true });
+    } catch (requestError) {
+      showToast(requestError.message || `Could not ${action} this bus.`, true);
+    }
+  }
+
   function startDrag(event) {
     const node = event.target.closest("[data-bus-id]");
     if (!node) return;
@@ -648,6 +903,29 @@
     byId("apply-global-plan").addEventListener("click", applyGlobalPlan);
     byId("add-user-form").addEventListener("submit", addUser);
     byId("add-bus-form").addEventListener("submit", addBus);
+    byId("refresh-users").addEventListener("click", loadAdminRecords);
+    byId("refresh-buses").addEventListener("click", loadData);
+    byId("edit-user-form").addEventListener("submit", saveUserEdit);
+    byId("edit-bus-form").addEventListener("submit", saveBusEdit);
+    byId("edit-routes-form").addEventListener("submit", replaceBusRoutes);
+    byId("users-list").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-user-action]");
+      if (!button) return;
+      if (button.dataset.userAction === "edit") openUserEditor(button.dataset.userId);
+      if (button.dataset.userAction === "deactivate") deactivateUser(button.dataset.userId);
+    });
+    byId("buses-list").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-bus-action]");
+      if (!button) return;
+      const { busAction, busNo } = button.dataset;
+      if (busAction === "edit") openBusEditor(busNo);
+      if (busAction === "routes") openRouteEditor(busNo);
+      if (busAction === "activate") changeBusStatus(busNo, true);
+      if (busAction === "deactivate") changeBusStatus(busNo, false);
+    });
+    document.querySelectorAll("[data-close-dialog]").forEach((button) => {
+      button.addEventListener("click", () => byId(button.dataset.closeDialog).close());
+    });
     document.querySelectorAll(".nav-link[data-page]").forEach((link) => {
       link.addEventListener("click", (event) => {
         event.preventDefault();

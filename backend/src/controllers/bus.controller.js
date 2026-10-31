@@ -473,6 +473,7 @@ async function getAllBuses(req, res) {
         previewNumber: bus.preview_number,
         status: bus.status,
         gpsDeviceId: bus.gps_device_id,
+        regNo: bus.reg_no,
         mobileLive: bus.mobile_live,
         latitude: location?.latitude ?? null,
         longitude: location?.longitude ?? null,
@@ -1295,17 +1296,19 @@ async function updateBusDetails(req, res) {
         .json({ success: false, error: `Bus ${busNo} not found` });
     }
 
-    if (previewNumber !== undefined && previewNumber !== null) {
-      const exists = await Bus.findOne({
-        preview_number: previewNumber,
-        bus_no: { $ne: bus.bus_no },
-      });
-      if (exists) {
-        return res
-          .status(400)
-          .json({ success: false, error: "Preview number already in use" });
+    if (previewNumber !== undefined) {
+      if (previewNumber !== null && previewNumber !== "") {
+        const exists = await Bus.findOne({
+          preview_number: previewNumber,
+          bus_no: { $ne: bus.bus_no },
+        });
+        if (exists) {
+          return res
+            .status(400)
+            .json({ success: false, error: "Preview number already in use" });
+        }
       }
-      bus.preview_number = previewNumber;
+      bus.preview_number = previewNumber || null;
     }
 
     if (

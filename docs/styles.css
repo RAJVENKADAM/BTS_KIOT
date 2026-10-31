@@ -344,6 +344,18 @@ button { color: inherit; }
 .action-card strong { color: #26354d; font-size: 16px; }
 .action-card span { color: #6f7d92; font-size: 14px; line-height: 1.5; }
 .form-card { padding: 22px; border: 1px solid var(--line); border-radius: 12px; background: #fff; box-shadow: var(--shadow); }
+.existing-records { margin-top: 30px; }
+.existing-records .section-heading { align-items: center; margin-bottom: 12px; }
+.existing-records .section-heading h2 { margin: 0 0 5px; color: #26354d; font-size: 19px; }
+.existing-records .section-heading p { margin: 0; color: #78849a; font-size: 13px; }
+.record-list { display: grid; gap: 9px; }
+.record-card { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 15px 17px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.record-copy { display: grid; min-width: 0; gap: 4px; }
+.record-copy strong { overflow-wrap: anywhere; color: #34425b; font-size: 14px; }
+.record-copy span { overflow-wrap: anywhere; color: #66748a; font-size: 13px; }
+.record-copy small { overflow-wrap: anywhere; color: #8994a7; font-size: 12px; }
+.record-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; }
+.record-actions .button { min-height: 34px; padding: 0 10px; }
 .admin-form { display: grid; gap: 20px; }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 16px; }
 .admin-form .field { min-width: 0; margin: 0; }
@@ -445,6 +457,8 @@ button { color: inherit; }
   .cluster-list { grid-template-columns: 1fr; }
   .action-grid, .form-grid { grid-template-columns: 1fr; }
   .form-card { padding: 16px; }
+  .existing-records .section-heading, .record-card { align-items: flex-start; flex-direction: column; }
+  .record-actions { width: 100%; flex-wrap: wrap; }
   .page-footer { flex-direction: column; }
   .login-layout { grid-template-columns: 1fr; }
   .login-brand { min-height: 245px; padding: 21px 24px; }

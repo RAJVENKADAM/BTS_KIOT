@@ -1,5 +1,22 @@
 const User = require('../models/User');
 
+async function getUsers(req, res) {
+  try {
+    const users = await User.find({ is_active: true })
+      .select('name email role bus_no is_active')
+      .sort({ name: 1, email: 1 })
+      .lean();
+
+    return res.status(200).json({
+      success: true,
+      users: users.map((user) => ({ ...user, id: String(user._id) })),
+    });
+  } catch (error) {
+    console.error('getUsers error:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+}
+
 async function deactivateUser(req, res) {
   try {
     const { id } = req.params;
@@ -60,7 +77,7 @@ async function updateUser(req, res) {
 }
 
 module.exports = {
+  getUsers,
   deactivateUser,
   updateUser,
 };
-

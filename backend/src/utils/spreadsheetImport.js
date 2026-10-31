@@ -100,6 +100,9 @@ function parseBusRoutesWorkbook(buffer) {
       const arrivalTime = String(rawTime ?? "").trim()
         ? formatArrivalTime(rawTime)
         : null;
+      if (arrivalTime && !/^([1-9]|1[0-2]):[0-5]\d(AM|PM)$/i.test(arrivalTime)) {
+        throw new Error(`Invalid arrival time "${arrivalTime}" for ${plan}. Use a valid time such as 8:15AM.`);
+      }
       stops.push({
         stop_name: stopName,
         stop_order: stops.length + 1,

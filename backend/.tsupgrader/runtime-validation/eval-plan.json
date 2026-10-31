@@ -1,0 +1,37 @@
+{
+  "projectType": "server",
+  "setup": [
+    {
+      "command": "npm",
+      "args": ["ci"],
+      "timeoutSeconds": 600
+    }
+  ],
+  "assertions": [
+    {
+      "name": "health-endpoint-200",
+      "kind": "http-probe",
+      "startCommand": "npm",
+      "startArgs": ["run", "start"],
+      "env": {
+        "HOST": "127.0.0.1",
+        "PORT": "5081",
+        "JWT_SECRET": "runtime-validation-only-secret-key-32-chars",
+        "MONGODB_URI": "mongodb://127.0.0.1:27017/bts_runtime_validation"
+      },
+      "url": "http://127.0.0.1:5081/health",
+      "verificationMethod": "http-status",
+      "expected": "200",
+      "timeoutSeconds": 60
+    },
+    {
+      "name": "tests-pass",
+      "kind": "process",
+      "command": "npm",
+      "args": ["test"],
+      "verificationMethod": "test-results",
+      "expected": "0",
+      "timeoutSeconds": 300
+    }
+  ]
+}

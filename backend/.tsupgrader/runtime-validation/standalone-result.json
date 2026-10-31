@@ -1,0 +1,89 @@
+{
+  "planHash": "6f92425369c8f5b2d891b92de923a5d454682705ed88897f60eec6b91c97c76a",
+  "phase": "standalone",
+  "recordedAtUtc": "2026-10-31T04:48:12.6645798Z",
+  "retryCount": 0,
+  "resetBaseline": false,
+  "complete": true,
+  "result": {
+    "setupSucceeded": true,
+    "setupDurationMs": 46916,
+    "setupFailureOutput": null,
+    "assertions": [
+      {
+        "name": "health-endpoint-200",
+        "kind": "http-probe",
+        "verificationMethod": "http-status",
+        "passed": true,
+        "timedOut": false,
+        "skipped": false,
+        "skippedReason": null,
+        "exitCode": null,
+        "outputSample": "HTTP 200\n{\u0022status\u0022:\u0022OK\u0022,\u0022message\u0022:\u0022BTMS Backend is running\u0022}\n--- server output ---\n\r\n\u003E bts-backend@1.0.0 start\r\n\u003E node server.js\r\n\r\n\u2705 Socket.IO instance set globally\r\nServer is running on http://127.0.0.1:5081\r\nAccessible at: http://localhost:5081\r\nMobile access: http://127.0.0.1:5081 (ensure same WiFi network)\r\nHealth check: curl http://127.0.0.1:5081/health\r\n\u001B[0mGET /health \u001B[32m200\u001B[0m 8.148 ms - 51\u001B[0m\r\n",
+        "durationMs": 17840
+      },
+      {
+        "name": "tests-pass",
+        "kind": "process",
+        "verificationMethod": "test-results",
+        "passed": true,
+        "timedOut": false,
+        "skipped": false,
+        "skippedReason": null,
+        "exitCode": 0,
+        "outputSample": "\r\n\u003E bts-backend@1.0.0 test\r\n\u003E node --test\r\n\r\n\u2714 authenticateToken rejects missing authorization (1.7946ms)\r\n\u2714 authorizeRoles rejects a non-authorized role (0.5346ms)\r\n\u2714 merges plans and unique stops, keeping source stops before target-only stops (13.4428ms)\r\n\u2714 returns source routes when the replacement bus has no routes (0.4491ms)\r\n\u2714 an active assigned bus keeps its own route despite another bus altering into it (0.4712ms)\r\n\u2714 an assigned altered bus uses the explicitly selected replacement route (0.4035ms)\r\n\u2714 an altered replacement uses the original bus routes instead of its own (0.69ms)\r\n\u2714 alteration routes exclude replacement routes and combined routes (0.4619ms)\r\n\u2714 combined bus routes still include both buses\u0027 stops (0.4706ms)\r\n\u2714 an explicitly selected combined route set replaces the replacement bus routes (0.4006ms)\r\n\u2714 an explicitly selected uploaded route set replaces both buses\u0027 routes (0.5226ms)\r\n\u2714 merged routes deduplicate by physical stopId and preserve central references (0.7096ms)\r\n\u2714 validates a cluster root and Plan A-only member buses (9.7226ms)\r\n\u2714 rejects a root without the target plan and members that are not Plan A-only (1.0394ms)\r\n\u2714 rejects a bus mapped into multiple clusters for one plan (0.4804ms)\r\n\u2714 resolves mapped buses to the selected plan root only (1.5115ms)\r\n\u2714 reports assigned buses without an effective route before a plan change (0.7332ms)\r\n\u2714 normalizes imported stop times and rejects malformed values (1.5742ms)\r\n\u2714 route edits on a combined source affect its own assigned students (3.4694ms)\r\n\u2714 route edits on a combined source do not notify students when it uses target or custom routes (0.4045ms)\r\n\u2714 target route edits include each combined bus using target stops (0.3562ms)\r\n\u2714 target route edits include altered buses only when they explicitly use target stops (0.4019ms)\r\n\u2714 selects the source bus route set (1.9153ms)\r\n\u2714 selects the replacement bus route set (0.8382ms)\r\n\u2714 selects uploaded routes without exposing their database subdocuments (2.062ms)\r\n\u2714 returns null when an existing change has no route selection (0.3082ms)\r\n\u2714 parses users using the existing mobile Excel column order (52.475ms)\r\n\u2714 parses plan route columns and Excel time values (13.813ms)\r\n\u2714 normalizes typed 24-hour arrival times to the API\u0027s accepted format (5.057ms)\r\n\u2714 exports each stop name once regardless of casing and whitespace (5.5436ms)\r\n\u2714 upserts only the stops present in the replacement sheet (2.3708ms)\r\n\u2714 normalizes stop names case-insensitively and collapses whitespace (2.323ms)\r\n\u2139 tests 32\r\n\u2139 suites 0\r\n\u2139 pass 32\r\n\u2139 fail 0\r\n\u2139 cancelled 0\r\n\u2139 skipped 0\r\n\u2139 todo 0\r\n\u2139 duration_ms 1238.1748\r\n",
+        "durationMs": 3034,
+        "testResults": {
+          "testFramework": "unknown",
+          "runnerDetectedFrom": "none",
+          "testsTotal": 0,
+          "testsPassed": 0,
+          "testsFailed": 0,
+          "testsSkipped": 0,
+          "parseFailed": true
+        }
+      }
+    ],
+    "executions": [
+      {
+        "source": "setup[0]",
+        "resolvedExecutable": "C:\\Program Files\\nodejs\\npm.CMD",
+        "args": [
+          "ci"
+        ],
+        "cwd": "E:\\My Works\\College Products\\BTS\\backend",
+        "env": {},
+        "prependPath": [],
+        "platform": "win32"
+      },
+      {
+        "source": "health-endpoint-200",
+        "resolvedExecutable": "C:\\Program Files\\nodejs\\npm.CMD",
+        "args": [
+          "run",
+          "start"
+        ],
+        "cwd": "E:\\My Works\\College Products\\BTS\\backend",
+        "env": {
+          "HOST": "127.0.0.1",
+          "PORT": "5081",
+          "JWT_SECRET": "\u003Credacted\u003E",
+          "MONGODB_URI": "mongodb://127.0.0.1:27017/bts_runtime_validation"
+        },
+        "prependPath": [],
+        "platform": "win32"
+      },
+      {
+        "source": "tests-pass",
+        "resolvedExecutable": "C:\\Program Files\\nodejs\\npm.CMD",
+        "args": [
+          "test"
+        ],
+        "cwd": "E:\\My Works\\College Products\\BTS\\backend",
+        "env": {},
+        "prependPath": [],
+        "platform": "win32"
+      }
+    ]
+  }
+}
