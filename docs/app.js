@@ -208,7 +208,6 @@
       }
       state.selectedGlobalPlan = state.data.activePlan;
       render();
-      await loadAdminRecords();
       byId("last-updated").textContent = `Updated ${new Intl.DateTimeFormat(undefined, {
         hour: "numeric",
         minute: "2-digit",
@@ -224,6 +223,7 @@
       refresh.disabled = false;
       refresh.innerHTML = '<span aria-hidden="true">↻</span> Refresh';
     }
+    await loadAdminRecords();
   }
 
   async function loadAdminRecords() {
@@ -269,22 +269,30 @@
     const container = byId("users-list");
     if (!container) return;
     if (!state.users.length) {
-      container.innerHTML = '<div class="empty-state">No active users found.</div>';
+      container.innerHTML = '<div class="empty-state">No users found.</div>';
       return;
     }
-    container.innerHTML = state.users.map((user) => `
-      <article class="record-card">
-        <div class="record-copy">
-          <strong>${escapeHtml(user.name || "Unnamed user")}</strong>
-          <span>${escapeHtml(user.email || "")}</span>
-          <small>${escapeHtml(user.role || "—")} · Bus ${escapeHtml(user.bus_no || "—")}</small>
-        </div>
-        <div class="record-actions">
-          <button type="button" class="button button-quiet" data-user-action="edit" data-user-id="${escapeHtml(user.id)}">Edit</button>
-          <button type="button" class="text-button danger" data-user-action="deactivate" data-user-id="${escapeHtml(user.id)}">Deactivate</button>
-        </div>
-      </article>
-    `).join("");
+    container.innerHTML = state.users.map((user) => {
+      const active = user.is_active !== false;
+      return `
+        <details class="record-card">
+          <summary class="record-summary">
+            <div class="record-copy">
+              <strong>${escapeHtml(user.name || "Unnamed user")}</strong>
+              <span>${escapeHtml(user.email || "")}</span>
+              <small>${escapeHtml(user.role || "—")} · Bus ${escapeHtml(user.bus_no || "—")} · ${active ? "Active" : "Inactive"}</small>
+            </div>
+            <span class="record-expand-label">Manage</span>
+          </summary>
+          <div class="record-actions">
+            <button type="button" class="button button-quiet" data-user-action="edit" data-user-id="${escapeHtml(user.id)}">Edit</button>
+            ${active
+              ? `<button type="button" class="text-button danger" data-user-action="deactivate" data-user-id="${escapeHtml(user.id)}">Deactivate</button>`
+              : `<button type="button" class="text-button" data-user-action="activate" data-user-id="${escapeHtml(user.id)}">Activate</button>`}
+          </div>
+        </details>
+      `;
+    }).join("");
   }
 
   function renderBuses() {
@@ -295,18 +303,21 @@
       return;
     }
     container.innerHTML = state.adminBuses.map((bus) => `
-      <article class="record-card">
-        <div class="record-copy">
-          <strong>${escapeHtml(busName(bus))} · ${escapeHtml(bus.busNo || "—")}</strong>
-          <span>${escapeHtml(bus.status || "unknown")} · ${escapeHtml((bus.plans || []).join(", ") || "No routes uploaded")}</span>
-          <small>GPS ${escapeHtml(bus.gpsDeviceId || "—")} · ${escapeHtml(bus.regNo || "No registration")} · ${escapeHtml(bus.assignedUsers || 0)} assigned riders</small>
-        </div>
+      <details class="record-card">
+        <summary class="record-summary">
+          <div class="record-copy">
+            <strong>${escapeHtml(busName(bus))} · ${escapeHtml(bus.busNo || "—")}</strong>
+            <span>${escapeHtml(bus.status || "unknown")} · ${escapeHtml((bus.plans || []).join(", ") || "No routes uploaded")}</span>
+            <small>GPS ${escapeHtml(bus.gpsDeviceId || "—")} · ${escapeHtml(bus.regNo || "No registration")} · ${escapeHtml(bus.assignedUsers || 0)} assigned riders</small>
+          </div>
+          <span class="record-expand-label">Manage</span>
+        </summary>
         <div class="record-actions">
           <button type="button" class="button button-quiet" data-bus-action="edit" data-bus-no="${escapeHtml(bus.busNo)}">Edit details</button>
           <button type="button" class="button button-quiet" data-bus-action="routes" data-bus-no="${escapeHtml(bus.busNo)}">Edit routes</button>
           <button type="button" class="text-button" data-bus-action="${bus.status === "active" ? "deactivate" : "activate"}" data-bus-no="${escapeHtml(bus.busNo)}">${bus.status === "active" ? "Deactivate" : "Activate"}</button>
         </div>
-      </article>
+      </details>
     `).join("");
   }
 
@@ -733,6 +744,19 @@
     }
   }
 
+  async function activateUser(userId) {
+    try {
+      await request(`/api/superadmin/users/${encodeURIComponent(userId)}`, {
+        method: "PUT",
+        body: JSON.stringify({ is_active: true }),
+      });
+      showToast("User activated.");
+      await loadAdminRecords();
+    } catch (requestError) {
+      showToast(requestError.message || "Could not activate this user.", true);
+    }
+  }
+
   function openBusEditor(busNo) {
     const bus = state.adminBuses.find((item) => item.busNo === busNo);
     if (!bus) return;
@@ -913,6 +937,7 @@
       if (!button) return;
       if (button.dataset.userAction === "edit") openUserEditor(button.dataset.userId);
       if (button.dataset.userAction === "deactivate") deactivateUser(button.dataset.userId);
+      if (button.dataset.userAction === "activate") activateUser(button.dataset.userId);
     });
     byId("buses-list").addEventListener("click", (event) => {
       const button = event.target.closest("[data-bus-action]");

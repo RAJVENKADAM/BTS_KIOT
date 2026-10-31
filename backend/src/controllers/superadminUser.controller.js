@@ -2,7 +2,7 @@ const User = require('../models/User');
 
 async function getUsers(req, res) {
   try {
-    const users = await User.find({ is_active: true })
+    const users = await User.find({})
       .select('name email role bus_no is_active')
       .sort({ name: 1, email: 1 })
       .lean();
@@ -40,12 +40,19 @@ async function deactivateUser(req, res) {
 async function updateUser(req, res) {
   try {
     const { id } = req.params;
-    const { name, role, bus_no } = req.body || {};
+    const { name, role, bus_no, is_active } = req.body || {};
 
     const update = {};
     if (name !== undefined) update.name = String(name).trim();
     if (role !== undefined) update.role = role;
     if (bus_no !== undefined) update.bus_no = bus_no ? String(bus_no).trim() : null;
+    if (is_active !== undefined) {
+      if (typeof is_active !== 'boolean') {
+        return res.status(400).json({ success: false, error: 'is_active must be a boolean' });
+      }
+      update.is_active = is_active;
+      if (is_active) update.deleted_by_user = false;
+    }
 
     // Never allow role to be undefined in update; mongo schema will validate.
     if (!Object.keys(update).length) {

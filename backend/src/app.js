@@ -38,6 +38,8 @@ const corsOrigins = [
     .map((origin) => origin.trim())
     .filter(Boolean),
   "https://rajvenkadam.github.io",
+  "http://localhost:8765",
+  "http://127.0.0.1:8765",
 ];
 const corsOptions = {
   origin: [...new Set(corsOrigins)],
