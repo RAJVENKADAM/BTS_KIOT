@@ -12,6 +12,7 @@
     adminBuses: [],
     selectedUserId: null,
     selectedBusNo: null,
+    busChangeAction: null,
     selectedPlan: "PLAN B",
     selectedGlobalPlan: null,
     page: "dashboard",
@@ -47,6 +48,7 @@
       response = await fetch(`${API_BASE_URL}${path}`, {
         ...options,
         headers,
+        cache: "no-store",
         mode: "cors",
       });
     } catch (error) {
@@ -315,6 +317,12 @@
         <div class="record-actions">
           <button type="button" class="button button-quiet" data-bus-action="edit" data-bus-no="${escapeHtml(bus.busNo)}">Edit details</button>
           <button type="button" class="button button-quiet" data-bus-action="routes" data-bus-no="${escapeHtml(bus.busNo)}">Edit routes</button>
+          ${bus.isAltered
+            ? `<button type="button" class="button button-quiet" data-bus-action="restore" data-bus-no="${escapeHtml(bus.busNo)}">Restore original bus</button>`
+            : bus.status === "active"
+              ? `<button type="button" class="button button-quiet" data-bus-action="alter" data-bus-no="${escapeHtml(bus.busNo)}">Alter bus</button>
+                 <button type="button" class="button button-quiet" data-bus-action="combine" data-bus-no="${escapeHtml(bus.busNo)}">Combine bus</button>`
+              : ""}
           <button type="button" class="text-button danger" data-bus-action="delete" data-bus-no="${escapeHtml(bus.busNo)}">Delete bus</button>
         </div>
       </details>
@@ -570,10 +578,16 @@
     button.textContent = "Applying…";
     hideNotice();
     try {
-      await request("/api/bus/global-plan", {
+      const result = await request("/api/bus/global-plan", {
         method: "PUT",
         body: JSON.stringify({ plan }),
       });
+      if (result.activePlan !== plan) {
+        throw new Error("The server did not confirm the selected operating service.");
+      }
+      state.data.activePlan = result.activePlan;
+      state.selectedGlobalPlan = result.activePlan;
+      renderGlobalService();
       showToast("Operating service updated. Assigned riders have been notified.");
       await loadData({ quiet: true });
     } catch (error) {
@@ -866,6 +880,107 @@
     }
   }
 
+  function openBusChangeDialog(busNo, action) {
+    const source = state.adminBuses.find((bus) => bus.busNo === busNo);
+    if (!source) return;
+
+    state.selectedBusNo = busNo;
+    state.busChangeAction = action;
+    const form = byId("bus-change-form");
+    form.reset();
+    byId("bus-change-title").textContent =
+    action === "combine" ? "Combine buses" : "Alter bus";
+    byId("bus-change-source").textContent = busName(source);
+    byId("bus-change-description").textContent =
+    action === "combine"
+      ? "Both buses' riders will use the replacement bus location. Choose which bus's routes the combined service should follow."
+      : "Riders keep this bus and its original stops, while its live location comes from the replacement bus.";
+    byId("bus-change-target").innerHTML = [
+    '<option value="">Choose an active replacement bus</option>',
+    ...state.adminBuses
+      .filter((bus) =>
+        bus.busNo !== source.busNo &&
+        bus.status === "active" &&
+        !bus.isAltered,
+      )
+      .map((bus) =>
+        `<option value="${escapeHtml(bus.busNo)}">${escapeHtml(busName(bus))} · ${escapeHtml(bus.busNo)}</option>`,
+      ),
+    ].join("");
+    byId("bus-change-route-field").hidden = action !== "combine";
+    byId("bus-change-route-source-label").textContent = `${busName(source)} routes`;
+    byId("bus-change-route-target-label").textContent = "Replacement bus routes";
+    byId("bus-change-error").hidden = true;
+    byId("bus-change-submit").textContent =
+    action === "combine" ? "Combine buses" : "Confirm location change";
+    byId("bus-change-dialog").showModal();
+  }
+
+  async function submitBusChange(event) {
+    event.preventDefault();
+    const submit = byId("bus-change-submit");
+    const error = byId("bus-change-error");
+    const form = event.currentTarget;
+    const source = state.adminBuses.find((bus) => bus.busNo === state.selectedBusNo);
+    const targetBusNo = form.elements.targetBusNo.value;
+    const target = state.adminBuses.find((bus) => bus.busNo === targetBusNo);
+
+    error.hidden = true;
+    if (!source || !target) {
+    error.textContent = "Choose an active replacement bus.";
+    error.hidden = false;
+    return;
+    }
+
+    const isCombine = state.busChangeAction === "combine";
+    const confirmation = isCombine
+    ? `Combine ${busName(source)} with ${busName(target)}? Riders assigned to both buses will use the replacement bus.`
+    : `Use ${busName(target)} for the live location of ${busName(source)}? Its original stops will remain unchanged.`;
+    if (!window.confirm(confirmation)) return;
+
+    submit.disabled = true;
+    submit.textContent = isCombine ? "Combining…" : "Applying…";
+    try {
+    const payload = { newBusNo: target.busNo };
+    if (isCombine) payload.routeSource = form.elements.routeSource.value;
+    const result = await request(
+      `/api/bus/${isCombine ? "combine" : "alter"}-bus/${encodeURIComponent(source.busNo)}`,
+      { method: "POST", body: JSON.stringify(payload) },
+    );
+    byId("bus-change-dialog").close();
+    showToast(
+      `${result.message || (isCombine ? "Buses combined." : "Bus altered.")} ${Number(result.notifiedStudents || 0)} rider(s) notified.`,
+    );
+    await loadData({ quiet: true });
+    } catch (requestError) {
+    error.textContent =
+      requestError.message ||
+      (isCombine ? "Could not combine these buses." : "Could not alter this bus.");
+    error.hidden = false;
+    } finally {
+    submit.disabled = false;
+    submit.textContent = isCombine ? "Combine buses" : "Confirm location change";
+    }
+  }
+
+  async function restoreBus(busNo) {
+    const bus = state.adminBuses.find((item) => item.busNo === busNo);
+    if (!bus?.isAltered) return;
+    if (!window.confirm(`End the bus change for ${busName(bus)} and restore its original service?`)) return;
+    try {
+    const result = await request(
+      `/api/bus/restore-altered/${encodeURIComponent(busNo)}`,
+      { method: "PUT" },
+    );
+    showToast(
+      `${result.message || "Original bus restored."} ${Number(result.notifiedStudents || 0)} rider(s) notified.`,
+    );
+    await loadData({ quiet: true });
+    } catch (requestError) {
+    showToast(requestError.message || "Could not restore this bus.", true);
+    }
+  }
+
   function startDrag(event) {
     const node = event.target.closest("[data-bus-id]");
     if (!node) return;
@@ -932,6 +1047,7 @@
     byId("edit-user-form").addEventListener("submit", saveUserEdit);
     byId("edit-bus-form").addEventListener("submit", saveBusEdit);
     byId("edit-routes-form").addEventListener("submit", replaceBusRoutes);
+    byId("bus-change-form").addEventListener("submit", submitBusChange);
     byId("users-list").addEventListener("click", (event) => {
       const button = event.target.closest("[data-user-action]");
       if (!button) return;
@@ -945,6 +1061,10 @@
       const { busAction, busNo } = button.dataset;
       if (busAction === "edit") openBusEditor(busNo);
       if (busAction === "routes") openRouteEditor(busNo);
+      if (busAction === "alter" || busAction === "combine") {
+        openBusChangeDialog(busNo, busAction);
+      }
+      if (busAction === "restore") restoreBus(busNo);
       if (busAction === "delete") deleteBus(busNo);
     });
     document.querySelectorAll("[data-close-dialog]").forEach((button) => {

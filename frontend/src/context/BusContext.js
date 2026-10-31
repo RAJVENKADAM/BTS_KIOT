@@ -9,6 +9,7 @@ import React, {
   useReducer,
   useEffect,
   useState,
+  useCallback,
 } from "react";
 import io from "socket.io-client";
 import { API_BASE_URL } from "../api/api";
@@ -79,6 +80,26 @@ export const BusProvider = ({ children }) => {
   const { token, user } = useAuth();
   const requestGenerationRef = React.useRef(0);
 
+  const refreshBuses = useCallback(async () => {
+    dispatch({ type: "SET_LOADING", payload: true });
+    try {
+      const data = await fetchJson(`${API_BASE_URL}/api/bus/get-all-buses`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      dispatch({ type: "SET_BUSES", payload: data.buses });
+      dispatch({ type: "SET_ERROR", payload: null });
+      const cacheKey = `buses_${user?.id || user?._id || "anonymous"}`;
+      await AsyncStorage.setItem(cacheKey, JSON.stringify(data.buses));
+    } catch (error) {
+      dispatch({
+        type: "SET_ERROR",
+        payload: getErrorMessage(error, "Could not load buses."),
+      });
+    } finally {
+      dispatch({ type: "SET_LOADING", payload: false });
+    }
+  }, [token, user?.id, user?._id]);
+
   // Load cached buses on startup
   useEffect(() => {
     const generation = ++requestGenerationRef.current;
@@ -143,7 +164,7 @@ export const BusProvider = ({ children }) => {
       newSocket.removeAllListeners();
       newSocket.disconnect();
     };
-  }, [token]);
+  }, [token, refreshBuses]);
 
   const getSocket = () => socket;
 
@@ -157,26 +178,6 @@ export const BusProvider = ({ children }) => {
       }
     } catch (err) {
       console.error("Cache load error:", err);
-    } finally {
-      dispatch({ type: "SET_LOADING", payload: false });
-    }
-  };
-
-  const refreshBuses = async () => {
-    dispatch({ type: "SET_LOADING", payload: true });
-    try {
-      const data = await fetchJson(`${API_BASE_URL}/api/bus/get-all-buses`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      dispatch({ type: "SET_BUSES", payload: data.buses });
-      dispatch({ type: "SET_ERROR", payload: null });
-      const cacheKey = `buses_${user?.id || user?._id || "anonymous"}`;
-      await AsyncStorage.setItem(cacheKey, JSON.stringify(data.buses));
-    } catch (error) {
-      dispatch({
-        type: "SET_ERROR",
-        payload: getErrorMessage(error, "Could not load buses."),
-      });
     } finally {
       dispatch({ type: "SET_LOADING", payload: false });
     }

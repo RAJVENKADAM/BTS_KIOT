@@ -147,7 +147,11 @@ export default function PlanMappingScreen({ navigation }) {
     setError("");
     setMessage("");
     try {
-      await planMappingApi.setActivePlan(token, plan);
+      const result = await planMappingApi.setActivePlan(token, plan);
+      if (result.activePlan !== plan) {
+        throw new Error("The server did not confirm the selected operating service.");
+      }
+      setData((current) => ({ ...current, activePlan: result.activePlan }));
       setMessage("Operating plan changed. Affected users have been notified.");
       await load();
     } catch (requestError) {

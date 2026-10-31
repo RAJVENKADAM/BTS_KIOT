@@ -369,6 +369,34 @@
       </form>
     </dialog>
 
+    <dialog id="bus-change-dialog" class="cluster-dialog">
+      <form id="bus-change-form">
+        <div class="dialog-heading">
+          <div><span class="eyebrow">BUS MANAGEMENT</span><h2 id="bus-change-title">Alter bus</h2></div>
+          <button class="icon-button dialog-close" type="button" data-close-dialog="bus-change-dialog" aria-label="Close dialog">×</button>
+        </div>
+        <p id="bus-change-description" class="muted"></p>
+        <p class="bus-change-source"><strong>Selected bus</strong><span id="bus-change-source"></span></p>
+        <label class="field">
+          <span>Replacement bus</span>
+          <select id="bus-change-target" name="targetBusNo" required></select>
+        </label>
+        <label id="bus-change-route-field" class="field" hidden>
+          <span>Routes for the combined service</span>
+          <select name="routeSource" required>
+            <option value="source" id="bus-change-route-source-label">Selected bus routes</option>
+            <option value="target" id="bus-change-route-target-label">Replacement bus routes</option>
+          </select>
+          <small class="field-hint">The selected bus also supplies the live location.</small>
+        </label>
+        <div id="bus-change-error" class="notice notice-error" role="alert" hidden></div>
+        <div class="dialog-actions">
+          <button class="button button-quiet" type="button" data-close-dialog="bus-change-dialog">Cancel</button>
+          <button id="bus-change-submit" class="button button-primary" type="submit">Confirm</button>
+        </div>
+      </form>
+    </dialog>
+
     <dialog id="cluster-dialog" class="cluster-dialog">
       <form id="cluster-form" method="dialog">
         <div class="dialog-heading">

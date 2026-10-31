@@ -11,6 +11,7 @@ function authHeaders(token) {
 const planMappingApi = {
   get: (token) =>
     fetchJson(`${API_BASE_URL}/api/bus/plan-mappings`, {
+      cache: "no-store",
       headers: authHeaders(token),
     }),
 

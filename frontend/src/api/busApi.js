@@ -97,6 +97,7 @@ export const busApi = {
 
   getGlobalActivePlan: async (token) => {
     const data = await fetchJson(`${API_BASE_URL}/api/bus/global-plan`, {
+      cache: "no-store",
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!data.success) {

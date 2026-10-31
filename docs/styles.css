@@ -360,8 +360,11 @@ button { color: inherit; }
 .record-expand-label { flex: 0 0 auto; color: #2868df; font-size: 13px; font-weight: 650; }
 .record-expand-label::after { content: " options"; }
 .record-card[open] .record-expand-label::after { content: " less"; }
-.record-actions { display: flex; flex: 0 0 auto; align-items: center; justify-content: flex-end; gap: 5px; margin: 0 17px; padding: 10px 0 14px; border-top: 1px solid #edf0f5; }
+.record-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 5px; margin: 0 17px; padding: 10px 0 14px; border-top: 1px solid #edf0f5; }
 .record-actions .button { min-height: 34px; padding: 0 10px; }
+.bus-change-source { display: flex; justify-content: space-between; gap: 12px; margin: 0 0 12px; padding: 11px 12px; border: 1px solid #e8edf5; border-radius: 8px; color: #56647a; font-size: 13px; }
+.bus-change-source strong { color: #34425b; }
+.bus-change-source span { text-align: right; }
 .admin-form { display: grid; gap: 20px; }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 16px; }
 .admin-form .field { min-width: 0; margin: 0; }
