@@ -607,11 +607,38 @@ async function deleteBus(req, res) {
       return res.status(404).json({ error: `Bus ${busNo} not found` });
     }
 
+    await User.updateMany(
+      { bus_no: new RegExp(`^${escapeRegExp(bus.bus_no)}$`, "i") },
+      { $set: { bus_no: null } },
+    );
+    await PlanMapping.updateMany(
+      { member_bus_ids: bus._id },
+      { $pull: { member_bus_ids: bus._id } },
+    );
+    await PlanMapping.deleteMany({ root_bus_id: bus._id });
+    await Bus.updateMany(
+      { altered_to_bus_id: bus._id },
+      {
+        $set: {
+          altered_to_bus_id: null,
+          altered_to_preview: null,
+          alteration_type: null,
+          alteration_route_source: null,
+          alteration_routes: [],
+          combined_route_source: null,
+          combined_routes: [],
+          altered_at: null,
+        },
+      },
+    );
     await BusRoute.deleteMany({ bus_id: bus._id });
     await BusLiveLocation.deleteMany({ bus_id: bus._id });
     await Bus.deleteOne({ _id: bus._id });
 
-    res.json({ message: "Bus deleted successfully" });
+    res.json({
+      success: true,
+      message: "Bus and its database records deleted successfully",
+    });
   } catch (error) {
     console.error("Delete bus error:", error);
     res.status(500).json({ error: error.message });

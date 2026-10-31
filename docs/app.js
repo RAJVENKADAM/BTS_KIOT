@@ -315,7 +315,7 @@
         <div class="record-actions">
           <button type="button" class="button button-quiet" data-bus-action="edit" data-bus-no="${escapeHtml(bus.busNo)}">Edit details</button>
           <button type="button" class="button button-quiet" data-bus-action="routes" data-bus-no="${escapeHtml(bus.busNo)}">Edit routes</button>
-          <button type="button" class="text-button" data-bus-action="${bus.status === "active" ? "deactivate" : "activate"}" data-bus-no="${escapeHtml(bus.busNo)}">${bus.status === "active" ? "Deactivate" : "Activate"}</button>
+          <button type="button" class="text-button danger" data-bus-action="delete" data-bus-no="${escapeHtml(bus.busNo)}">Delete bus</button>
         </div>
       </details>
     `).join("");
@@ -852,17 +852,17 @@
     }
   }
 
-  async function changeBusStatus(busNo, activate) {
-    const action = activate ? "activate" : "deactivate";
-    if (!window.confirm(`${activate ? "Activate" : "Deactivate"} bus ${busNo}?`)) return;
+  async function deleteBus(busNo) {
+    const bus = state.adminBuses.find((item) => item.busNo === busNo);
+    if (!bus || !window.confirm(`Permanently delete bus ${busNo} and its routes? Riders assigned to this bus will be unassigned. This cannot be undone.`)) return;
     try {
-      await request(`/api/bus/${action}-bus/${encodeURIComponent(busNo)}`, {
-        method: "PUT",
+      await request(`/api/bus/delete-bus/${encodeURIComponent(busNo)}`, {
+        method: "DELETE",
       });
-      showToast(`Bus ${busNo} ${activate ? "activated" : "deactivated"}.`);
+      showToast(`Bus ${busNo} deleted.`);
       await loadData({ quiet: true });
     } catch (requestError) {
-      showToast(requestError.message || `Could not ${action} this bus.`, true);
+      showToast(requestError.message || `Could not delete bus ${busNo}.`, true);
     }
   }
 
@@ -945,8 +945,7 @@
       const { busAction, busNo } = button.dataset;
       if (busAction === "edit") openBusEditor(busNo);
       if (busAction === "routes") openRouteEditor(busNo);
-      if (busAction === "activate") changeBusStatus(busNo, true);
-      if (busAction === "deactivate") changeBusStatus(busNo, false);
+      if (busAction === "delete") deleteBus(busNo);
     });
     document.querySelectorAll("[data-close-dialog]").forEach((button) => {
       button.addEventListener("click", () => byId(button.dataset.closeDialog).close());
