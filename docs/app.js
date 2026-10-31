@@ -10,6 +10,7 @@
     data: { activePlan: "PLAN A", buses: [], clusters: [] },
     selectedPlan: "PLAN B",
     selectedGlobalPlan: null,
+    page: "dashboard",
     form: null,
     toastTimer: null,
   };
@@ -32,7 +33,9 @@
     }
     const headers = new Headers(options.headers || {});
     if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
-    if (options.body && !headers.has("Content-Type")) {
+    const isFormData =
+      typeof FormData !== "undefined" && options.body instanceof FormData;
+    if (options.body && !isFormData && !headers.has("Content-Type")) {
       headers.set("Content-Type", "application/json");
     }
     let response;
@@ -76,6 +79,33 @@
     const name = state.user?.name || state.user?.email || "Administrator";
     byId("profile-name").textContent = name;
     byId("profile-avatar").textContent = name.trim().charAt(0).toUpperCase() || "A";
+    showAdminPage(window.location.hash.slice(1) || "dashboard", false);
+  }
+
+  const PAGE_TITLES = {
+    dashboard: "Dashboard",
+    "add-users": "Add users",
+    "add-buses": "Add buses",
+    "global-plan": "Global plan",
+    "plan-mapping": "Plan mapping",
+  };
+
+  function showAdminPage(page, updateHistory = true) {
+    if (!Object.hasOwn(PAGE_TITLES, page)) page = "dashboard";
+    state.page = page;
+    document.querySelectorAll("[data-page-content]").forEach((section) => {
+      section.hidden = section.dataset.pageContent !== page;
+    });
+    document.querySelectorAll(".nav-link[data-page]").forEach((link) => {
+      const active = link.dataset.page === page;
+      link.classList.toggle("nav-link-active", active);
+      if (active) link.setAttribute("aria-current", "page");
+      else link.removeAttribute("aria-current");
+    });
+    byId("active-page-title").textContent = PAGE_TITLES[page];
+    if (updateHistory && window.location.hash !== `#${page}`) {
+      window.history.replaceState(null, "", `#${page}`);
+    }
   }
 
   function clearSession() {
@@ -232,14 +262,15 @@
     }).join("");
     const apply = byId("apply-global-plan");
     apply.disabled = !state.selectedGlobalPlan || state.selectedGlobalPlan === state.data.activePlan;
-    apply.innerHTML = `Apply service <span aria-hidden="true">→</span>`;
+    apply.textContent = "Apply service";
+    byId("active-plan-description").textContent =
+      `Current service: ${state.data.activePlan.replace("PLAN ", "Plan ")}`;
   }
 
   function busNode(bus, { root = false } = {}) {
     const label = busName(bus);
     const count = Number(bus?.assignedUsers || 0);
     return `<div class="bus-node${root ? " root-node" : ""}" data-bus-id="${escapeHtml(bus?.id)}" draggable="true" title="Drag to move this bus between service nodes">
-      <span class="node-glyph" aria-hidden="true">▰</span>
       <span class="node-copy"><strong>${escapeHtml(label)}</strong><small>${count} ${count === 1 ? "rider" : "riders"}</small></span>
       ${root ? '<span class="root-badge">Root</span>' : ""}
     </div>`;
@@ -451,6 +482,111 @@
     }
   }
 
+  function displayFormResult(id, message, isError = false) {
+    const result = byId(id);
+    result.textContent = message;
+    result.classList.toggle("form-result-error", isError);
+    result.hidden = !message;
+  }
+
+  async function addUser(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const submit = byId("add-user-submit");
+    const error = byId("add-user-error");
+    const formData = new FormData(form);
+    const file = formData.get("file");
+    error.hidden = true;
+    displayFormResult("add-user-result", "");
+    if (!file || !file.name) {
+      error.textContent = "Choose an .xlsx user workbook to import.";
+      error.hidden = false;
+      return;
+    }
+
+    submit.disabled = true;
+    submit.textContent = "Importing…";
+    try {
+      const response = await request("/api/superadmin/import-users-excel", {
+        method: "POST",
+        body: formData,
+      });
+      const summary = response.summary || {};
+      const failedRows = Number(summary.failedRows || 0);
+      const rowErrors = (summary.rowResults || [])
+        .filter((row) => row.status === "failed")
+        .slice(0, 5)
+        .map((row) => `Row ${(Number(row.index) || 0) + 2}: ${row.reason}`)
+        .join(" ");
+      displayFormResult(
+        "add-user-result",
+        `Import finished: ${summary.totalRows || 0} rows; ${summary.insertedRows || 0} added, ${summary.updatedRows || 0} updated, ${summary.unchangedRows || 0} unchanged, ${failedRows} failed.${rowErrors ? ` ${rowErrors}` : ""}`,
+        failedRows > 0,
+      );
+      if (!failedRows) form.reset();
+    } catch (requestError) {
+      error.textContent = requestError.message || "Could not import the user workbook.";
+      error.hidden = false;
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "Import users";
+    }
+  }
+
+  async function addBus(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const submit = byId("add-bus-submit");
+    const error = byId("add-bus-error");
+    const formData = new FormData(form);
+    const busNo = String(formData.get("busNo") || "").trim();
+    const routeFile = formData.get("routesFile");
+    error.hidden = true;
+    displayFormResult("add-bus-result", "");
+
+    const duplicate = state.data.buses.some(
+      (bus) => String(bus.busNo || "").toLowerCase() === busNo.toLowerCase(),
+    );
+    if (duplicate) {
+      error.textContent = "That bus number already exists. Use Organize → Buses to update its routes.";
+      error.hidden = false;
+      return;
+    }
+
+    formData.set("busNo", busNo.toUpperCase());
+    formData.set("previewNumber", String(formData.get("previewNumber") || "").trim());
+    formData.set("deviceId", String(formData.get("deviceId") || "").trim());
+    formData.set("regNo", String(formData.get("regNo") || "").trim());
+
+    submit.disabled = true;
+    submit.textContent = "Creating…";
+    try {
+      const response = await request("/api/bus/import-routes", {
+        method: "POST",
+        body: formData,
+      });
+      const summary = response.summary || {};
+      const failedRows = Number(summary.failedRows || 0);
+      displayFormResult(
+        "add-bus-result",
+        failedRows
+          ? `Bus saved, but ${failedRows} route row(s) failed. Add or correct its route workbook in Organize → Buses.`
+          : routeFile?.name
+            ? "Bus and route workbook imported successfully."
+            : "Bus created without routes. Add its route workbook later in Organize → Buses.",
+        failedRows > 0,
+      );
+      form.reset();
+      await loadData({ quiet: true });
+    } catch (requestError) {
+      error.textContent = requestError.message || "Could not create the bus.";
+      error.hidden = false;
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "Create bus";
+    }
+  }
+
   function startDrag(event) {
     const node = event.target.closest("[data-bus-id]");
     if (!node) return;
@@ -510,6 +646,20 @@
     byId("create-cluster-button").addEventListener("click", () => openClusterForm());
     byId("cluster-form").addEventListener("submit", saveCluster);
     byId("apply-global-plan").addEventListener("click", applyGlobalPlan);
+    byId("add-user-form").addEventListener("submit", addUser);
+    byId("add-bus-form").addEventListener("submit", addBus);
+    document.querySelectorAll(".nav-link[data-page]").forEach((link) => {
+      link.addEventListener("click", (event) => {
+        event.preventDefault();
+        showAdminPage(link.dataset.page);
+      });
+    });
+    document.querySelectorAll("[data-open-page]").forEach((button) => {
+      button.addEventListener("click", () => showAdminPage(button.dataset.openPage));
+    });
+    window.addEventListener("hashchange", () => {
+      showAdminPage(window.location.hash.slice(1), false);
+    });
     byId("close-dialog").addEventListener("click", () => byId("cluster-dialog").close());
     byId("cancel-dialog").addEventListener("click", () => byId("cluster-dialog").close());
     byId("cluster-dialog").addEventListener("close", () => { state.form = null; });

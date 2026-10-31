@@ -49,7 +49,18 @@ function formatExcelArrivalTime(value) {
     const hour12 = hour24 % 12 || 12;
     return `${hour12}:${String(minute).padStart(2, "0")}${hour24 >= 12 ? "PM" : "AM"}`;
   }
-  return String(value).trim();
+  const rawTime = String(value).trim();
+  const time24Hour = rawTime.match(/^([01]?\d|2[0-3]):([0-5]\d)$/);
+  if (time24Hour) {
+    const hour24 = Number(time24Hour[1]);
+    const hour12 = hour24 % 12 || 12;
+    return `${hour12}:${time24Hour[2]}${hour24 >= 12 ? "PM" : "AM"}`;
+  }
+  const time12Hour = rawTime.match(/^(\d{1,2}):([0-5]\d)\s*(AM|PM)$/i);
+  if (time12Hour) {
+    return `${Number(time12Hour[1])}:${time12Hour[2]}${time12Hour[3].toUpperCase()}`;
+  }
+  return rawTime;
 }
 
 async function readExcelFile(fileOrDocPickerAsset, options = {}) {

@@ -1,0 +1,66 @@
+{
+  "projectType": "webapp",
+  "setup": [
+    {
+      "command": "npm",
+      "args": ["ci"],
+      "timeoutSeconds": 600
+    }
+  ],
+  "assertions": [
+    {
+      "name": "expo-android-export",
+      "kind": "process",
+      "command": "npx",
+      "args": [
+        "expo",
+        "export",
+        "--platform",
+        "android",
+        "--output-dir",
+        ".tsupgrader/runtime-validation/artifacts/android-export"
+      ],
+      "verificationMethod": "exit-code",
+      "expected": "0",
+      "timeoutSeconds": 300
+    },
+    {
+      "name": "expo-web-export",
+      "kind": "process",
+      "command": "npx",
+      "args": [
+        "expo",
+        "export",
+        "--platform",
+        "web",
+        "--output-dir",
+        ".tsupgrader/runtime-validation/artifacts/web-export"
+      ],
+      "verificationMethod": "exit-code",
+      "expected": "0",
+      "timeoutSeconds": 300
+    },
+    {
+      "name": "expo-web-startup",
+      "kind": "http-probe",
+      "startCommand": "npm",
+      "startArgs": ["run", "web", "--", "--port", "8081"],
+      "env": {
+        "CI": "1"
+      },
+      "url": "http://localhost:8081/",
+      "verificationMethod": "http-status",
+      "expected": "200",
+      "timeoutSeconds": 180
+    },
+    {
+      "name": "tests-pass",
+      "kind": "process",
+      "command": "npm",
+      "args": ["test"],
+      "verificationMethod": "test-results",
+      "expected": "0",
+      "timeoutSeconds": 300
+    }
+  ]
+}

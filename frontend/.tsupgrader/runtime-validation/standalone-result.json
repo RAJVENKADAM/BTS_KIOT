@@ -1,0 +1,18 @@
+{
+  "planHash": "c67b79a8a914dfe143f858ccfc09baa5b47f9a3bb91c65556d60fc41e7a89940",
+  "phase": "standalone",
+  "recordedAtUtc": "2026-10-31T03:50:46.3235782Z",
+  "retryCount": 2,
+  "resetBaseline": false,
+  "complete": false,
+  "runningStep": "setup[0]:npm",
+  "partialOutput": "npm warn deprecated uuid@3.4.0: uuid@10 and below is no longer supported.  For ESM codebases, update to uuid@latest.  For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028).\r\n",
+  "cleanupCompleted": true,
+  "result": {
+    "setupSucceeded": false,
+    "setupDurationMs": 0,
+    "setupFailureOutput": null,
+    "assertions": [],
+    "executions": []
+  }
+}

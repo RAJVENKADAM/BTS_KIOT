@@ -8,7 +8,7 @@
       name="description"
       content="BTMS super-admin bus service mapping dashboard."
     />
-    <title>BTMS Admin · Plan Mapping</title>
+    <title>BTMS Admin · Super Admin</title>
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="./styles.css" />
     <script src="./config.js"></script>
@@ -82,27 +82,27 @@
         </a>
         <div class="sidebar-section-label">WORKSPACE</div>
         <nav class="side-nav" aria-label="Admin pages">
-          <a class="nav-link nav-link-active" href="#plan-mapping">
-            <span class="nav-icon" aria-hidden="true">⌘</span>
-            <span>Plan mapping</span>
-          </a>
+          <a class="nav-link nav-link-active" href="#dashboard" data-page="dashboard">Dashboard</a>
+          <a class="nav-link" href="#add-users" data-page="add-users">Add users</a>
+          <a class="nav-link" href="#add-buses" data-page="add-buses">Add buses</a>
+          <a class="nav-link" href="#global-plan" data-page="global-plan">Global plan</a>
+          <a class="nav-link" href="#plan-mapping" data-page="plan-mapping">Plan mapping</a>
         </nav>
         <div class="sidebar-bottom">
           <div class="security-card">
-            <span class="security-icon" aria-hidden="true">✓</span>
             <div><strong>Secure workspace</strong><small>Super-admin access only</small></div>
           </div>
           <div class="profile-card">
             <span id="profile-avatar" class="avatar">A</span>
             <span class="profile-info"><strong id="profile-name">Administrator</strong><small>Super admin</small></span>
-            <button id="logout-button" class="icon-button" type="button" aria-label="Sign out" title="Sign out">↗</button>
+            <button id="logout-button" class="text-button" type="button">Sign out</button>
           </div>
         </div>
       </aside>
 
       <main class="main-content">
         <header class="topbar">
-          <div class="breadcrumbs"><span>Workspace</span><span aria-hidden="true">/</span><strong>Plan mapping</strong></div>
+          <div class="breadcrumbs"><span>Workspace</span><span aria-hidden="true">/</span><strong id="active-page-title">Dashboard</strong></div>
           <div class="topbar-actions">
             <span class="live-status"><span class="live-dot"></span>Connected</span>
             <button id="refresh-button" class="button button-quiet" type="button">
@@ -112,58 +112,149 @@
         </header>
 
         <div class="page-content">
-          <section class="page-heading">
-            <div>
-              <span class="eyebrow">SERVICE CONFIGURATION</span>
-              <h1>Plan mapping</h1>
-              <p>Build service clusters and guide every rider to the right bus.</p>
-            </div>
-            <span id="last-updated" class="updated-label"></span>
-          </section>
-
+          <section class="admin-page" data-page-content="dashboard">
+            <section class="page-heading">
+              <div>
+                <span class="eyebrow">OPERATIONS OVERVIEW</span>
+                <h1>Dashboard</h1>
+                <p>A clear overview of buses, service plans, and rider assignments.</p>
+              </div>
+              <span id="last-updated" class="updated-label"></span>
+            </section>
           <section class="stats-grid" aria-label="Bus mapping summary">
             <article class="stat-card">
-              <span class="stat-icon stat-icon-blue" aria-hidden="true">▰</span>
               <span class="stat-label">ACTIVE BUSES</span>
               <strong id="stat-active-buses">—</strong>
               <small>Available for service</small>
             </article>
             <article class="stat-card">
-              <span class="stat-icon stat-icon-violet" aria-hidden="true">⌘</span>
               <span class="stat-label">SERVICE CLUSTERS</span>
               <strong id="stat-clusters">—</strong>
               <small>Across all mapped plans</small>
             </article>
             <article class="stat-card">
-              <span class="stat-icon stat-icon-amber" aria-hidden="true">⇄</span>
               <span class="stat-label">UNMAPPED BUSES</span>
               <strong id="stat-unmapped">—</strong>
               <small>Plan A buses not in a cluster</small>
             </article>
             <article class="stat-card">
-              <span class="stat-icon stat-icon-green" aria-hidden="true">◎</span>
               <span class="stat-label">ASSIGNED RIDERS</span>
               <strong id="stat-riders">—</strong>
               <small>Students with a bus assignment</small>
             </article>
           </section>
 
+            <section class="dashboard-actions">
+              <div class="section-heading">
+                <div>
+                  <span class="eyebrow">QUICK ACTIONS</span>
+                  <h2>Manage BTMS</h2>
+                  <p>Open a dedicated workspace for each administrator task.</p>
+                </div>
+              </div>
+              <div class="action-grid">
+                <button class="action-card" type="button" data-open-page="add-users">
+                  <strong>Add users</strong><span>Create a student or primary admin account.</span>
+                </button>
+                <button class="action-card" type="button" data-open-page="add-buses">
+                  <strong>Add buses</strong><span>Register a bus and enter its route stops.</span>
+                </button>
+                <button class="action-card" type="button" data-open-page="global-plan">
+                  <strong>Change global plan</strong><span>Choose the service used by riders today.</span>
+                </button>
+                <button class="action-card" type="button" data-open-page="plan-mapping">
+                  <strong>Plan mapping</strong><span>Organize route clusters and bus assignments.</span>
+                </button>
+              </div>
+            </section>
+          </section>
+
+          <section class="admin-page" data-page-content="add-users" hidden>
+            <section class="page-heading">
+              <div>
+                <span class="eyebrow">USER MANAGEMENT</span>
+                <h1>Add users</h1>
+                <p>Import users with the same Excel workbook flow used in the mobile app.</p>
+              </div>
+            </section>
+            <section class="form-card">
+              <form id="add-user-form" class="admin-form">
+                <label class="field">
+                  <span>User Excel workbook</span>
+                  <input id="add-user-file" name="file" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required />
+                  <small class="field-hint">Use the mobile app format: name, email, bus, role, mobile, and year columns. Maximum file size: 25 MB.</small>
+                </label>
+                <label class="field">
+                  <span>Workbook name</span>
+                  <input name="excelCustomName" required maxlength="80" placeholder="e.g. II-IT" />
+                </label>
+                <div id="add-user-error" class="notice notice-error" role="alert" hidden></div>
+                <div id="add-user-result" class="form-result" role="status" hidden></div>
+                <button id="add-user-submit" class="button button-primary" type="submit">Import users</button>
+              </form>
+            </section>
+          </section>
+
+          <section class="admin-page" data-page-content="add-buses" hidden>
+            <section class="page-heading">
+              <div>
+                <span class="eyebrow">BUS MANAGEMENT</span>
+                <h1>Add buses</h1>
+                <p>Register the bus and upload its plan routes using the existing Excel layout.</p>
+              </div>
+            </section>
+            <section class="form-card">
+              <form id="add-bus-form" class="admin-form">
+                <div class="form-grid">
+                  <label class="field"><span>Bus number</span><input name="busNo" required /></label>
+                  <label class="field"><span>Display number</span><input name="previewNumber" /></label>
+                  <label class="field"><span>GPS device ID</span><input name="deviceId" required /></label>
+                  <label class="field"><span>Registration number <span class="field-hint">Optional</span></span><input name="regNo" /></label>
+                </div>
+                <label class="field">
+                  <span>Route Excel workbook <span class="field-hint">Optional</span></span>
+                  <input id="add-bus-file" name="routesFile" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+                  <small class="field-hint">Use Plan A, Plan B, Plan C, or Plan D as column headings. Add optional “Plan A Arrival Time” columns for timings. Maximum file size: 25 MB.</small>
+                </label>
+                <div id="add-bus-error" class="notice notice-error" role="alert" hidden></div>
+                <div id="add-bus-result" class="form-result" role="status" hidden></div>
+                <button id="add-bus-submit" class="button button-primary" type="submit">Create bus</button>
+              </form>
+            </section>
+          </section>
+
+          <section class="admin-page" data-page-content="global-plan" hidden>
+            <section class="page-heading">
+              <div>
+                <span class="eyebrow">SERVICE CONFIGURATION</span>
+                <h1>Global plan</h1>
+                <p>Choose the operating service all riders should use today.</p>
+              </div>
+            </section>
           <section class="global-card">
             <div class="global-copy">
-              <span class="global-icon" aria-hidden="true">◉</span>
               <div>
                 <h2>Global operating service</h2>
-                <p>Choose the service all riders should use today.</p>
+                <p id="active-plan-description">Current service: loading</p>
               </div>
             </div>
             <div class="global-controls">
               <div id="global-plan-options" class="plan-options" role="group" aria-label="Choose operating service"></div>
               <button id="apply-global-plan" class="button button-primary" type="button" disabled>
-                Apply service <span aria-hidden="true">→</span>
+                Apply service
               </button>
             </div>
           </section>
+          </section>
 
+          <section class="admin-page" data-page-content="plan-mapping" hidden>
+            <section class="page-heading">
+              <div>
+                <span class="eyebrow">SERVICE CONFIGURATION</span>
+                <h1>Plan mapping</h1>
+                <p>Build service clusters and guide every rider to the right bus.</p>
+              </div>
+            </section>
           <section class="mapping-section">
             <div class="section-heading">
               <div>
@@ -172,7 +263,7 @@
                 <p>Each root provides the location, stops, and arrival times for its member buses.</p>
               </div>
               <button id="create-cluster-button" class="button button-primary" type="button">
-                <span aria-hidden="true">＋</span> Create new cluster
+                Create new cluster
               </button>
             </div>
 
@@ -195,10 +286,11 @@
             <div id="cluster-list" class="cluster-list" aria-live="polite"></div>
           </section>
 
-          <footer class="page-footer">
-            <span>BTMS · Bus Tracking Management System</span>
-            <span>Service changes are checked against rider assignments before saving.</span>
-          </footer>
+            <footer class="page-footer">
+              <span>BTMS · Bus Tracking Management System</span>
+              <span>Service changes are checked against rider assignments before saving.</span>
+            </footer>
+          </section>
         </div>
       </main>
     </div>
