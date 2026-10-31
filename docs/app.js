@@ -10,6 +10,10 @@
     data: { activePlan: "PLAN A", buses: [], clusters: [] },
     users: [],
     adminBuses: [],
+    userSearch: "",
+    userRoleFilter: "all",
+    userStatusFilter: "all",
+    userBusFilter: "all",
     selectedUserId: null,
     selectedBusNo: null,
     busChangeAction: null,
@@ -92,7 +96,6 @@
     dashboard: "Dashboard",
     "add-users": "Add users",
     "add-buses": "Add buses",
-    "global-plan": "Global plan",
     "plan-mapping": "Plan mapping",
   };
 
@@ -120,6 +123,10 @@
     state.data = { activePlan: "PLAN A", buses: [], clusters: [] };
     state.users = [];
     state.adminBuses = [];
+    state.userSearch = "";
+    state.userRoleFilter = "all";
+    state.userStatusFilter = "all";
+    state.userBusFilter = "all";
     sessionStorage.removeItem(TOKEN_KEY);
   }
 
@@ -280,31 +287,86 @@
   function renderUsers() {
     const container = byId("users-list");
     if (!container) return;
+    const roleFilter = byId("users-role-filter");
+    const statusFilter = byId("users-status-filter");
+    const busFilter = byId("users-bus-filter");
+    const searchInput = byId("users-search");
+    const count = byId("users-count");
+
+    if (searchInput) searchInput.value = state.userSearch;
+    if (roleFilter) roleFilter.value = state.userRoleFilter;
+    if (statusFilter) statusFilter.value = state.userStatusFilter;
+    if (busFilter) {
+      const buses = [...new Set(state.users.map((user) => String(user.bus_no || "").trim()).filter(Boolean))]
+        .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
+      busFilter.innerHTML = '<option value="all">All buses</option>' + buses.map((busNo) =>
+        `<option value="${escapeHtml(busNo)}">Bus ${escapeHtml(busNo)}</option>`,
+      ).join("");
+      if (buses.includes(state.userBusFilter)) busFilter.value = state.userBusFilter;
+      else {
+        state.userBusFilter = "all";
+        busFilter.value = "all";
+      }
+    }
+
     if (!state.users.length) {
+      if (count) count.textContent = "0 users";
       container.innerHTML = '<div class="empty-state">No users found.</div>';
       return;
     }
-    container.innerHTML = state.users.map((user) => {
+
+    const search = state.userSearch.trim().toLocaleLowerCase();
+    const users = state.users.filter((user) => {
+      const role = String(user.role || "").toLowerCase();
       const active = user.is_active !== false;
-      return `
-        <details class="record-card">
-          <summary class="record-summary">
-            <div class="record-copy">
-              <strong>${escapeHtml(user.name || "Unnamed user")}</strong>
-              <span>${escapeHtml(user.email || "")}</span>
-              <small>${escapeHtml(user.role || "—")} · Bus ${escapeHtml(user.bus_no || "—")} · ${active ? "Active" : "Inactive"}</small>
-            </div>
-            <span class="record-expand-label">Manage</span>
-          </summary>
-          <div class="record-actions">
-            <button type="button" class="button button-quiet" data-user-action="edit" data-user-id="${escapeHtml(user.id)}">Edit</button>
-            ${active
-              ? `<button type="button" class="text-button danger" data-user-action="deactivate" data-user-id="${escapeHtml(user.id)}">Deactivate</button>`
-              : `<button type="button" class="text-button" data-user-action="activate" data-user-id="${escapeHtml(user.id)}">Activate</button>`}
-          </div>
-        </details>
-      `;
-    }).join("");
+      const busNo = String(user.bus_no || "").trim();
+      const matchesSearch = !search || [
+        user.name,
+        user.email,
+        user.role,
+        user.bus_no,
+        active ? "active" : "inactive",
+      ].some((value) => String(value || "").toLocaleLowerCase().includes(search));
+      return matchesSearch &&
+        (state.userRoleFilter === "all" || role === state.userRoleFilter) &&
+        (state.userStatusFilter === "all" || (state.userStatusFilter === "active") === active) &&
+        (state.userBusFilter === "all" || busNo === state.userBusFilter);
+    });
+
+    if (count) count.textContent = `${users.length} of ${state.users.length} users`;
+    if (!users.length) {
+      container.innerHTML = '<div class="empty-state"><strong>No matching users</strong><p>Change or clear the search and filters to see users.</p></div>';
+      return;
+    }
+
+    container.innerHTML = `
+      <table class="user-table">
+        <thead>
+          <tr><th scope="col">Name</th><th scope="col">Email</th><th scope="col">Role</th><th scope="col">Bus</th><th scope="col">Status</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
+        </thead>
+        <tbody>
+          ${users.map((user) => {
+            const active = user.is_active !== false;
+            const role = String(user.role || "—");
+            const roleLabel = role === "primary_admin" ? "Primary admin" : role === "superadmin" ? "Super admin" : role;
+            return `
+            <tr>
+              <td class="user-name">${escapeHtml(user.name || "Unnamed user")}</td>
+              <td>${escapeHtml(user.email || "—")}</td>
+              <td>${escapeHtml(roleLabel)}</td>
+              <td>${user.bus_no ? `Bus ${escapeHtml(user.bus_no)}` : "—"}</td>
+              <td><span class="status-pill${active ? " status-active" : " status-inactive"}">${active ? "Active" : "Inactive"}</span></td>
+              <td class="user-actions">
+                <button type="button" class="button button-quiet" data-user-action="edit" data-user-id="${escapeHtml(user.id)}">Edit</button>
+                ${active
+                  ? `<button type="button" class="text-button danger" data-user-action="deactivate" data-user-id="${escapeHtml(user.id)}">Deactivate</button>`
+                  : `<button type="button" class="text-button" data-user-action="activate" data-user-id="${escapeHtml(user.id)}">Activate</button>`}
+              </td>
+            </tr>`;
+          }).join("")}
+        </tbody>
+      </table>
+    `;
   }
 
   function renderBuses() {
@@ -315,28 +377,32 @@
       return;
     }
     container.innerHTML = state.adminBuses.map((bus) => `
-      <details class="record-card">
-        <summary class="record-summary">
-          <div class="record-copy">
-            <strong>${escapeHtml(busName(bus))} · ${escapeHtml(bus.busNo || "—")}</strong>
-            <span>${escapeHtml(bus.status || "unknown")} · ${escapeHtml((bus.plans || []).join(", ") || "No routes uploaded")}</span>
-            <small>GPS ${escapeHtml(bus.gpsDeviceId || "—")} · ${escapeHtml(bus.regNo || "No registration")} · ${escapeHtml(bus.assignedUsers || 0)} assigned riders</small>
-          </div>
-          <span class="record-expand-label">Manage</span>
-        </summary>
-        <div class="record-actions">
-          <button type="button" class="button button-quiet" data-bus-action="edit" data-bus-no="${escapeHtml(bus.busNo)}">Edit details</button>
-          <button type="button" class="button button-quiet" data-bus-action="routes" data-bus-no="${escapeHtml(bus.busNo)}">Edit routes</button>
-          ${bus.isAltered
-            ? `<button type="button" class="button button-quiet" data-bus-action="restore" data-bus-no="${escapeHtml(bus.busNo)}">Restore original bus</button>`
-            : bus.status === "active"
-              ? `<button type="button" class="button button-quiet" data-bus-action="alter" data-bus-no="${escapeHtml(bus.busNo)}">Alter bus</button>
-                 <button type="button" class="button button-quiet" data-bus-action="combine" data-bus-no="${escapeHtml(bus.busNo)}">Combine bus</button>`
-              : ""}
-          <button type="button" class="text-button danger" data-bus-action="delete" data-bus-no="${escapeHtml(bus.busNo)}">Delete bus</button>
-        </div>
-      </details>
+      <button type="button" class="bus-card" data-bus-open="${escapeHtml(bus.busNo)}" aria-label="Manage ${escapeHtml(busName(bus))}">
+        <span>${escapeHtml(busName(bus))}</span>
+        <span class="bus-card-arrow" aria-hidden="true">›</span>
+      </button>
     `).join("");
+  }
+
+  function openBusOptions(busNo) {
+    const bus = state.adminBuses.find((item) => item.busNo === busNo);
+    if (!bus) return;
+    state.selectedBusNo = busNo;
+    byId("bus-options-title").textContent = busName(bus);
+    byId("bus-options-details").textContent =
+      `${bus.status || "Unknown status"} · ${(bus.plans || []).join(", ") || "No routes uploaded"} · ${Number(bus.assignedUsers || 0)} assigned riders`;
+    byId("bus-options-actions").innerHTML = `
+      <button type="button" class="button button-quiet" data-bus-action="edit" data-bus-no="${escapeHtml(bus.busNo)}">Edit details</button>
+      <button type="button" class="button button-quiet" data-bus-action="routes" data-bus-no="${escapeHtml(bus.busNo)}">Edit routes</button>
+      ${bus.isAltered
+        ? `<button type="button" class="button button-quiet" data-bus-action="restore" data-bus-no="${escapeHtml(bus.busNo)}">Restore original bus</button>`
+        : bus.status === "active"
+          ? `<button type="button" class="button button-quiet" data-bus-action="alter" data-bus-no="${escapeHtml(bus.busNo)}">Alter bus</button>
+             <button type="button" class="button button-quiet" data-bus-action="combine" data-bus-no="${escapeHtml(bus.busNo)}">Combine bus</button>`
+          : ""}
+      <button type="button" class="button button-danger" data-bus-action="delete" data-bus-no="${escapeHtml(bus.busNo)}">Delete bus</button>
+    `;
+    byId("bus-options-dialog").showModal();
   }
 
   function activeClusters() {
@@ -586,7 +652,7 @@
     const button = byId("apply-global-plan");
     button.disabled = true;
     button.textContent = "Applying…";
-    hideNotice();
+    byId("global-plan-notice").hidden = true;
     try {
       const result = await request("/api/bus/global-plan", {
         method: "PUT",
@@ -604,11 +670,15 @@
       state.data.activePlan = result.activePlan;
       state.selectedGlobalPlan = result.activePlan;
       renderGlobalService();
+      byId("global-plan-notice").hidden = true;
       showToast("Operating service updated. Assigned riders have been notified.");
       await loadData({ quiet: true });
     } catch (error) {
       const uncovered = error.data?.uncoveredBuses;
-      showNotice(`${error.message}${uncovered?.length ? ` Map these buses first: ${uncovered.map((bus) => `Bus ${bus}`).join(", ")}.` : ""}`, true);
+      const notice = byId("global-plan-notice");
+      notice.textContent = `${error.message}${uncovered?.length ? ` Map these buses first: ${uncovered.map((bus) => `Bus ${bus}`).join(", ")}.` : ""}`;
+      notice.classList.add("notice-error");
+      notice.hidden = false;
     } finally {
       renderGlobalService();
     }
@@ -656,6 +726,7 @@
         failedRows > 0,
       );
       if (!failedRows) form.reset();
+      await loadAdminRecords();
     } catch (requestError) {
       error.textContent = requestError.message || "Could not import the user workbook.";
       error.hidden = false;
@@ -1072,9 +1143,17 @@
       if (button.dataset.userAction === "activate") activateUser(button.dataset.userId);
     });
     byId("buses-list").addEventListener("click", (event) => {
+      const card = event.target.closest("[data-bus-open]");
+      if (card) {
+        openBusOptions(card.dataset.busOpen);
+        return;
+      }
+    });
+    byId("bus-options-actions").addEventListener("click", (event) => {
       const button = event.target.closest("[data-bus-action]");
       if (!button) return;
       const { busAction, busNo } = button.dataset;
+      byId("bus-options-dialog").close();
       if (busAction === "edit") openBusEditor(busNo);
       if (busAction === "routes") openRouteEditor(busNo);
       if (busAction === "alter" || busAction === "combine") {
@@ -1106,7 +1185,25 @@
       const button = event.target.closest("[data-global-plan]");
       if (!button) return;
       state.selectedGlobalPlan = button.dataset.globalPlan;
+      byId("global-plan-notice").hidden = true;
+      byId("global-plan-notice").classList.remove("notice-error");
       renderGlobalService();
+    });
+    byId("users-search").addEventListener("input", (event) => {
+      state.userSearch = event.currentTarget.value;
+      renderUsers();
+    });
+    byId("users-role-filter").addEventListener("change", (event) => {
+      state.userRoleFilter = event.currentTarget.value;
+      renderUsers();
+    });
+    byId("users-status-filter").addEventListener("change", (event) => {
+      state.userStatusFilter = event.currentTarget.value;
+      renderUsers();
+    });
+    byId("users-bus-filter").addEventListener("change", (event) => {
+      state.userBusFilter = event.currentTarget.value;
+      renderUsers();
     });
     document.querySelectorAll(".plan-tab").forEach((tab) => {
       tab.addEventListener("click", () => {

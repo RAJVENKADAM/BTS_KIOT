@@ -10,6 +10,12 @@
     />
     <title>BTMS Admin · Super Admin</title>
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="./styles.css" />
     <script src="./config.js"></script>
     <script src="./app.js" defer></script>
@@ -85,7 +91,6 @@
           <a class="nav-link nav-link-active" href="#dashboard" data-page="dashboard">Dashboard</a>
           <a class="nav-link" href="#add-users" data-page="add-users">Add users</a>
           <a class="nav-link" href="#add-buses" data-page="add-buses">Add buses</a>
-          <a class="nav-link" href="#global-plan" data-page="global-plan">Global plan</a>
           <a class="nav-link" href="#plan-mapping" data-page="plan-mapping">Plan mapping</a>
         </nav>
         <div class="sidebar-bottom">
@@ -144,12 +149,29 @@
             </article>
           </section>
 
+            <section class="global-card" aria-labelledby="global-plan-heading">
+              <div class="global-copy">
+                <div>
+                  <span class="eyebrow">OPERATING SERVICE</span>
+                  <h2 id="global-plan-heading">Global plan</h2>
+                  <p id="active-plan-description">Current service: loading</p>
+                </div>
+              </div>
+              <div class="global-controls">
+                <div id="global-plan-options" class="plan-options" role="group" aria-label="Choose operating service"></div>
+                <button id="apply-global-plan" class="button button-primary" type="button" disabled>
+                  Apply service
+                </button>
+              </div>
+              <div id="global-plan-notice" class="notice" role="status" hidden></div>
+            </section>
+
             <section class="dashboard-actions">
               <div class="section-heading">
                 <div>
                   <span class="eyebrow">QUICK ACTIONS</span>
                   <h2>Manage BTMS</h2>
-                  <p>Open a dedicated workspace for each administrator task.</p>
+                  <p>Manage users, buses, and route assignments.</p>
                 </div>
               </div>
               <div class="action-grid">
@@ -158,9 +180,6 @@
                 </button>
                 <button class="action-card" type="button" data-open-page="add-buses">
                   <strong>Add buses</strong><span>Register a bus and enter its route stops.</span>
-                </button>
-                <button class="action-card" type="button" data-open-page="global-plan">
-                  <strong>Change global plan</strong><span>Choose the service used by riders today.</span>
                 </button>
                 <button class="action-card" type="button" data-open-page="plan-mapping">
                   <strong>Plan mapping</strong><span>Organize route clusters and bus assignments.</span>
@@ -195,10 +214,40 @@
             </section>
             <section class="existing-records">
               <div class="section-heading">
-                <div><h2>Existing users</h2><p>Edit user details or deactivate an account.</p></div>
+                <div><h2>Existing users</h2><p>Edit accounts and assignments in a spreadsheet-style view.</p></div>
                 <button id="refresh-users" class="button button-quiet" type="button">Refresh users</button>
               </div>
-              <div id="users-list" class="record-list" aria-live="polite"></div>
+              <div class="table-toolbar">
+                <label class="table-search">
+                  <span class="visually-hidden">Search users</span>
+                  <input id="users-search" type="search" placeholder="Search name, email, role, or bus…" autocomplete="off" />
+                </label>
+                <label class="table-filter">
+                  <span class="visually-hidden">Filter by role</span>
+                  <select id="users-role-filter">
+                    <option value="all">All roles</option>
+                    <option value="student">Students</option>
+                    <option value="primary_admin">Primary admins</option>
+                    <option value="superadmin">Super admins</option>
+                  </select>
+                </label>
+                <label class="table-filter">
+                  <span class="visually-hidden">Filter by status</span>
+                  <select id="users-status-filter">
+                    <option value="all">All statuses</option>
+                    <option value="active">Active</option>
+                    <option value="inactive">Inactive</option>
+                  </select>
+                </label>
+                <label class="table-filter">
+                  <span class="visually-hidden">Filter by bus</span>
+                  <select id="users-bus-filter">
+                    <option value="all">All buses</option>
+                  </select>
+                </label>
+                <span id="users-count" class="table-count" aria-live="polite"></span>
+              </div>
+              <div id="users-list" class="table-scroll" aria-live="polite"></div>
             </section>
           </section>
 
@@ -230,35 +279,11 @@
             </section>
             <section class="existing-records">
               <div class="section-heading">
-                <div><h2>Existing buses</h2><p>Edit bus details, update routes, or permanently delete a bus and its linked records.</p></div>
+                <div><h2>Existing buses</h2><p>Select a bus to view management options.</p></div>
                 <button id="refresh-buses" class="button button-quiet" type="button">Refresh buses</button>
               </div>
-              <div id="buses-list" class="record-list" aria-live="polite"></div>
+              <div id="buses-list" class="bus-card-grid" aria-live="polite"></div>
             </section>
-          </section>
-
-          <section class="admin-page" data-page-content="global-plan" hidden>
-            <section class="page-heading">
-              <div>
-                <span class="eyebrow">SERVICE CONFIGURATION</span>
-                <h1>Global plan</h1>
-                <p>Choose the operating service all riders should use today.</p>
-              </div>
-            </section>
-          <section class="global-card">
-            <div class="global-copy">
-              <div>
-                <h2>Global operating service</h2>
-                <p id="active-plan-description">Current service: loading</p>
-              </div>
-            </div>
-            <div class="global-controls">
-              <div id="global-plan-options" class="plan-options" role="group" aria-label="Choose operating service"></div>
-              <button id="apply-global-plan" class="button button-primary" type="button" disabled>
-                Apply service
-              </button>
-            </div>
-          </section>
           </section>
 
           <section class="admin-page" data-page-content="plan-mapping" hidden>
@@ -330,6 +355,17 @@
           <button id="edit-user-submit" class="button button-primary" type="submit">Save user</button>
         </div>
       </form>
+    </dialog>
+
+    <dialog id="bus-options-dialog" class="cluster-dialog bus-options-dialog">
+      <div class="bus-options-content">
+        <div class="dialog-heading">
+          <div><span class="eyebrow">BUS MANAGEMENT</span><h2 id="bus-options-title">Bus</h2></div>
+          <button class="icon-button dialog-close" type="button" data-close-dialog="bus-options-dialog" aria-label="Close dialog">×</button>
+        </div>
+        <p id="bus-options-details" class="muted"></p>
+        <div id="bus-options-actions" class="bus-options-actions"></div>
+      </div>
     </dialog>
 
     <dialog id="edit-bus-dialog" class="cluster-dialog">
