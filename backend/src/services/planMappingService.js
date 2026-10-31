@@ -169,9 +169,88 @@ function getPlanChangeNotifications(state, planName) {
   });
 }
 
+function getPlanMappingChangeNotifications(
+  state,
+  planName,
+  previousClusters,
+) {
+  const normalizedPlan = String(planName || "").trim().toUpperCase();
+  const busById = new Map(state.buses.map((bus) => [String(bus._id), bus]));
+
+  return state.users.flatMap((user, index) => {
+    const assignedBusId = state.busIdsByUser[index];
+    if (!assignedBusId) return [];
+
+    const previousBusId = getEffectiveBusId(
+      assignedBusId,
+      normalizedPlan,
+      previousClusters,
+    );
+    const nextBusId = getEffectiveBusId(
+      assignedBusId,
+      normalizedPlan,
+      state.clusters,
+    );
+    const previousBusState = state.busesById[previousBusId];
+    const nextBusState = state.busesById[nextBusId];
+    const previousBusActive =
+      previousBusState?.status === "active" &&
+      previousBusState.plans.includes(normalizedPlan);
+    const nextBusActive =
+      nextBusState?.status === "active" &&
+      nextBusState.plans.includes(normalizedPlan);
+
+    if (
+      previousBusActive === nextBusActive &&
+      (!nextBusActive || previousBusId === nextBusId)
+    ) {
+      return [];
+    }
+
+    const previousBus = busById.get(previousBusId);
+    const nextBus = busById.get(nextBusId);
+    if (nextBusActive) {
+      const displayBus = nextBus?.preview_number ?? nextBus?.bus_no ?? nextBusId;
+      return [{
+        user_id: user._id,
+        type: "plan_changed",
+        message:
+          `Your route plan has changed. Use Bus ${displayBus}. In Home, you can see ` +
+          "this bus's location. Tap View stops to find a nearby stop and wait at the listed time.",
+        old_bus_no: previousBus?.bus_no ?? user.bus_no ?? null,
+        new_bus_no: nextBus?.bus_no ?? null,
+        old_preview: previousBus?.preview_number ?? null,
+        new_preview: nextBus?.preview_number ?? null,
+        plan_name: normalizedPlan,
+        is_bus_active: true,
+      }];
+    }
+
+    const assignedDisplay =
+      previousBus?.preview_number ??
+      previousBus?.bus_no ??
+      user.bus_no ??
+      "assigned bus";
+    return [{
+      user_id: user._id,
+      type: "plan_changed",
+      message:
+        `Your assigned bus ${assignedDisplay} has no ${normalizedPlan} route or mapped ` +
+        "replacement, so it is inactive today. Contact the Super Admin for assistance.",
+      old_bus_no: previousBus?.bus_no ?? user.bus_no ?? null,
+      new_bus_no: null,
+      old_preview: previousBus?.preview_number ?? null,
+      new_preview: null,
+      plan_name: normalizedPlan,
+      is_bus_active: false,
+    }];
+  });
+}
+
 module.exports = {
   getCoverageErrors,
   getEffectiveBusForPlan,
+  getPlanMappingChangeNotifications,
   getPlanChangeNotifications,
   loadPlanState,
 };

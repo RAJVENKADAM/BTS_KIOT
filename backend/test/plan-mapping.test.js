@@ -6,7 +6,10 @@ const {
   normalizeArrivalTime,
   validateCluster,
 } = require("../src/utils/planMapping");
-const { getPlanChangeNotifications } = require("../src/services/planMappingService");
+const {
+  getPlanChangeNotifications,
+  getPlanMappingChangeNotifications,
+} = require("../src/services/planMappingService");
 
 const buses = {
   "root-b": { plans: ["PLAN B"] },
@@ -146,6 +149,42 @@ test("plan changes notify only riders whose bus changes or becomes inactive", ()
   assert.equal(notifications[0].new_preview, "3");
   assert.match(notifications[1].message, /inactive today/);
   assert.match(notifications[2].message, /no longer available/);
+});
+
+test("cluster edits notify riders when service changes but never block for uncovered riders", () => {
+  const state = {
+    buses: [
+      { _id: "direct", bus_no: "BUS-DIRECT", preview_number: "1" },
+      { _id: "member", bus_no: "BUS-MEMBER", preview_number: "2" },
+      { _id: "root", bus_no: "BUS-ROOT", preview_number: "3" },
+    ],
+    busesById: {
+      direct: { plans: ["PLAN B"], status: "active" },
+      member: { plans: ["PLAN A"], status: "active" },
+      root: { plans: ["PLAN B"], status: "active" },
+    },
+    busIdsByUser: ["direct", "member"],
+    clusters: [
+      { plan_name: "PLAN B", root_bus_id: "root", member_bus_ids: ["member"] },
+    ],
+    users: [
+      { _id: "user-direct", bus_no: "BUS-DIRECT" },
+      { _id: "user-member", bus_no: "BUS-MEMBER" },
+    ],
+  };
+  const oldClusters = [];
+
+  const notifications = getPlanMappingChangeNotifications(
+    state,
+    "PLAN B",
+    oldClusters,
+  );
+
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].user_id, "user-member");
+  assert.equal(notifications[0].new_preview, "3");
+  assert.equal(notifications[0].is_bus_active, true);
+  assert.match(notifications[0].message, /View stops/);
 });
 
 test("normalizes imported stop times and rejects malformed values", () => {

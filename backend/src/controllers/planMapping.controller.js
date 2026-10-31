@@ -7,11 +7,10 @@ const Notification = require("../models/Notification");
 const User = require("../models/User");
 const { getIO } = require("../socket");
 const {
-  getCoverageErrors,
+  getPlanMappingChangeNotifications,
   loadPlanState,
 } = require("../services/planMappingService");
 const {
-  getEffectiveBusId,
   validateCluster,
 } = require("../utils/planMapping");
 
@@ -261,38 +260,6 @@ async function savePlanMapping(req, res) {
         validationErrors,
       });
     }
-    const proposedClusters = [
-      ...existingClusters
-        .filter((cluster) => normalizePlanName(cluster.plan_name) !== planName)
-        .map((cluster) => ({
-          ...cluster,
-          plan_name: normalizePlanName(cluster.plan_name),
-        })),
-      ...otherClusters,
-      {
-        _id: clusterId || undefined,
-        plan_name: planName,
-        root_bus_id: rootBusId,
-        member_bus_ids: normalizedMembers,
-      },
-    ];
-
-    if (currentPlan === planName) {
-      const coverageState = await loadPlanState();
-      const uncovered = getCoverageErrors(
-        coverageState,
-        currentPlan,
-        proposedClusters,
-      );
-      if (uncovered.length) {
-        return res.status(409).json({
-          success: false,
-          error: "This change would leave assigned users without an operating bus. Map their buses before saving.",
-          uncoveredBuses: [...new Set(uncovered.map((item) => item.busNumber))],
-        });
-      }
-    }
-
     const savedId = clusterId || String(new mongoose.Types.ObjectId());
     const oldActiveClusters =
       currentPlan === planName ? (await loadPlanState()).clusters : [];
@@ -338,39 +305,11 @@ async function savePlanMapping(req, res) {
     await PlanMapping.bulkWrite(operations, { ordered: true });
     if (currentPlan === planName) {
       const state = await loadPlanState();
-      const busById = new Map(
-        state.buses.map((bus) => [String(bus._id), bus]),
+      const notifications = getPlanMappingChangeNotifications(
+        state,
+        currentPlan,
+        oldActiveClusters,
       );
-      const notifications = [];
-      for (let index = 0; index < state.users.length; index += 1) {
-        const user = state.users[index];
-        const assignedBusId = state.busIdsByUser[index];
-        if (!assignedBusId) continue;
-        const previousBusId = getEffectiveBusId(
-          assignedBusId,
-          currentPlan,
-          oldActiveClusters,
-        );
-        const nextBusId = getEffectiveBusId(
-          assignedBusId,
-          currentPlan,
-          state.clusters,
-        );
-        if (previousBusId === nextBusId) continue;
-        const previousBus = busById.get(previousBusId);
-        const nextBus = busById.get(nextBusId);
-        const displayBus = nextBus?.preview_number ?? nextBus?.bus_no;
-        notifications.push({
-          user_id: user._id,
-          type: "plan_changed",
-          message: `Your bus assignment changed. Use Bus ${displayBus} today. Open Home and tap View Stops to see its location, active stops, and arrival times.`,
-          old_bus_no: previousBus?.bus_no ?? null,
-          new_bus_no: nextBus?.bus_no ?? null,
-          old_preview: previousBus?.preview_number ?? null,
-          new_preview: nextBus?.preview_number ?? null,
-          is_bus_active: true,
-        });
-      }
       if (notifications.length) {
         try {
           await Notification.insertMany(notifications);
@@ -390,7 +329,7 @@ async function savePlanMapping(req, res) {
             type: notification.type,
             message: notification.message,
             newPreview: notification.new_preview,
-            isBusActive: true,
+            isBusActive: notification.is_bus_active,
           });
         });
       }
@@ -417,21 +356,42 @@ async function deletePlanMapping(req, res) {
       return res.status(404).json({ success: false, error: "Cluster not found." });
     }
     const currentPlan = await getCurrentPlan();
-    if (currentPlan === cluster.plan_name) {
+    const previousState =
+      currentPlan === normalizePlanName(cluster.plan_name)
+        ? await loadPlanState()
+        : null;
+    await PlanMapping.deleteOne({ _id: cluster._id });
+    if (previousState) {
       const state = await loadPlanState();
-      const remainingClusters = state.clusters.filter(
-        (item) => String(item._id) !== String(cluster._id),
+      const notifications = getPlanMappingChangeNotifications(
+        state,
+        currentPlan,
+        previousState.clusters,
       );
-      const uncovered = getCoverageErrors(state, currentPlan, remainingClusters);
-      if (uncovered.length) {
-        return res.status(409).json({
-          success: false,
-          error: "This cluster is currently required by assigned users. Map them to another operating bus before deleting it.",
-          uncoveredBuses: [...new Set(uncovered.map((item) => item.busNumber))],
+      if (notifications.length) {
+        try {
+          await Notification.insertMany(notifications);
+        } catch (error) {
+          console.error("deletePlanMapping notification persistence error:", error);
+          return res.status(500).json({
+            success: false,
+            mappingDeleted: true,
+            error: "Cluster deleted, but affected users could not be notified.",
+          });
+        }
+      }
+      const io = getIO();
+      if (io) {
+        notifications.forEach((notification) => {
+          io.to(`user_${String(notification.user_id)}`).emit("notification", {
+            type: notification.type,
+            message: notification.message,
+            newPreview: notification.new_preview,
+            isBusActive: notification.is_bus_active,
+          });
         });
       }
     }
-    await PlanMapping.deleteOne({ _id: cluster._id });
     const io = getIO();
     if (io) io.emit("bus-update", { actionType: "PLAN_MAPPING_CHANGED" });
     res.json({ success: true });
