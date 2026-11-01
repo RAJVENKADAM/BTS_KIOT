@@ -12,6 +12,16 @@ function normalizeIdentifier(value) {
   return String(value ?? "").trim().toUpperCase();
 }
 
+function getServiceChangeMessage(busDisplay, routeDisplay) {
+  const bus = busDisplay || "your assigned bus";
+  const route = routeDisplay || bus;
+  return `For today's service, use Bus ${bus}. Follow Bus ${route}'s stops and timings; open Home and tap View Stops to see the route.`;
+}
+
+function getAssignedBusDisplay(user, assignedBus) {
+  return assignedBus?.preview_number ?? assignedBus?.bus_no ?? user.bus_no ?? "your assigned bus";
+}
+
 async function loadPlanState() {
   const [buses, routes, clusters, users] = await Promise.all([
     Bus.find({})
@@ -144,15 +154,16 @@ function getClusterChangeNotifications(
   return state.users.flatMap((user, index) => {
     const assignedBusId = state.busIdsByUser[index];
     if (!serviceBusIds.has(assignedBusId)) return [];
+    const assignedBus = busById.get(assignedBusId);
     const busChanged = assignedBusId !== locationBusId;
     const routeChanged = routesChanged || assignedBusId !== rootBusId;
     return [{
           user_id: user._id,
           type: "plan_changed",
-          message:
-            `Bus: ${busChanged ? `Uses Bus ${locationPreview} location` : "No bus change"}\n` +
-            `Stops: ${routeChanged ? `Uses Bus ${routePreview} stops; find them on the Home page.` : "No change"}\n` +
-            "If you have any doubts, ask your administration.",
+          message: getServiceChangeMessage(
+            busChanged ? locationPreview : getAssignedBusDisplay(user, assignedBus),
+            routeChanged ? routePreview : getAssignedBusDisplay(user, assignedBus),
+          ),
           old_bus_no: rootBus?.bus_no ?? user.bus_no ?? null,
           new_bus_no: locationBus?.bus_no ?? null,
           old_preview: rootBus?.preview_number ?? null,
@@ -196,18 +207,14 @@ function getPlanChangeNotifications(state, planName) {
       const stopsChanged = effectiveBusId !== assignedBusId;
       const routeDisplay =
         effectiveBus?.preview_number ?? effectiveBus?.bus_no ?? effectiveBusId;
+      const assignedDisplay = getAssignedBusDisplay(user, assignedBus);
       return [{
         user_id: user._id,
         type: "plan_changed",
-        message: [
-          locationChanged
-            ? `Bus: Uses Bus ${locationDisplay} location`
-            : "Bus: No bus change",
-          stopsChanged
-            ? `Stops: Uses Bus ${routeDisplay} stops; find them on the Home page.`
-            : "Stops: No change",
-          "If you have any doubts, ask your administration.",
-        ].join("\n"),
+        message: getServiceChangeMessage(
+          locationChanged ? locationDisplay : assignedDisplay,
+          stopsChanged ? routeDisplay : assignedDisplay,
+        ),
         old_bus_no: assignedBus?.bus_no ?? user.bus_no ?? null,
         new_bus_no: effectiveLocationBus?.bus_no ?? null,
         old_preview: assignedBus?.preview_number ?? null,
@@ -225,13 +232,9 @@ function getPlanChangeNotifications(state, planName) {
     return [{
       user_id: user._id,
       type: "plan_changed",
-      message: [
-        isAssignedBusAvailable
-          ? `Bus: Assigned Bus ${assignedDisplay} has no service`
-          : "Bus: No assigned buses",
-        "Stops: No assigned stops",
-        "If you have any doubts, ask your administration.",
-      ].join("\n"),
+      message: isAssignedBusAvailable
+        ? `Bus ${assignedDisplay} has no route for today's service, so there is no bus or stop route to follow. Please contact administration for help.`
+        : "No bus is assigned to you for today's service, so there are no stops to follow. Please contact administration for help.",
       old_bus_no: assignedBus?.bus_no ?? user.bus_no ?? null,
       new_bus_no: null,
       old_preview: assignedBus?.preview_number ?? null,
@@ -294,9 +297,8 @@ function getPlanMappingChangeNotifications(
 
     const previousBus = busById.get(previousBusId);
     const previousLocationBus = busById.get(previousLocationBusId);
-    const nextBus = busById.get(nextLocationBusId);
+    const nextBus = busById.get(nextLocationBusId    );
     if (nextBusActive) {
-      const locationChanged = previousLocationBusId !== nextLocationBusId;
       const routeBus = busById.get(nextBusId);
       const displayBus =
         nextBus?.preview_number ?? nextBus?.bus_no ?? nextLocationBusId;
@@ -305,10 +307,7 @@ function getPlanMappingChangeNotifications(
       return [{
         user_id: user._id,
         type: "plan_changed",
-        message:
-          `Bus: ${locationChanged ? `Uses Bus ${displayBus} location` : "No bus change"}\n` +
-          `Stops: Uses Bus ${routeBusDisplay} stops; find them on the Home page.\n` +
-          "If you have any doubts, ask your administration.",
+        message: getServiceChangeMessage(displayBus, routeBusDisplay),
         old_bus_no: previousLocationBus?.bus_no ?? user.bus_no ?? null,
         new_bus_no: nextBus?.bus_no ?? null,
         old_preview: previousLocationBus?.preview_number ?? null,
@@ -328,11 +327,7 @@ function getPlanMappingChangeNotifications(
     return [{
       user_id: user._id,
       type: "plan_changed",
-      message: [
-        `Bus: Assigned Bus ${assignedDisplay} has no service`,
-        "Stops: No assigned stops",
-        "If you have any doubts, ask your administration.",
-      ].join("\n"),
+      message: `Bus ${assignedDisplay} has no route for today's service, so there is no bus or stop route to follow. Please contact administration for help.`,
       old_bus_no: previousLocationBus?.bus_no ?? user.bus_no ?? null,
       new_bus_no: null,
       old_preview: previousLocationBus?.preview_number ?? null,

@@ -992,8 +992,9 @@ export default function AddBusesScreen() {
               data={buses.filter(
                 (bus) =>
                   bus.busNo !== selectedBus?.busNo &&
-                  bus.status === "active" &&
-                  !bus.isAltered,
+                  bus.canBeTemporaryReplacement &&
+                  (busChangeMode === "combine" ||
+                    Number(bus.riderCount) === 0),
               )}
               keyExtractor={(item) => String(item.busNo)}
               renderItem={({ item }) => (
@@ -1014,7 +1015,7 @@ export default function AddBusesScreen() {
                     color={COLORS.primary}
                   />
                   <Text style={styles.optionText}>
-                    Bus {getDisplayBusNumber(item)}
+                    Bus {getDisplayBusNumber(item)} · {Number(item.riderCount) || 0} riders
                   </Text>
                 </TouchableOpacity>
               )}

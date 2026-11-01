@@ -442,6 +442,26 @@
     );
   }
 
+  function isReusableTemporarySource(bus) {
+    if (!bus || activeRiderCount(bus) !== 0) {
+      return false;
+    }
+    const busNo = normalizedBusNo(bus.busNo);
+    const relatedChanges = state.temporaryChanges.filter(
+      (change) =>
+        change.status !== "applying" &&
+        change.status !== "rolled_back" &&
+        [change.sourceBusNo, change.targetBusNo].some(
+          (identifier) => normalizedBusNo(identifier) === busNo,
+        ),
+    );
+    return relatedChanges.length > 0 && relatedChanges.every(
+      (change) =>
+        ["alter", "combine"].includes(change.type) &&
+        normalizedBusNo(change.sourceBusNo) === busNo,
+    );
+  }
+
   function isReusableCombinedSource(bus) {
     if (!bus || bus.status !== "active" || bus.isAltered || activeRiderCount(bus) !== 0) {
       return false;
@@ -449,6 +469,7 @@
     const busNo = normalizedBusNo(bus.busNo);
     const relatedChanges = state.temporaryChanges.filter(
       (change) =>
+        change.status !== "applying" &&
         change.status !== "rolled_back" &&
         [change.sourceBusNo, change.targetBusNo].some(
           (identifier) => normalizedBusNo(identifier) === busNo,
@@ -470,10 +491,19 @@
     );
   }
 
+  function reusableTemporarySources(excludedBusNos = []) {
+    const excluded = new Set(excludedBusNos.map(normalizedBusNo));
+    return state.adminBuses.filter(
+      (bus) =>
+        !excluded.has(normalizedBusNo(bus.busNo)) &&
+        isReusableTemporarySource(bus),
+    );
+  }
+
   function replacementBuses(excludedBusNos = []) {
     const excluded = new Set(excludedBusNos.map(normalizedBusNo));
     const availableBusNos = new Set(
-      [...activeBuses(), ...reusableCombinedSources()].map((bus) =>
+      [...activeBuses(), ...reusableTemporarySources()].map((bus) =>
         normalizedBusNo(bus.busNo),
       ),
     );
@@ -505,7 +535,7 @@
     }
     container.innerHTML = buses.map((bus) => {
       const isSelected = normalizedBusNo(bus.busNo) === selected;
-      const reusable = isReusableCombinedSource(bus);
+      const reusable = isReusableTemporarySource(bus);
       const plans = (bus.plans || []).length
         ? bus.plans.join(", ")
         : "Routes not listed";
@@ -643,10 +673,10 @@
     );
     if (combineSource && combineTarget) {
       byId("combine-impact-summary").textContent =
-        `${activeRiderCount(combineSource)} source-bus rider(s) will move to ${busName(combineTarget)}. The source bus will have 0 riders and can be reused. Before rollback, undo newer changes involving the source and reassign any riders from it so it has 0 riders.`;
+        `${activeRiderCount(combineSource)} source-bus rider(s) will move to ${busName(combineTarget)}. The source bus will have 0 riders and can be reused in another change.`;
     } else {
       byId("combine-impact-summary").textContent =
-        "Choose both buses to review rider counts. The source bus will have 0 riders after combining and can be reused. Before rollback, undo newer changes involving it and make sure it has 0 riders.";
+        "Choose both buses to review rider counts. The source bus will have 0 riders after combining and can be reused in another change.";
     }
     const useCustomRoutes = byId("combine-route-source").value === "custom";
     byId("combine-routes-file-field").hidden = !useCustomRoutes;

@@ -1,4 +1,4 @@
-function isReusableCombinedSource(activeChanges, busId) {
+function isReusableTemporaryChangeSource(activeChanges, busId) {
   const identifier = String(busId);
   const relatedChanges = activeChanges.filter(
     (change) =>
@@ -10,10 +10,11 @@ function isReusableCombinedSource(activeChanges, busId) {
     relatedChanges.length > 0 &&
     relatedChanges.every(
       (change) =>
+        change.status !== "applying" &&
         String(change.sourceBusId) === identifier &&
-        change.type === "combine",
+        ["alter", "combine"].includes(change.type),
     )
   );
 }
 
-module.exports = isReusableCombinedSource;
+module.exports = isReusableTemporaryChangeSource;

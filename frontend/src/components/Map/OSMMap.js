@@ -15,14 +15,14 @@ export default function OSMMap({
   markerStatus = "moving",
 }) {
   const webRef = useRef(null);
+  const latestPayloadRef = useRef(null);
+  const webViewReadyRef = useRef(false);
 
   // Push multi-bus payload + selected bus payload (legacy) to WebView
   // Keep strict single-focus behavior:
   // - Only send a single bus marker (BUS_LOCATION)
   // - Ignore multi-bus payloads so other buses never render simultaneously
   useEffect(() => {
-    if (!webRef.current) return;
-
     // Strict single-focus behavior:
     // - If busData is null or has no valid coords → tell the map to clear ALL
     //   bus markers so it reverts to the KIOT college default (no stale marker
@@ -31,7 +31,10 @@ export default function OSMMap({
     //   markers before rendering the single one (see CLEAR before upsert in
     //   the WebView JS), so only the searched bus ever shows.
     if (!busData) {
-      webRef.current.postMessage(JSON.stringify({ type: "CLEAR_MARKERS" }));
+      latestPayloadRef.current = { type: "CLEAR_MARKERS" };
+      if (webViewReadyRef.current) {
+        webRef.current?.postMessage(JSON.stringify(latestPayloadRef.current));
+      }
       return;
     }
 
@@ -41,11 +44,14 @@ export default function OSMMap({
       Number.isFinite(Number(busData.latitude)) &&
       Number.isFinite(Number(busData.longitude));
     if (!hasPrimaryLocation) {
-      webRef.current.postMessage(JSON.stringify({ type: "CLEAR_MARKERS" }));
+      latestPayloadRef.current = { type: "CLEAR_MARKERS" };
+      if (webViewReadyRef.current) {
+        webRef.current?.postMessage(JSON.stringify(latestPayloadRef.current));
+      }
       return;
     }
 
-    const singlePayload = {
+    latestPayloadRef.current = {
       type: "BUS_LOCATION",
       previewNumber:
         busData.previewNumber ??
@@ -57,7 +63,9 @@ export default function OSMMap({
       isOffline: busData._isOffline === true,
       markerStatus: busData._markerStatus ?? markerStatus,
     };
-    webRef.current.postMessage(JSON.stringify(singlePayload));
+    if (webViewReadyRef.current) {
+      webRef.current?.postMessage(JSON.stringify(latestPayloadRef.current));
+    }
   }, [busData, markerStatus]);
 
   const html = `
@@ -186,6 +194,7 @@ export default function OSMMap({
       var activeRouteBus = null;
       var lastRequestedRoute = null;
       var hasFocusedRoute = false;
+      var hasFocusedFallback = false;
 
       function clearRouteLines() {
         routeRequestId += 1;
@@ -195,6 +204,7 @@ export default function OSMMap({
         routeLayers = [];
         lastRequestedRoute = null;
         hasFocusedRoute = false;
+        hasFocusedFallback = false;
       }
 
       function showPossibleRoutes(busKey, lat, lng) {
@@ -202,6 +212,28 @@ export default function OSMMap({
         if (lastRequestedRoute === routeKey) return;
         lastRequestedRoute = routeKey;
         var requestId = ++routeRequestId;
+        var fallbackLine = L.polyline(
+          [[lat, lng], [${KIOT_LAT}, ${KIOT_LNG}]],
+          {
+            color: '#2563eb',
+            weight: 4,
+            opacity: 0.55,
+            dashArray: '7 8',
+            lineCap: 'round',
+            lineJoin: 'round'
+          }
+        ).addTo(map);
+        routeLayers.forEach(function (layer) {
+          map.removeLayer(layer);
+        });
+        routeLayers = [fallbackLine];
+        if (!hasFocusedFallback && !hasFocusedRoute) {
+          map.fitBounds(
+            L.latLngBounds([[${KIOT_LAT}, ${KIOT_LNG}], [lat, lng]]),
+            { padding: [36, 36], maxZoom: 14 }
+          );
+          hasFocusedFallback = true;
+        }
         var url = 'https://router.project-osrm.org/route/v1/driving/' +
           lng + ',' + lat + ';' + ${KIOT_LNG} + ',' + ${KIOT_LAT} +
           '?alternatives=true&overview=full&geometries=geojson';
@@ -378,7 +410,9 @@ function upsertBusMarker(key, lat, lng, offline, status) {
               clearRouteLines();
             } else if (isFinite(busLat) && isFinite(busLng)) {
               showPossibleRoutes(keySingle, busLat, busLng);
-              if (!hasFocusedRoute) focusMap(busLat, busLng);
+              if (!hasFocusedFallback && !hasFocusedRoute) {
+                focusMap(busLat, busLng);
+              }
             }
             return;
           }
@@ -390,6 +424,9 @@ function upsertBusMarker(key, lat, lng, offline, status) {
 
       // RN → WebView bridge
       document.addEventListener('message', function (event) {
+        handleMessage(event.data);
+      });
+      window.addEventListener('message', function (event) {
         handleMessage(event.data);
       });
 
@@ -429,6 +466,15 @@ function upsertBusMarker(key, lat, lng, offline, status) {
       style={{ flex: 1, width: "100%", height: "100%" }}
       javaScriptEnabled
       domStorageEnabled
+      onLoad={() => {
+        webViewReadyRef.current = true;
+        if (latestPayloadRef.current) {
+          webRef.current?.postMessage(JSON.stringify(latestPayloadRef.current));
+        }
+      }}
+      onLoadStart={() => {
+        webViewReadyRef.current = false;
+      }}
       originWhitelist={[
         "about:blank",
         "https://unpkg.com",

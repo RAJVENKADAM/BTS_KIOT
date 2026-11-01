@@ -1,13 +1,13 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const isReusableCombinedSource = require("../src/utils/isReusableCombinedSource");
+const isReusableTemporaryChangeSource = require("../src/utils/isReusableTemporaryChangeSource");
 
 test("allows an active combination source to be reused", () => {
   const activeChanges = [
     { sourceBusId: "source", targetBusId: "replacement", type: "combine" },
   ];
 
-  assert.equal(isReusableCombinedSource(activeChanges, "source"), true);
+  assert.equal(isReusableTemporaryChangeSource(activeChanges, "source"), true);
 });
 
 test("does not allow a combination replacement bus to be reused", () => {
@@ -15,15 +15,28 @@ test("does not allow a combination replacement bus to be reused", () => {
     { sourceBusId: "source", targetBusId: "replacement", type: "combine" },
   ];
 
-  assert.equal(isReusableCombinedSource(activeChanges, "replacement"), false);
+  assert.equal(isReusableTemporaryChangeSource(activeChanges, "replacement"), false);
 });
 
-test("does not allow a bus involved in an alteration to be reused", () => {
+test("allows an alteration source to be reused as a replacement", () => {
   const activeChanges = [
     { sourceBusId: "source", targetBusId: "replacement", type: "alter" },
   ];
 
-  assert.equal(isReusableCombinedSource(activeChanges, "source"), false);
+  assert.equal(isReusableTemporaryChangeSource(activeChanges, "source"), true);
+});
+
+test("does not allow a source to be reused while its change is applying", () => {
+  const activeChanges = [
+    {
+      sourceBusId: "source",
+      targetBusId: "replacement",
+      type: "alter",
+      status: "applying",
+    },
+  ];
+
+  assert.equal(isReusableTemporaryChangeSource(activeChanges, "source"), false);
 });
 
 test("does not allow a combination source to be reused as another change's replacement", () => {
@@ -32,5 +45,5 @@ test("does not allow a combination source to be reused as another change's repla
     { sourceBusId: "other", targetBusId: "source", type: "alter" },
   ];
 
-  assert.equal(isReusableCombinedSource(activeChanges, "source"), false);
+  assert.equal(isReusableTemporaryChangeSource(activeChanges, "source"), false);
 });

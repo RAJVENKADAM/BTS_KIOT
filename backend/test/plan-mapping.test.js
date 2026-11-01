@@ -149,19 +149,19 @@ test("global plan changes notify all riders without exposing plan names", () => 
   ]);
   assert.equal(
     notifications[0].message,
-    "Bus: No bus change\nStops: No change\nIf you have any doubts, ask your administration.",
+    "For today's service, use Bus 1. Follow Bus 1's stops and timings; open Home and tap View Stops to see the route.",
   );
   assert.equal(
     notifications[1].message,
-    "Bus: Uses Bus 3 location\nStops: Uses Bus 3 stops; find them on the Home page.\nIf you have any doubts, ask your administration.",
+    "For today's service, use Bus 3. Follow Bus 3's stops and timings; open Home and tap View Stops to see the route.",
   );
   assert.doesNotMatch(notifications[0].message, /PLAN B/i);
   assert.equal(notifications[1].new_preview, "3");
-  assert.match(notifications[2].message, /Bus: Assigned Bus 4 has no service/);
+  assert.match(notifications[2].message, /Bus 4 has no route for today's service/);
   assert.doesNotMatch(notifications[2].message, /PLAN B/i);
   assert.equal(
     notifications[3].message,
-    "Bus: No assigned buses\nStops: No assigned stops\nIf you have any doubts, ask your administration.",
+    "No bus is assigned to you for today's service, so there are no stops to follow. Please contact administration for help.",
   );
 
   const normalPlanNotifications = getPlanChangeNotifications(state, "PLAN A");
@@ -181,7 +181,7 @@ test("global plan changes notify all riders without exposing plan names", () => 
   assert.ok(normalPlanNotifications.every(({ message }) => !/PLAN A/i.test(message)));
   assert.equal(
     normalPlanNotifications[1].message,
-    "Bus: No bus change\nStops: No change\nIf you have any doubts, ask your administration.",
+    "For today's service, use Bus 2. Follow Bus 2's stops and timings; open Home and tap View Stops to see the route.",
   );
 });
 
@@ -218,7 +218,7 @@ test("cluster edits notify riders when service changes but never block for uncov
   assert.equal(notifications[0].user_id, "user-member");
   assert.equal(notifications[0].new_preview, "3");
   assert.equal(notifications[0].is_bus_active, true);
-  assert.match(notifications[0].message, /Stops: Uses Bus 3 stops/);
+  assert.match(notifications[0].message, /Follow Bus 3's stops and timings/);
 });
 
 test("temporary location swaps keep root stops and notify all root and member riders", () => {
@@ -249,18 +249,15 @@ test("temporary location swaps keep root stops and notify all root and member ri
 
   assert.equal(notifications.length, 2);
   assert.deepEqual(
-    notifications.map(({ user_id, message }) => [
-      user_id,
-      message.split("\n").slice(0, 2),
-    ]),
+    notifications.map(({ user_id, message }) => [user_id, message]),
     [
       [
         "root-rider",
-        ["Bus: Uses Bus 8 location", "Stops: Uses Bus 3 stops; find them on the Home page."],
+        "For today's service, use Bus 8. Follow Bus 3's stops and timings; open Home and tap View Stops to see the route.",
       ],
       [
         "member-rider",
-        ["Bus: Uses Bus 8 location", "Stops: Uses Bus 3 stops; find them on the Home page."],
+        "For today's service, use Bus 8. Follow Bus 3's stops and timings; open Home and tap View Stops to see the route.",
       ],
     ],
   );
@@ -309,7 +306,7 @@ test("saving a temporary bus swap notifies root and mapped riders with separate 
   assert.ok(
     notifications.every((notification) =>
       notification.message.includes(
-        "Bus: Uses Bus 8 location\nStops: Uses Bus 3 stops",
+        "For today's service, use Bus 8. Follow Bus 3's stops and timings",
       ),
     ),
   );
@@ -345,10 +342,10 @@ test("global plan activation uses the swapped bus for location and the root bus 
   const notifications = getPlanChangeNotifications(state, "PLAN B");
 
   assert.equal(notifications.length, 2);
-  assert.match(notifications[0].message, /Bus: Uses Bus 8 location/);
-  assert.match(notifications[0].message, /Stops: No change/);
-  assert.match(notifications[1].message, /Bus: Uses Bus 8 location/);
-  assert.match(notifications[1].message, /Stops: Uses Bus 3 stops/);
+  assert.match(notifications[0].message, /use Bus 8/);
+  assert.match(notifications[0].message, /Follow Bus 3's stops/);
+  assert.match(notifications[1].message, /use Bus 8/);
+  assert.match(notifications[1].message, /Follow Bus 3's stops/);
   assert.ok(notifications.every(({ new_preview }) => new_preview === "8"));
 });
 
