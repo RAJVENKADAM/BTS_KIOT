@@ -167,29 +167,6 @@
               <div id="global-plan-notice" class="notice" role="status" hidden></div>
             </section>
 
-            <section class="dashboard-actions">
-              <div class="section-heading">
-                <div>
-                  <span class="eyebrow">QUICK ACTIONS</span>
-                  <h2>Manage BTMS</h2>
-                  <p>Manage users, buses, and route assignments.</p>
-                </div>
-              </div>
-              <div class="action-grid">
-                <button class="action-card" type="button" data-open-page="add-users">
-                  <strong>Add users</strong><span>Create a student or primary admin account.</span>
-                </button>
-                <button class="action-card" type="button" data-open-page="add-buses">
-                  <strong>Add buses</strong><span>Register a bus and enter its route stops.</span>
-                </button>
-                <button class="action-card" type="button" data-open-page="bus-changes">
-                  <strong>Temporary bus changes</strong><span>Alter or combine buses and roll changes back when service returns to normal.</span>
-                </button>
-                <button class="action-card" type="button" data-open-page="plan-mapping">
-                  <strong>Plan mapping</strong><span>Organize route clusters and bus assignments.</span>
-                </button>
-              </div>
-            </section>
           </section>
 
           <section class="admin-page" data-page-content="add-users" hidden>
@@ -236,20 +213,25 @@
                   </select>
                 </label>
                 <label class="table-filter">
-                  <span class="visually-hidden">Filter by status</span>
-                  <select id="users-status-filter">
-                    <option value="all">All statuses</option>
-                    <option value="active">Active</option>
-                    <option value="inactive">Inactive</option>
-                  </select>
-                </label>
-                <label class="table-filter">
                   <span class="visually-hidden">Filter by bus</span>
                   <select id="users-bus-filter">
                     <option value="all">All buses</option>
                   </select>
                 </label>
                 <span id="users-count" class="table-count" aria-live="polite"></span>
+                <div class="bulk-user-actions">
+                  <label class="table-filter">
+                    <span class="visually-hidden">Change selected users' role</span>
+                    <select id="bulk-user-role">
+                      <option value="">Change selected role…</option>
+                      <option value="student">Student</option>
+                      <option value="primary_admin">Primary admin</option>
+                      <option value="superadmin">Super admin</option>
+                    </select>
+                  </label>
+                  <button id="apply-bulk-user-role" class="button button-quiet" type="button" disabled>Apply role</button>
+                  <button id="delete-selected-users" class="button button-danger" type="button" disabled>Delete selected</button>
+                </div>
               </div>
               <div id="users-list" class="table-scroll" aria-live="polite"></div>
             </section>
@@ -379,13 +361,6 @@
           </section>
 
           <section class="admin-page" data-page-content="plan-mapping" hidden>
-            <section class="page-heading">
-              <div>
-                <span class="eyebrow">SERVICE CONFIGURATION</span>
-                <h1>Plan mapping</h1>
-                <p>Build service clusters and guide every rider to the right bus.</p>
-              </div>
-            </section>
           <section class="mapping-section">
             <div class="section-heading">
               <div>

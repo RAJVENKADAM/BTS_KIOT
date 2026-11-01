@@ -1,13 +1,18 @@
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
 const User = require("../src/models/User");
-const { getUsers, updateUser } = require("../src/controllers/superadminUser.controller");
+const Notification = require("../src/models/Notification");
+const {
+  deleteSelectedUsers,
+  getUsers,
+  updateUser,
+  updateUsersRole,
+} = require("../src/controllers/superadminUser.controller");
 
-test("lists active, inactive, and legacy users", async () => {
+test("lists authorized users and excludes deactivated accounts", async () => {
   const originalFind = User.find;
   const records = [
     { _id: "active-id", name: "Active", is_active: true },
-    { _id: "inactive-id", name: "Inactive", is_active: false },
     { _id: "legacy-id", name: "Legacy" },
   ];
   let filter;
@@ -36,11 +41,10 @@ test("lists active, inactive, and legacy users", async () => {
   try {
     await getUsers({}, response);
 
-    assert.deepEqual(filter, {});
+    assert.deepEqual(filter, { is_active: { $ne: false } });
     assert.equal(response.statusCode, 200);
     assert.deepEqual(response.payload.users.map((user) => user.id), [
       "active-id",
-      "inactive-id",
       "legacy-id",
     ]);
   } finally {
@@ -48,18 +52,27 @@ test("lists active, inactive, and legacy users", async () => {
   }
 });
 
-test("reactivates an inactive user through the update endpoint", async () => {
+test("updates one authorized user's editable fields", async () => {
+  const originalFindById = User.findById;
   const originalFindByIdAndUpdate = User.findByIdAndUpdate;
   const updatedUser = {
-    _id: "inactive-id",
-    name: "Inactive",
-    email: "inactive@example.test",
+    _id: "64a000000000000000000001",
+    name: "Updated",
+    email: "updated@example.test",
     role: "student",
     is_active: true,
-    deleted_by_user: false,
     select: () => updatedUser,
   };
   let update;
+  User.findById = () => ({
+    select: () => ({
+      lean: async () => ({
+        _id: "64a000000000000000000001",
+        role: "student",
+        is_active: true,
+      }),
+    }),
+  });
   User.findByIdAndUpdate = (_id, fields) => {
     update = fields;
     return {
@@ -80,14 +93,155 @@ test("reactivates an inactive user through the update endpoint", async () => {
 
   try {
     await updateUser(
-      { params: { id: "inactive-id" }, body: { is_active: true } },
+      {
+        params: { id: "64a000000000000000000001" },
+        body: { name: "Updated", role: "student", bus_no: "12" },
+        user: { id: "64a000000000000000000099" },
+      },
       response,
     );
 
-    assert.deepEqual(update, { is_active: true, deleted_by_user: false });
+    assert.deepEqual(update, { name: "Updated", role: "student", bus_no: "12" });
     assert.equal(response.statusCode, 200);
-    assert.equal(response.payload.user.is_active, true);
+    assert.equal(response.payload.user.name, "Updated");
   } finally {
+    User.findById = originalFindById;
     User.findByIdAndUpdate = originalFindByIdAndUpdate;
+  }
+});
+
+test("rejects demoting the last active super admin through the edit endpoint", async () => {
+  const originalFindById = User.findById;
+  const originalCountDocuments = User.countDocuments;
+  const originalFindByIdAndUpdate = User.findByIdAndUpdate;
+  User.findById = () => ({
+    select: () => ({
+      lean: async () => ({
+        _id: "64a000000000000000000001",
+        role: "superadmin",
+        is_active: true,
+      }),
+    }),
+  });
+  User.countDocuments = async () => 1;
+  User.findByIdAndUpdate = () => {
+    throw new Error("Must not update the last super admin.");
+  };
+  const response = {
+    statusCode: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.payload = payload;
+      return this;
+    },
+  };
+
+  try {
+    await updateUser(
+      {
+        params: { id: "64a000000000000000000001" },
+        body: { role: "student" },
+        user: { id: "64a000000000000000000099" },
+      },
+      response,
+    );
+
+    assert.equal(response.statusCode, 409);
+    assert.match(response.payload.error, /At least one active super admin/);
+  } finally {
+    User.findById = originalFindById;
+    User.countDocuments = originalCountDocuments;
+    User.findByIdAndUpdate = originalFindByIdAndUpdate;
+  }
+});
+
+test("permanently deletes selected users and their notifications", async () => {
+  const originalFind = User.find;
+  const originalDeleteMany = User.deleteMany;
+  const originalNotificationDeleteMany = Notification.deleteMany;
+  const firstId = "64a000000000000000000001";
+  const secondId = "64a000000000000000000002";
+  let userDeleteFilter;
+  let notificationDeleteFilter;
+  User.find = () => ({
+    select: () => ({
+      lean: async () => [
+        { _id: firstId, role: "student", is_active: true },
+        { _id: secondId, role: "primary_admin", is_active: true },
+      ],
+    }),
+  });
+  User.deleteMany = async (filter) => {
+    userDeleteFilter = filter;
+    return { deletedCount: 2 };
+  };
+  Notification.deleteMany = async (filter) => {
+    notificationDeleteFilter = filter;
+  };
+  const response = {
+    statusCode: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.payload = payload;
+      return this;
+    },
+  };
+
+  try {
+    await deleteSelectedUsers(
+      { body: { ids: [firstId, secondId] }, user: { id: "64a000000000000000000099" } },
+      response,
+    );
+
+    assert.deepEqual(userDeleteFilter, { _id: { $in: [firstId, secondId] } });
+    assert.deepEqual(notificationDeleteFilter, { user_id: { $in: [firstId, secondId] } });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.payload.deletedCount, 2);
+  } finally {
+    User.find = originalFind;
+    User.deleteMany = originalDeleteMany;
+    Notification.deleteMany = originalNotificationDeleteMany;
+  }
+});
+
+test("rejects bulk role changes that would remove the last super admin", async () => {
+  const originalFind = User.find;
+  const originalCountDocuments = User.countDocuments;
+  const firstId = "64a000000000000000000001";
+  User.find = () => ({
+    select: () => ({
+      lean: async () => [{ _id: firstId, role: "superadmin", is_active: true }],
+    }),
+  });
+  User.countDocuments = async () => 1;
+  const response = {
+    statusCode: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.payload = payload;
+      return this;
+    },
+  };
+
+  try {
+    await updateUsersRole(
+      { body: { ids: [firstId], role: "student" }, user: { id: "64a000000000000000000099" } },
+      response,
+    );
+
+    assert.equal(response.statusCode, 409);
+    assert.match(response.payload.error, /At least one active super admin/);
+  } finally {
+    User.find = originalFind;
+    User.countDocuments = originalCountDocuments;
   }
 });

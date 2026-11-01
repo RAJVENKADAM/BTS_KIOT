@@ -9,12 +9,12 @@
     user: null,
     data: { activePlan: "PLAN A", buses: [], clusters: [] },
     users: [],
+    selectedUserIds: new Set(),
     adminBuses: [],
     temporaryChanges: [],
     changeMode: "alter",
     userSearch: "",
     userRoleFilter: "all",
-    userStatusFilter: "all",
     userBusFilter: "all",
     selectedUserId: null,
     selectedBusNo: null,
@@ -124,11 +124,11 @@
     state.user = null;
     state.data = { activePlan: "PLAN A", buses: [], clusters: [] };
     state.users = [];
+    state.selectedUserIds = new Set();
     state.adminBuses = [];
     state.temporaryChanges = [];
     state.userSearch = "";
     state.userRoleFilter = "all";
-    state.userStatusFilter = "all";
     state.userBusFilter = "all";
     sessionStorage.removeItem(TOKEN_KEY);
   }
@@ -304,16 +304,15 @@
     const container = byId("users-list");
     if (!container) return;
     const roleFilter = byId("users-role-filter");
-    const statusFilter = byId("users-status-filter");
     const busFilter = byId("users-bus-filter");
     const searchInput = byId("users-search");
     const count = byId("users-count");
 
     if (searchInput) searchInput.value = state.userSearch;
     if (roleFilter) roleFilter.value = state.userRoleFilter;
-    if (statusFilter) statusFilter.value = state.userStatusFilter;
     if (busFilter) {
-      const buses = [...new Set(state.users.map((user) => String(user.bus_no || "").trim()).filter(Boolean))]
+      const activeUsers = state.users.filter((user) => user.is_active !== false);
+      const buses = [...new Set(activeUsers.map((user) => String(user.bus_no || "").trim()).filter(Boolean))]
         .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
       busFilter.innerHTML = '<option value="all">All buses</option>' + buses.map((busNo) =>
         `<option value="${escapeHtml(busNo)}">Bus ${escapeHtml(busNo)}</option>`,
@@ -325,64 +324,83 @@
       }
     }
 
-    if (!state.users.length) {
+    const activeUsers = state.users.filter((user) => user.is_active !== false);
+    if (!activeUsers.length) {
       if (count) count.textContent = "0 users";
       container.innerHTML = '<div class="empty-state">No users found.</div>';
+      syncBulkUserControls();
       return;
     }
 
     const search = state.userSearch.trim().toLocaleLowerCase();
-    const users = state.users.filter((user) => {
+    const users = activeUsers.filter((user) => {
       const role = String(user.role || "").toLowerCase();
-      const active = user.is_active !== false;
       const busNo = String(user.bus_no || "").trim();
       const matchesSearch = !search || [
         user.name,
         user.email,
         user.role,
         user.bus_no,
-        active ? "active" : "inactive",
       ].some((value) => String(value || "").toLocaleLowerCase().includes(search));
       return matchesSearch &&
         (state.userRoleFilter === "all" || role === state.userRoleFilter) &&
-        (state.userStatusFilter === "all" || (state.userStatusFilter === "active") === active) &&
         (state.userBusFilter === "all" || busNo === state.userBusFilter);
     });
 
-    if (count) count.textContent = `${users.length} of ${state.users.length} users`;
+    if (count) count.textContent = `${users.length} of ${activeUsers.length} authorized accounts`;
     if (!users.length) {
       container.innerHTML = '<div class="empty-state"><strong>No matching users</strong><p>Change or clear the search and filters to see users.</p></div>';
+      syncBulkUserControls();
       return;
     }
 
     container.innerHTML = `
       <table class="user-table">
         <thead>
-          <tr><th scope="col">Name</th><th scope="col">Email</th><th scope="col">Role</th><th scope="col">Bus</th><th scope="col">Status</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr>
+          <tr>
+            <th scope="col"><input id="select-visible-users" class="user-select-checkbox" type="checkbox" aria-label="Select all visible users" /></th>
+            <th scope="col">Name</th><th scope="col">Email</th><th scope="col">Role</th><th scope="col">Bus</th><th scope="col"><span class="visually-hidden">Actions</span></th>
+          </tr>
         </thead>
         <tbody>
           ${users.map((user) => {
-            const active = user.is_active !== false;
             const role = String(user.role || "—");
             const roleLabel = role === "primary_admin" ? "Primary admin" : role === "superadmin" ? "Super admin" : role;
             return `
             <tr>
+              <td><input class="user-select-checkbox" type="checkbox" data-user-select="${escapeHtml(user.id)}" aria-label="Select ${escapeHtml(user.name || user.email || "user")}" ${state.selectedUserIds.has(String(user.id)) ? "checked" : ""} /></td>
               <td class="user-name">${escapeHtml(user.name || "Unnamed user")}</td>
               <td>${escapeHtml(user.email || "—")}</td>
               <td>${escapeHtml(roleLabel)}</td>
               <td>${user.bus_no ? `Bus ${escapeHtml(user.bus_no)}` : "—"}</td>
-              <td><span class="status-pill${active ? " status-active" : " status-inactive"}">${active ? "Active" : "Inactive"}</span></td>
               <td class="user-actions">
                 <button type="button" class="button button-quiet" data-user-action="edit" data-user-id="${escapeHtml(user.id)}">Edit</button>
-                ${active
-                  ? `<button type="button" class="text-button danger" data-user-action="deactivate" data-user-id="${escapeHtml(user.id)}">Deactivate</button>`
-                  : `<button type="button" class="text-button" data-user-action="activate" data-user-id="${escapeHtml(user.id)}">Activate</button>`}
+                <button type="button" class="button button-danger" data-user-action="delete" data-user-id="${escapeHtml(user.id)}">Delete</button>
               </td>
             </tr>`;
           }).join("")}
         </tbody>
       </table>
     `;
+    const visibleIds = users.map((user) => String(user.id));
+    const selectVisible = byId("select-visible-users");
+    selectVisible.checked = visibleIds.length > 0 &&
+      visibleIds.every((id) => state.selectedUserIds.has(id));
+    selectVisible.indeterminate = !selectVisible.checked &&
+      visibleIds.some((id) => state.selectedUserIds.has(id));
+    syncBulkUserControls();
+  }
+
+  function syncBulkUserControls() {
+    const count = state.selectedUserIds.size;
+    const role = byId("bulk-user-role");
+    const applyRole = byId("apply-bulk-user-role");
+    const deleteUsers = byId("delete-selected-users");
+    if (applyRole) applyRole.disabled = !count || !role?.value;
+    if (deleteUsers) {
+      deleteUsers.disabled = !count;
+      deleteUsers.textContent = count ? `Delete selected (${count})` : "Delete selected";
+    }
   }
 
   function renderBuses() {
@@ -598,21 +616,45 @@
       const routeChoice = change.routeSource === "custom"
         ? "Custom uploaded routes"
         : change.routeSource === "source"
-          ? "Source bus stops"
+          ? `${busName({ previewNumber: change.sourcePreview, busNo: change.sourceBusNo })} stops`
           : change.routeSource === "target"
-            ? "Handling bus stops"
+            ? `${busName({ previewNumber: change.targetPreview, busNo: change.targetBusNo })} stops`
             : "";
+      const sourceName = busName({
+        previewNumber: change.sourcePreview,
+        busNo: change.sourceBusNo,
+      });
+      const replacementName = busName({
+        previewNumber: change.targetPreview,
+        busNo: change.targetBusNo,
+      });
       return `
         <article class="temporary-change-card">
-          <div class="temporary-change-copy">
-            <span class="change-type-pill">${isAlter ? "Altered" : "Combined"}</span>
-            <h3>${escapeHtml(busName({ previewNumber: change.sourcePreview, busNo: change.sourceBusNo }))} ${isAlter ? "using location from" : "combined with"} ${escapeHtml(busName({ previewNumber: change.targetPreview, busNo: change.targetBusNo }))}</h3>
-            <p>${isAlter
-              ? "Original stops are preserved; replacement bus supplies live location."
-              : `Source riders follow the replacement bus. ${escapeHtml(routeChoice)}. Source bus currently has ${sourceRiders} rider(s); roll back newer changes first and make it empty.`}</p>
-            <small>${Number(change.affectedUsersCount || 0)} affected riders · ${escapeHtml(change.status === "applying" ? "Change is being applied" : new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(change.createdAt)))}</small>
+          <div class="change-bus-pair">
+            <div class="change-bus-card">
+              <span>Source bus</span>
+              <strong>${escapeHtml(sourceName)}</strong>
+              <small>${sourceRiders} current riders</small>
+            </div>
+            <span class="change-bus-arrow" aria-hidden="true">→</span>
+            <div class="change-bus-card">
+              <span>Replacement bus</span>
+              <strong>${escapeHtml(replacementName)}</strong>
+              <small>${activeRiderCount(state.adminBuses.find((bus) =>
+                normalizedBusNo(bus.busNo) === normalizedBusNo(change.targetBusNo),
+              ) || { busNo: change.targetBusNo })} current riders</small>
+            </div>
           </div>
-          <button type="button" class="button button-quiet" data-rollback-change="${escapeHtml(change.id)}" data-legacy="${Boolean(change.legacy)}" ${isApplying ? "disabled" : ""}>${isApplying ? "Applying…" : "Rollback to normal"}</button>
+          <div class="temporary-change-summary">
+            <div class="temporary-change-copy">
+              <span class="change-type-pill">${isAlter ? "Altered" : "Combined"}</span>
+              <p>${isAlter
+                ? `${escapeHtml(replacementName)} supplies the live location. Riders continue to follow ${escapeHtml(sourceName)}'s original stops.`
+                : `Riders use ${escapeHtml(replacementName)}. Stops follow ${escapeHtml(routeChoice || "the selected combined route")}.`}</p>
+              <small>${Number(change.affectedUsersCount || 0)} affected riders · ${escapeHtml(change.status === "applying" ? "Change is being applied" : new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(change.createdAt)))}</small>
+            </div>
+            <button type="button" class="button button-quiet" data-rollback-change="${escapeHtml(change.id)}" data-legacy="${Boolean(change.legacy)}" ${isApplying ? "disabled" : ""}>${isApplying ? "Applying…" : "Rollback to normal"}</button>
+          </div>
         </article>`;
     }).join("");
   }
@@ -1262,30 +1304,54 @@
     }
   }
 
-  async function deactivateUser(userId) {
-    const user = state.users.find((item) => item.id === userId);
-    if (!user || !window.confirm(`Deactivate ${user.name || user.email}?`)) return;
+  async function deleteSelectedUsers(userIds = [...state.selectedUserIds]) {
+    const ids = [...new Set(userIds.map(String))];
+    if (!ids.length) return;
+    const names = state.users
+      .filter((user) => ids.includes(String(user.id)))
+      .map((user) => user.name || user.email)
+      .filter(Boolean);
+    const preview = names.slice(0, 4).join(", ");
+    const more = names.length > 4 ? ` and ${names.length - 4} more` : "";
+    if (!window.confirm(
+      `Permanently delete ${ids.length} user account(s)?${preview ? `\n\n${preview}${more}` : ""}\n\nThis cannot be undone.`,
+    )) return;
     try {
-      await request(`/api/superadmin/users/${encodeURIComponent(userId)}`, {
+      const result = await request("/api/superadmin/users", {
         method: "DELETE",
+        body: JSON.stringify({ ids }),
       });
-      showToast("User deactivated.");
+      state.selectedUserIds.clear();
+      showToast(result.message || "Selected user accounts deleted.");
       await loadAdminRecords();
     } catch (requestError) {
-      showToast(requestError.message || "Could not deactivate this user.", true);
+      showToast(requestError.message || "Could not delete the selected users.", true);
     }
   }
 
-  async function activateUser(userId) {
+  async function applyBulkUserRole() {
+    const ids = [...state.selectedUserIds];
+    const role = byId("bulk-user-role").value;
+    if (!ids.length || !role) return;
+    const roleLabel = role === "primary_admin"
+      ? "Primary admin"
+      : role === "superadmin"
+        ? "Super admin"
+        : "Student";
+    if (!window.confirm(`Change the role to ${roleLabel} for ${ids.length} selected account(s)?`)) {
+      return;
+    }
     try {
-      await request(`/api/superadmin/users/${encodeURIComponent(userId)}`, {
-        method: "PUT",
-        body: JSON.stringify({ is_active: true }),
+      const result = await request("/api/superadmin/users/bulk-role", {
+        method: "POST",
+        body: JSON.stringify({ ids, role }),
       });
-      showToast("User activated.");
+      state.selectedUserIds.clear();
+      byId("bulk-user-role").value = "";
+      showToast(result.message || "Selected user roles updated.");
       await loadAdminRecords();
     } catch (requestError) {
-      showToast(requestError.message || "Could not activate this user.", true);
+      showToast(requestError.message || "Could not update the selected user roles.", true);
     }
   }
 
@@ -1497,8 +1563,25 @@
       const button = event.target.closest("[data-user-action]");
       if (!button) return;
       if (button.dataset.userAction === "edit") openUserEditor(button.dataset.userId);
-      if (button.dataset.userAction === "deactivate") deactivateUser(button.dataset.userId);
-      if (button.dataset.userAction === "activate") activateUser(button.dataset.userId);
+      if (button.dataset.userAction === "delete") deleteSelectedUsers([button.dataset.userId]);
+    });
+    byId("users-list").addEventListener("change", (event) => {
+      const selectAll = event.target.closest("#select-visible-users");
+      if (selectAll) {
+        byId("users-list").querySelectorAll("[data-user-select]").forEach((checkbox) => {
+          const userId = String(checkbox.dataset.userSelect);
+          if (selectAll.checked) state.selectedUserIds.add(userId);
+          else state.selectedUserIds.delete(userId);
+        });
+        renderUsers();
+        return;
+      }
+      const checkbox = event.target.closest("[data-user-select]");
+      if (!checkbox) return;
+      const userId = String(checkbox.dataset.userSelect);
+      if (checkbox.checked) state.selectedUserIds.add(userId);
+      else state.selectedUserIds.delete(userId);
+      renderUsers();
     });
     byId("buses-list").addEventListener("click", (event) => {
       const card = event.target.closest("[data-bus-open]");
@@ -1551,14 +1634,13 @@
       state.userRoleFilter = event.currentTarget.value;
       renderUsers();
     });
-    byId("users-status-filter").addEventListener("change", (event) => {
-      state.userStatusFilter = event.currentTarget.value;
-      renderUsers();
-    });
     byId("users-bus-filter").addEventListener("change", (event) => {
       state.userBusFilter = event.currentTarget.value;
       renderUsers();
     });
+    byId("bulk-user-role").addEventListener("change", syncBulkUserControls);
+    byId("apply-bulk-user-role").addEventListener("click", applyBulkUserRole);
+    byId("delete-selected-users").addEventListener("click", () => deleteSelectedUsers());
     document.querySelectorAll(".plan-tab").forEach((tab) => {
       tab.addEventListener("click", () => {
         state.selectedPlan = tab.dataset.plan;

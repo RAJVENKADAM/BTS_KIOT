@@ -1,8 +1,10 @@
 const express = require('express');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth');
 const {
-  deactivateUser,
+  deleteSelectedUsers,
+  deleteUser,
   getUsers,
+  updateUsersRole,
   updateUser,
 } = require('../controllers/superadminUser.controller');
 
@@ -16,6 +18,20 @@ router.get(
   getUsers
 );
 
+router.post(
+  '/users/bulk-role',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  updateUsersRole
+);
+
+router.delete(
+  '/users',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  deleteSelectedUsers
+);
+
 router.put(
   '/users/:id',
   authenticateToken,
@@ -27,7 +43,7 @@ router.delete(
   '/users/:id',
   authenticateToken,
   authorizeRoles('superadmin'),
-  deactivateUser
+  deleteUser
 );
 
 module.exports = router;
