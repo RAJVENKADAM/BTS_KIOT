@@ -172,6 +172,8 @@ test("global plan changes notify all riders without exposing plan names", () => 
       ({ message }) => !/PLAN A/i.test(message) && /today/i.test(message),
     ),
   );
+  assert.match(normalPlanNotifications[1].message, /back to your normal route/i);
+  assert.doesNotMatch(normalPlanNotifications[1].message, /Use Bus/i);
 });
 
 test("cluster edits notify riders when service changes but never block for uncovered riders", () => {
