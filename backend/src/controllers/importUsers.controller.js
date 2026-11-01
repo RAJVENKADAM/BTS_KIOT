@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const ExcelUpload = require('../models/ExcelUpload');
+const normalizeBusNumber = require('../utils/normalizeBusNumber');
 
 const IMPORT_PASSWORD_HASH_ROUNDS = 10;
 
@@ -104,7 +105,7 @@ async function importUsers(req, res) {
         }
 
         // busno can be null for some roles; we'll allow empty => null
-        const bus_no = busno ? busno : null;
+        const bus_no = busno ? normalizeBusNumber(busno) : null;
 
         return {
           idx,

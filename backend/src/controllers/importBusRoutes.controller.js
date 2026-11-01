@@ -9,13 +9,14 @@ const { randomUUID } = require("node:crypto");
 const { normalizeArrivalTime } = require("../utils/planMapping");
 const normalizeStopNameKey = require("../utils/normalizeStopName");
 const getRouteUpdateImpactBuses = require("../utils/routeUpdateImpact");
+const normalizeBusNumber = require("../utils/normalizeBusNumber");
 
 function isNonEmptyString(v) {
   return typeof v === 'string' && v.trim().length > 0;
 }
 
 function normalizeBusNo(busNo) {
-  return (busNo || '').toString().trim().toUpperCase();
+  return normalizeBusNumber(busNo || '');
 }
 
 function normalizePlanName(planName) {

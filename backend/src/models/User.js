@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
+const normalizeBusNumber = require('../utils/normalizeBusNumber');
 
 const userSchema = new mongoose.Schema(
   {
@@ -26,7 +27,8 @@ const userSchema = new mongoose.Schema(
     },
     bus_no: {
       type: String,
-      default: null
+      default: null,
+      set: normalizeBusNumber,
     },
     is_active: {
       type: Boolean,

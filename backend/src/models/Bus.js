@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const normalizeBusNumber = require('../utils/normalizeBusNumber');
 
 const busSchema = new mongoose.Schema(
   {
@@ -7,7 +8,8 @@ const busSchema = new mongoose.Schema(
       required: true,
       unique: true,
       trim: true,
-      uppercase: true
+      uppercase: true,
+      set: normalizeBusNumber,
     },
     bus_name: {
       type: String,

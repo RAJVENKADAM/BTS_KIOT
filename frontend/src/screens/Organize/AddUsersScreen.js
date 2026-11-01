@@ -333,6 +333,33 @@ export default function AddUsersScreen() {
                     onEdit={handleEditUpload}
                     onDelete={handleDeleteUpload}
                   />
+                  <View style={styles.usersSection}>
+                    {loadingUsersByUpload[upload.id] ? (
+                      <ActivityIndicator color={COLORS.primary} />
+                    ) : usersByUpload[upload.id]?.length ? (
+                      <>
+                        <MutedText style={styles.usersCount}>
+                          {usersByUpload[upload.id].length} users
+                        </MutedText>
+                        {usersByUpload[upload.id].map((user) => (
+                          <UserCard
+                            key={user.id}
+                            user={user}
+                            onDelete={(selectedUser) =>
+                              handleDeleteUser(selectedUser, upload.id)
+                            }
+                            onEdit={(selectedUser, payload) =>
+                              handleEditUser(selectedUser, payload, upload.id)
+                            }
+                          />
+                        ))}
+                      </>
+                    ) : (
+                      <MutedText style={styles.noUsers}>
+                        No active users in this upload.
+                      </MutedText>
+                    )}
+                  </View>
                 </View>
               ))}
             </View>

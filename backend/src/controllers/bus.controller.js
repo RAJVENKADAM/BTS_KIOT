@@ -8,6 +8,7 @@ const User = require("../models/User");
 const Notification = require("../models/Notification");
 const PlanMapping = require("../models/PlanMapping");
 const BusChange = require("../models/BusChange");
+const normalizeBusNumber = require("../utils/normalizeBusNumber");
 const { getIO } = require("../socket");
 const {
   getPlanChangeNotifications,
@@ -93,7 +94,7 @@ async function notifyAssignedUsersOfBusStatus(bus, status) {
  * Works for numeric (e.g. 4) and string ("4") preview numbers.
  */
 async function findBusByIdentifier(identifier) {
-  const normalizedBusNo = String(identifier).trim().toUpperCase();
+  const normalizedBusNo = normalizeBusNumber(identifier);
   const raw = identifier;
 
   // 1) Exact bus_no match (most specific)
@@ -400,7 +401,8 @@ async function uploadBusRoutes(req, res) {
     }
 
     // Find or create bus
-    let bus = await Bus.findOne({ bus_no: busNo.toUpperCase() });
+    const normalizedBusNo = normalizeBusNumber(busNo);
+    let bus = await Bus.findOne({ bus_no: normalizedBusNo });
 
     if (bus) {
       if (await findActiveChangeForBus(bus._id)) {
@@ -417,7 +419,7 @@ async function uploadBusRoutes(req, res) {
     } else {
       // Create new bus
       bus = await Bus.create({
-        bus_no: busNo.toUpperCase(),
+        bus_no: normalizedBusNo,
         bus_name: busNo,
         gps_device_id: deviceId,
         reg_no: regNo,
@@ -443,7 +445,9 @@ async function updateBusNumber(req, res) {
   try {
     const { busNo } = req.params;
     const { newBusNo, previewNumber } = req.body;
-    const currentBus = await Bus.findOne({ bus_no: busNo.toUpperCase() });
+    const normalizedBusNo = normalizeBusNumber(busNo);
+    const normalizedNewBusNo = newBusNo ? normalizeBusNumber(newBusNo) : null;
+    const currentBus = await Bus.findOne({ bus_no: normalizedBusNo });
     if (!currentBus) {
       return res.status(404).json({ success: false, error: "Bus not found." });
     }
@@ -454,32 +458,32 @@ async function updateBusNumber(req, res) {
       });
     }
 
-    let finalBusNo = busNo;
+    let finalBusNo = normalizedBusNo;
 
-    if (newBusNo && newBusNo !== busNo) {
-      const exists = await Bus.findOne({ bus_no: newBusNo.toUpperCase() });
+    if (normalizedNewBusNo && normalizedNewBusNo !== normalizedBusNo) {
+      const exists = await Bus.findOne({ bus_no: normalizedNewBusNo });
       if (exists) {
         return res.status(400).json({ error: "Bus number already exists" });
       }
 
       await Bus.updateOne(
-        { bus_no: busNo.toUpperCase() },
-        { bus_no: newBusNo.toUpperCase() },
+        { bus_no: normalizedBusNo },
+        { bus_no: normalizedNewBusNo },
       );
-      finalBusNo = newBusNo;
+      finalBusNo = normalizedNewBusNo;
     }
 
     if (previewNumber !== undefined) {
       const exists = await Bus.findOne({
         preview_number: previewNumber,
-        bus_no: { $ne: finalBusNo.toUpperCase() },
+        bus_no: { $ne: normalizeBusNumber(finalBusNo) },
       });
       if (exists) {
         return res.status(400).json({ error: "Preview number already used" });
       }
 
       await Bus.updateOne(
-        { bus_no: finalBusNo.toUpperCase() },
+        { bus_no: normalizeBusNumber(finalBusNo) },
         { preview_number: previewNumber },
       );
     }
@@ -695,7 +699,7 @@ async function deleteBus(req, res) {
   try {
     const { busNo } = req.params;
 
-    const bus = await Bus.findOne({ bus_no: busNo.toUpperCase() });
+    const bus = await Bus.findOne({ bus_no: normalizeBusNumber(busNo) });
     if (!bus) {
       return res.status(404).json({ error: `Bus ${busNo} not found` });
     }
@@ -748,7 +752,7 @@ async function deleteBus(req, res) {
 async function activateBus(req, res) {
   try {
     const { busNo } = req.params;
-    const bus = await Bus.findOne({ bus_no: busNo.toUpperCase() });
+    const bus = await Bus.findOne({ bus_no: normalizeBusNumber(busNo) });
     if (!bus) return res.status(404).json({ error: "Bus not found" });
     if (await findActiveChangeForBus(bus._id)) {
       return res.status(409).json({
@@ -772,7 +776,7 @@ async function activateBus(req, res) {
 async function deactivateBus(req, res) {
   try {
     const { busNo } = req.params;
-    const bus = await Bus.findOne({ bus_no: busNo.toUpperCase() });
+    const bus = await Bus.findOne({ bus_no: normalizeBusNumber(busNo) });
     if (!bus) return res.status(404).json({ error: "Bus not found" });
     if (await findActiveChangeForBus(bus._id)) {
       return res.status(409).json({
@@ -808,7 +812,7 @@ async function updatePreviewNumber(req, res) {
   try {
     const { busNo } = req.params;
     const { previewNumber } = req.body;
-    const bus = await Bus.findOne({ bus_no: busNo.toUpperCase() });
+    const bus = await Bus.findOne({ bus_no: normalizeBusNumber(busNo) });
     if (!bus) return res.status(404).json({ success: false, error: "Bus not found." });
     if (await findActiveChangeForBus(bus._id)) {
       return res.status(409).json({
@@ -1818,7 +1822,7 @@ async function updateBusDetails(req, res) {
     const { busNo } = req.params;
     const { previewNumber, gpsDeviceId, regNo } = req.body;
 
-    const bus = await Bus.findOne({ bus_no: busNo.toUpperCase() });
+    const bus = await Bus.findOne({ bus_no: normalizeBusNumber(busNo) });
     if (!bus) {
       return res
         .status(404)
@@ -1901,7 +1905,7 @@ async function getPlans(req, res) {
 async function getLiveLocation(req, res) {
   try {
     const { busNo } = req.params;
-    const normalizedBusNo = String(busNo ?? "").toUpperCase();
+    const normalizedBusNo = normalizeBusNumber(busNo ?? "");
 
     // Search by bus_no first, then fall back to preview_number.
     // This lets users track a bus via its short preview number (e.g. "4")

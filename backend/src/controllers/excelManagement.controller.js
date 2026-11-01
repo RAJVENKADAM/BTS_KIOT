@@ -1,6 +1,8 @@
 const mongoose = require('mongoose');
 const ExcelUpload = require('../models/ExcelUpload');
 const User = require('../models/User');
+const Bus = require('../models/Bus');
+const normalizeBusNumber = require('../utils/normalizeBusNumber');
 
 // Get all Excel uploads for current user
 async function getAllExcelUploads(req, res) {
@@ -186,11 +188,36 @@ async function getUsersByExcelUpload(req, res) {
 
     // Find active users linked to this Excel upload (FIX 3: filter only active users)
     const users = await User.find({ excel_upload_id: id, is_active: true })
-      .select('name email role bus_no is_active');
+      .select('name email role bus_no is_active')
+      .lean();
+    const busNumbers = [
+      ...new Set(
+        users
+          .map((user) => normalizeBusNumber(user.bus_no))
+          .filter(Boolean),
+      ),
+    ];
+    const buses = busNumbers.length
+      ? await Bus.find({ bus_no: { $in: busNumbers } })
+        .select('bus_no preview_number')
+        .lean()
+      : [];
+    const previewByBusNumber = new Map(
+      buses.map((bus) => [
+        normalizeBusNumber(bus.bus_no),
+        bus.preview_number,
+      ]),
+    );
 
     res.status(200).json({
       success: true,
-      data: users
+      data: users.map((user) => ({
+        ...user,
+        id: String(user._id),
+        previewNumber: previewByBusNumber.get(
+          normalizeBusNumber(user.bus_no),
+        ) ?? null,
+      })),
     });
   } catch (error) {
     console.error('Get users by Excel upload error:', error);

@@ -5,6 +5,7 @@ const {
   parseBusRoutesWorkbook,
   parseUserWorkbook,
 } = require("../src/utils/spreadsheetImport");
+const normalizeBusNumber = require("../src/utils/normalizeBusNumber");
 
 function createWorkbook(rows) {
   const workbook = XLSX.utils.book_new();
@@ -30,6 +31,12 @@ test("parses users using the existing mobile Excel column order", () => {
     mobile_no: "9876543210",
     date_of_year: 2004,
   }]);
+});
+
+test("normalizes numeric bus numbers with leading zeros without changing alphanumeric IDs", () => {
+  assert.equal(normalizeBusNumber("02"), "2");
+  assert.equal(normalizeBusNumber("000"), "0");
+  assert.equal(normalizeBusNumber(" bus-02 "), "BUS-02");
 });
 
 test("parses plan route columns and Excel time values", () => {

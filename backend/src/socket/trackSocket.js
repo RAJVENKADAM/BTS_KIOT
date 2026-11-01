@@ -4,6 +4,7 @@
  * (e.g. current plan changes).
  */
 const { getIO } = require("../socket");
+const normalizeBusNumber = require("../utils/normalizeBusNumber");
 
 // Models are required lazily to avoid importing mongoose before the DB is ready.
 const getBus = () => require("../models/Bus");
@@ -71,7 +72,7 @@ function registerTrackSocketHandlers() {
 
         // Resolve bus by bus_no first, then by preview_number.
         let bus = await Bus.findOne({
-          bus_no: String(busIdentifier).trim().toUpperCase(),
+          bus_no: normalizeBusNumber(busIdentifier),
         });
         if (!bus) {
           bus = await Bus.findOne({
