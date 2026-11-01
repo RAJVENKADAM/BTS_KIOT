@@ -1,9 +1,14 @@
+const normalizeBusNumber = require("./normalizeBusNumber");
+
 function normalizeReplacementAssignments(assignments, targetUsers, allowedBusNos) {
   if (!Array.isArray(assignments)) {
     throw new Error("Provide an assignment choice for every replacement-bus rider.");
   }
 
   const expectedUserIds = new Set(targetUsers.map((user) => String(user._id)));
+  const normalizedAllowedBusNos = new Set(
+    [...allowedBusNos].map((busNo) => normalizeBusNumber(busNo)),
+  );
   if (assignments.length !== expectedUserIds.size) {
     throw new Error("Every active replacement-bus rider must have an assignment choice.");
   }
@@ -17,8 +22,8 @@ function normalizeReplacementAssignments(assignments, targetUsers, allowedBusNos
 
     const busNo = assignment.busNo == null || assignment.busNo === ""
       ? null
-      : String(assignment.busNo).trim().toUpperCase();
-    if (busNo && !allowedBusNos.has(busNo)) {
+      : normalizeBusNumber(assignment.busNo);
+    if (busNo && !normalizedAllowedBusNos.has(busNo)) {
       throw new Error("Choose the original bus, an available bus, or no bus assignment.");
     }
     normalized.set(userId, busNo);

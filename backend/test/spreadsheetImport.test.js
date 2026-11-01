@@ -5,6 +5,8 @@ const {
   parseBusRoutesWorkbook,
   parseUserWorkbook,
 } = require("../src/utils/spreadsheetImport");
+const Bus = require("../src/models/Bus");
+const User = require("../src/models/User");
 const normalizeBusNumber = require("../src/utils/normalizeBusNumber");
 
 function createWorkbook(rows) {
@@ -34,9 +36,21 @@ test("parses users using the existing mobile Excel column order", () => {
 });
 
 test("normalizes numeric bus numbers with leading zeros without changing alphanumeric IDs", () => {
+  assert.equal(normalizeBusNumber("01"), "1");
   assert.equal(normalizeBusNumber("02"), "2");
-  assert.equal(normalizeBusNumber("000"), "0");
+  assert.equal(normalizeBusNumber("09"), "9");
+  assert.equal(normalizeBusNumber("00"), "00");
+  assert.equal(normalizeBusNumber("000"), "000");
+  assert.equal(normalizeBusNumber("10"), "10");
   assert.equal(normalizeBusNumber(" bus-02 "), "BUS-02");
+});
+
+test("normalizes bus numbers when creating bus and user model documents", () => {
+  const bus = new Bus({ bus_no: "02", gps_device_id: "device-2" });
+  const user = new User({ bus_no: "05" });
+
+  assert.equal(bus.bus_no, "2");
+  assert.equal(user.bus_no, "5");
 });
 
 test("parses plan route columns and Excel time values", () => {

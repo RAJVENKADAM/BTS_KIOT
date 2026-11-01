@@ -24,6 +24,14 @@ const busSchema = new mongoose.Schema(
       required: true,
       unique: true
     },
+    gps_device_aliases: {
+      type: [String],
+      default: [],
+    },
+    reg_no_aliases: {
+      type: [String],
+      default: [],
+    },
     preview_number: {
       type: String,
       unique: true,

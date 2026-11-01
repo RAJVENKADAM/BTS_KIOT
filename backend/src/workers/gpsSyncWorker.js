@@ -108,7 +108,7 @@ class GpsSyncWorker {
 
     try {
       const buses = await Bus.find({ status: "active" }).select(
-        "_id gps_device_id reg_no bus_no preview_number",
+        "_id gps_device_id gps_device_aliases reg_no reg_no_aliases bus_no preview_number",
       );
       const assignedUsers = await User.find({
         role: "student",
@@ -147,8 +147,13 @@ class GpsSyncWorker {
 
         // Lookup by deviceId, then by regNo ('reg:' + regNo).
         let location = locationMap
-          ? locationMap[String(bus.gps_device_id)] ||
-            (bus.reg_no ? locationMap["reg:" + bus.reg_no] : null) ||
+          ? [bus.gps_device_id, ...(bus.gps_device_aliases || [])]
+            .map((deviceId) => locationMap[String(deviceId)])
+            .find(Boolean) ||
+            [bus.reg_no, ...(bus.reg_no_aliases || [])]
+              .filter(Boolean)
+              .map((regNoAlias) => locationMap["reg:" + regNoAlias])
+              .find(Boolean) ||
             null
           : null;
 

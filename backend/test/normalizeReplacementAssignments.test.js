@@ -5,6 +5,22 @@ const normalizeReplacementAssignments = require("../src/utils/normalizeReplaceme
 const riders = [{ _id: "rider-1" }, { _id: "rider-2" }];
 const allowedBusNos = new Set(["BUS-1", "BUS-3"]);
 
+test("normalizes zero-padded single-digit assignment bus numbers", () => {
+  const assignments = normalizeReplacementAssignments(
+    [
+      { userId: "rider-1", busNo: "02" },
+      { userId: "rider-2", busNo: null },
+    ],
+    riders,
+    new Set(["2"]),
+  );
+
+  assert.deepEqual([...assignments], [
+    ["rider-1", "2"],
+    ["rider-2", null],
+  ]);
+});
+
 test("requires exactly one allowed assignment per replacement-bus rider", () => {
   const assignments = normalizeReplacementAssignments(
     [

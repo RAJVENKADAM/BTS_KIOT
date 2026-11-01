@@ -13,6 +13,7 @@
     "db:migrate:notification-previews": "node scripts/migrate-notification-previews.js",
     "db:migrate:stop-master": "node scripts/migrate-stop-master.js",
     "db:migrate:sample-arrival-times": "node scripts/migrate-sample-arrival-times.js",
+    "db:migrate:bus-numbers": "node scripts/migrate-bus-numbers.js",
     "test": "node --test"
   },
   "keywords": [

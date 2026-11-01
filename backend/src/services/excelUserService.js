@@ -1,5 +1,6 @@
 const xlsx = require('xlsx');
 const User = require('../models/User');
+const normalizeBusNumber = require('../utils/normalizeBusNumber');
 const { sendEmail } = require('../services/emailService');
 
 class ExcelUserService {
@@ -30,7 +31,9 @@ class ExcelUserService {
       const normalizedData = jsonData.map(row => ({
         name: row.name?.toString().trim(),
         email: row.email?.toString().toLowerCase().trim(),
-        bus_no: row.busno?.toString().trim() || null,
+        bus_no: row.busno?.toString().trim()
+          ? normalizeBusNumber(row.busno)
+          : null,
         role: this.normalizeRole(row.role?.toString().trim()),
         phone: row.mobile_no?.toString().trim(),
         dob: row.date_of_year?.toString().trim()
