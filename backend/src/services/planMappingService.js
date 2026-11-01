@@ -135,8 +135,10 @@ function getPlanChangeNotifications(state, planName) {
         message:
           normalizedPlan === "PLAN A"
             ? "Today's service is back to your normal route. Follow your usual routine and check the Home page for your stops and arrival times."
-            : `Your route has changed for today. Use Bus ${displayBus}. ` +
-              "In the Home page, view the stops and wait at a nearby stop at the listed time.",
+            : effectiveBusId !== assignedBusId
+              ? `Your route has changed for today. Use Bus ${displayBus}. ` +
+                "Find the stops on the Home page and wait at the listed time."
+              : "Your route has changed for today. Find your stops on the Home page and wait at the listed time.",
         old_bus_no: assignedBus?.bus_no ?? user.bus_no ?? null,
         new_bus_no: effectiveBus?.bus_no ?? null,
         old_preview: assignedBus?.preview_number ?? null,

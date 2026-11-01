@@ -145,8 +145,11 @@ test("global plan changes notify all riders without exposing plan names", () => 
     ["user-inactive", false],
     ["user-deleted", false],
   ]);
+  assert.match(notifications[0].message, /route has changed/i);
+  assert.match(notifications[0].message, /stops on the Home page/i);
+  assert.doesNotMatch(notifications[0].message, /Use Bus/i);
   assert.match(notifications[1].message, /Use Bus 3/);
-  assert.match(notifications[1].message, /view the stops/i);
+  assert.match(notifications[1].message, /stops on the Home page/i);
   assert.doesNotMatch(notifications[0].message, /PLAN B/i);
   assert.equal(notifications[1].new_preview, "3");
   assert.match(notifications[2].message, /inactive/);
