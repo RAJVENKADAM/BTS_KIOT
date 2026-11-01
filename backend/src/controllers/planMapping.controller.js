@@ -5,14 +5,19 @@ const BusRoute = require("../models/BusRoute");
 const PlanMapping = require("../models/PlanMapping");
 const Notification = require("../models/Notification");
 const User = require("../models/User");
+const StopMaster = require("../models/StopMaster");
 const { getIO } = require("../socket");
 const {
+  getClusterChangeNotifications,
+  getInUseLocationBusIds,
   getPlanMappingChangeNotifications,
   loadPlanState,
 } = require("../services/planMappingService");
 const {
+  normalizeArrivalTime,
   validateCluster,
 } = require("../utils/planMapping");
+const findVerifiedStop = require("../utils/findVerifiedStop");
 
 const GLOBAL_ACTIVE_PLAN_KEY = "global_active_plan";
 
@@ -31,12 +36,13 @@ async function getPlanMappingData(req, res) {
   try {
     const [buses, routes, clusters, users, activePlan] = await Promise.all([
       Bus.find({})
-        .select("_id bus_no preview_number status combined_routes")
+        .select("_id bus_no preview_number status alteration_type combined_route_source combined_routes alteration_route_source alteration_routes")
         .sort({ preview_number: 1, bus_no: 1 })
         .lean(),
-      BusRoute.find({}).select("bus_id plan_name stop_name stop_order arrival_time").lean(),
+      BusRoute.find({}).select("bus_id plan_name stopId stop_name stop_order arrival_time").lean(),
       PlanMapping.find({})
         .populate("root_bus_id", "_id bus_no preview_number status")
+        .populate("location_bus_id", "_id bus_no preview_number status")
         .populate("member_bus_ids", "_id bus_no preview_number status")
         .sort({ plan_name: 1, cluster_name: 1 })
         .lean(),
@@ -48,6 +54,7 @@ async function getPlanMappingData(req, res) {
 
     const planNamesByBus = new Map();
     const routesByBusAndPlan = new Map();
+    const explicitRoutePlanKeys = new Set();
     for (const route of routes) {
       const busId = String(route.bus_id);
       const plan = normalizePlanName(route.plan_name);
@@ -57,21 +64,36 @@ async function getPlanMappingData(req, res) {
       const planRoutes = routesByBusAndPlan.get(key) || [];
       planRoutes.push({
         stopName: route.stop_name,
+        stopId: route.stopId || null,
         stopOrder: route.stop_order,
         arrivalTime: route.arrival_time || null,
       });
       routesByBusAndPlan.set(key, planRoutes);
     }
     for (const bus of buses) {
-      for (const route of bus.combined_routes || []) {
+      const locationRoutes =
+        bus.combined_route_source && bus.combined_routes?.length
+          ? bus.combined_routes
+          : bus.alteration_route_source === "custom"
+            ? bus.alteration_routes || []
+            : [];
+      for (const route of locationRoutes) {
         const id = String(bus._id);
         const plan = normalizePlanName(route.plan_name);
         if (!planNamesByBus.has(id)) planNamesByBus.set(id, new Set());
         planNamesByBus.get(id).add(plan);
         const key = `${id}:${plan}`;
+        const hasExplicitRouteSource =
+          bus.combined_route_source ||
+          bus.alteration_route_source === "custom";
+        if (hasExplicitRouteSource && !explicitRoutePlanKeys.has(key)) {
+          routesByBusAndPlan.set(key, []);
+          explicitRoutePlanKeys.add(key);
+        }
         const planRoutes = routesByBusAndPlan.get(key) || [];
         planRoutes.push({
           stopName: route.stop_name,
+          stopId: route.stopId || null,
           stopOrder: route.stop_order,
           arrivalTime: route.arrival_time || null,
         });
@@ -92,6 +114,24 @@ async function getPlanMappingData(req, res) {
       if (id) userCountByBus.set(id, (userCountByBus.get(id) || 0) + 1);
     }
 
+    const clusterState = clusters.map((cluster) => ({
+      plan_name: cluster.plan_name,
+      root_bus_id: String(cluster.root_bus_id?._id || cluster.root_bus_id),
+      location_bus_id: cluster.location_bus_id
+        ? String(cluster.location_bus_id?._id || cluster.location_bus_id)
+        : null,
+      member_bus_ids: (cluster.member_bus_ids || []).map((member) =>
+        String(member?._id || member),
+      ),
+    }));
+    const busIdsByUser = users.map((user) =>
+      identifierToBusId.get(String(user.bus_no || "").trim().toUpperCase()) || null,
+    );
+    const inUseBusIds = getInUseLocationBusIds(
+      busIdsByUser,
+      activePlan,
+      clusterState,
+    );
     const busOptions = buses.map((bus) => {
       const id = String(bus._id);
       const plans = [...(planNamesByBus.get(id) || [])].sort();
@@ -102,6 +142,9 @@ async function getPlanMappingData(req, res) {
         status: bus.status,
         plans,
         assignedUsers: userCountByBus.get(id) || 0,
+        currentlyInUse: inUseBusIds.has(id),
+        canBeTemporaryLocation:
+          bus.status === "active" || bus.alteration_type === "alter",
       };
     });
 
@@ -111,6 +154,9 @@ async function getPlanMappingData(req, res) {
       clusterName: cluster.cluster_name,
       rootBus: cluster.root_bus_id
         ? busOptions.find((bus) => bus.id === String(cluster.root_bus_id._id))
+        : null,
+      locationBus: cluster.location_bus_id
+        ? busOptions.find((bus) => bus.id === String(cluster.location_bus_id._id))
         : null,
       memberBuses: (cluster.member_bus_ids || [])
         .map((member) =>
@@ -146,7 +192,9 @@ async function savePlanMapping(req, res) {
       clusterName,
       rootBusId,
       memberBusIds,
+      locationBusId: rawLocationBusId,
     } = req.body || {};
+    const locationBusId = rawLocationBusId ? String(rawLocationBusId) : null;
     const planName = normalizePlanName(rawPlanName);
     if (!Array.isArray(memberBusIds)) {
       return res.status(400).json({
@@ -162,6 +210,7 @@ async function savePlanMapping(req, res) {
       !clusterName.trim() ||
       !mongoose.isValidObjectId(rootBusId) ||
       normalizedMembers.some((id) => !mongoose.isValidObjectId(id)) ||
+      (locationBusId && !mongoose.isValidObjectId(locationBusId)) ||
       (clusterId && !mongoose.isValidObjectId(clusterId))
     ) {
       return res.status(400).json({
@@ -170,20 +219,66 @@ async function savePlanMapping(req, res) {
       });
     }
 
-    const [buses, routes, existingClusters, currentPlan] = await Promise.all([
+    const [buses, routes, existingClusters, currentPlan, assignmentState] = await Promise.all([
       Bus.find({})
-        .select("_id bus_no preview_number status combined_routes")
+        .select("_id bus_no preview_number status alteration_type combined_routes")
         .lean(),
       BusRoute.find({}).select("bus_id plan_name").lean(),
       PlanMapping.find({}).lean(),
       getCurrentPlan(),
+      loadPlanState(),
     ]);
     const busIds = new Set(buses.map((bus) => String(bus._id)));
-    if (!busIds.has(String(rootBusId)) || normalizedMembers.some((id) => !busIds.has(id))) {
+    if (
+      !busIds.has(String(rootBusId)) ||
+      normalizedMembers.some((id) => !busIds.has(id)) ||
+      (locationBusId && !busIds.has(locationBusId))
+    ) {
       return res.status(400).json({
         success: false,
         error: "Every selected bus must exist.",
       });
+    }
+    const editedCluster = clusterId
+      ? existingClusters.find((cluster) => String(cluster._id) === String(clusterId))
+      : null;
+    if (clusterId && !editedCluster) {
+      return res.status(404).json({ success: false, error: "Cluster not found." });
+    }
+    if (locationBusId) {
+      if (locationBusId === String(rootBusId)) {
+        return res.status(400).json({
+          success: false,
+          error: "Choose a spare bus different from the route root.",
+        });
+      }
+      if (normalizedMembers.includes(locationBusId)) {
+        return res.status(400).json({
+          success: false,
+          error: "A mapped member bus cannot also be the temporary location bus.",
+        });
+      }
+      const locationBus = buses.find(
+        (bus) => String(bus._id) === locationBusId,
+      );
+      const currentLocationBusId = editedCluster?.location_bus_id
+        ? String(editedCluster.location_bus_id)
+        : null;
+      if (
+        (locationBus?.status !== "active" &&
+          locationBus?.alteration_type !== "alter") ||
+        (currentLocationBusId !== locationBusId &&
+          getInUseLocationBusIds(
+            assignmentState.busIdsByUser,
+            currentPlan,
+            assignmentState.clusters,
+          ).has(locationBusId))
+      ) {
+        return res.status(409).json({
+          success: false,
+          error: "The temporary location bus must be available and have no riders currently assigned to it.",
+        });
+      }
     }
     const plansByBusId = new Map(
       buses.map((bus) => [String(bus._id), new Set()]),
@@ -209,12 +304,6 @@ async function savePlanMapping(req, res) {
         },
       ]),
     );
-    const editedCluster = clusterId
-      ? existingClusters.find((cluster) => String(cluster._id) === String(clusterId))
-      : null;
-    if (clusterId && !editedCluster) {
-      return res.status(404).json({ success: false, error: "Cluster not found." });
-    }
     const otherClusters = existingClusters
       .filter(
         (cluster) =>
@@ -262,7 +351,7 @@ async function savePlanMapping(req, res) {
     }
     const savedId = clusterId || String(new mongoose.Types.ObjectId());
     const oldActiveClusters =
-      currentPlan === planName ? (await loadPlanState()).clusters : [];
+      currentPlan === planName ? assignmentState.clusters : [];
     const operations = otherClusters
       .filter((cluster) => {
         const existing = existingClusters.find(
@@ -283,6 +372,7 @@ async function savePlanMapping(req, res) {
           update: {
             $set: {
               root_bus_id: cluster.root_bus_id,
+              location_bus_id: cluster.location_bus_id || null,
               member_bus_ids: cluster.member_bus_ids,
             },
           },
@@ -296,6 +386,7 @@ async function savePlanMapping(req, res) {
             plan_name: planName,
             cluster_name: clusterName.trim(),
             root_bus_id: rootBusId,
+            location_bus_id: locationBusId,
             member_bus_ids: normalizedMembers,
           },
         },
@@ -315,6 +406,8 @@ async function savePlanMapping(req, res) {
           await Notification.insertMany(notifications);
         } catch (error) {
           console.error("savePlanMapping notification persistence error:", error);
+          const io = getIO();
+          if (io) io.emit("bus-update", { actionType: "PLAN_MAPPING_CHANGED" });
           return res.status(500).json({
             success: false,
             mappingSaved: true,
@@ -333,6 +426,42 @@ async function savePlanMapping(req, res) {
           });
         });
       }
+    } else if (
+      editedCluster &&
+      String(editedCluster.location_bus_id || "") !== String(locationBusId || "")
+    ) {
+      const state = await loadPlanState();
+      const updatedCluster = state.clusters.find(
+        (cluster) => String(cluster._id) === String(savedId),
+      );
+      const notifications = updatedCluster
+        ? getClusterChangeNotifications(state, updatedCluster, planName)
+        : [];
+      if (notifications.length) {
+        try {
+          await Notification.insertMany(notifications);
+        } catch (error) {
+          console.error("savePlanMapping notification persistence error:", error);
+          const io = getIO();
+          if (io) io.emit("bus-update", { actionType: "PLAN_MAPPING_CHANGED" });
+          return res.status(500).json({
+            success: false,
+            mappingSaved: true,
+            error: "Mapping saved, but affected users could not be notified.",
+          });
+        }
+        const io = getIO();
+        if (io) {
+          notifications.forEach((notification) => {
+            io.to(`user_${String(notification.user_id)}`).emit("notification", {
+              type: notification.type,
+              message: notification.message,
+              newPreview: notification.new_preview,
+              isBusActive: notification.is_bus_active,
+            });
+          });
+        }
+      }
     }
     const io = getIO();
     if (io) io.emit("bus-update", { actionType: "PLAN_MAPPING_CHANGED" });
@@ -342,6 +471,187 @@ async function savePlanMapping(req, res) {
     res.status(500).json({
       success: false,
       error: "Could not save this plan mapping.",
+    });
+  }
+}
+
+async function updatePlanMappingRoutes(req, res) {
+  try {
+    if (!mongoose.isValidObjectId(req.params.clusterId)) {
+      return res.status(400).json({ success: false, error: "Invalid cluster id." });
+    }
+    const cluster = await PlanMapping.findById(req.params.clusterId).lean();
+    const stops = req.body?.stops;
+    if (!cluster) {
+      return res.status(404).json({ success: false, error: "Cluster not found." });
+    }
+    if (!Array.isArray(stops) || stops.length === 0 || stops.length > 100) {
+      return res.status(400).json({
+        success: false,
+        error: "Add between 1 and 100 stops to this route.",
+      });
+    }
+
+    const normalizedStops = [];
+    for (const [index, input] of stops.entries()) {
+      const stopName = String(input?.stopName || "").trim();
+      if (!stopName) {
+        return res.status(400).json({
+          success: false,
+          error: `Enter a stop name for route row ${index + 1}.`,
+        });
+      }
+      let stop;
+      let ambiguous = false;
+      if (input?.stopId) {
+        stop = await StopMaster.findOne({ stopId: String(input.stopId) }).lean();
+        if (stop && stop.name.trim().toLowerCase() !== stopName.toLowerCase()) {
+          stop = null;
+        }
+      } else {
+        ({ stop, ambiguous } = await findVerifiedStop({ name: stopName }));
+        if (!stop && !ambiguous) {
+          stop = await StopMaster.findOne({
+            status: "PENDING",
+            name: stopName,
+          }).lean();
+        }
+      }
+      if (!stop) {
+        return res.status(400).json({
+          success: false,
+          error: ambiguous
+            ? `Stop "${stopName}" matches more than one verified stop.`
+            : `Stop "${stopName}" is not a verified stop.`,
+        });
+      }
+      let arrivalTime;
+      try {
+        arrivalTime = normalizeArrivalTime(input?.arrivalTime);
+      } catch (error) {
+        return res.status(400).json({
+          success: false,
+          error: `Route row ${index + 1}: ${error.message}`,
+        });
+      }
+      normalizedStops.push({
+        stopId: stop.stopId,
+        stop_name: stop.name,
+        stop_order: index + 1,
+        arrival_time: arrivalTime,
+      });
+    }
+
+    const rootBus = await Bus.findById(cluster.root_bus_id);
+    if (!rootBus) {
+      return res.status(404).json({ success: false, error: "Root bus not found." });
+    }
+    const planName = normalizePlanName(cluster.plan_name);
+    const existingRows = await BusRoute.find({
+      bus_id: rootBus._id,
+      plan_name: planName,
+    })
+      .select("_id")
+      .lean();
+    const embeddedCombined = (rootBus.combined_routes || []).some(
+      (route) => normalizePlanName(route.plan_name) === planName,
+    );
+    const embeddedAlteration =
+      rootBus.alteration_route_source === "custom" &&
+      (rootBus.alteration_routes || []).some(
+        (route) => normalizePlanName(route.plan_name) === planName,
+      );
+    if (!existingRows.length && !embeddedCombined && !embeddedAlteration) {
+      return res.status(409).json({
+        success: false,
+        error: "The root bus route is not stored as editable uploaded route data.",
+      });
+    }
+
+    if (existingRows.length) {
+      await BusRoute.deleteMany({ bus_id: rootBus._id, plan_name: planName });
+      await BusRoute.insertMany(
+        normalizedStops.map((stop) => ({
+          bus_id: rootBus._id,
+          plan_name: planName,
+          ...stop,
+        })),
+      );
+    }
+    if (embeddedCombined) {
+      rootBus.combined_routes = [
+        ...(rootBus.combined_routes || []).filter(
+          (route) => normalizePlanName(route.plan_name) !== planName,
+        ),
+        ...normalizedStops.map((stop) => ({
+          ...stop,
+          plan_name: planName,
+        })),
+      ];
+    }
+    if (embeddedAlteration) {
+      rootBus.alteration_routes = [
+        ...(rootBus.alteration_routes || []).filter(
+          (route) => normalizePlanName(route.plan_name) !== planName,
+        ),
+        ...normalizedStops.map((stop) => ({
+          ...stop,
+          plan_name: planName,
+        })),
+      ];
+    }
+    if (embeddedCombined || embeddedAlteration) await rootBus.save();
+
+    const state = await loadPlanState();
+    const notifications = getClusterChangeNotifications(
+      state,
+      cluster,
+      planName,
+      true,
+    );
+    if (notifications.length) {
+      try {
+        await Notification.insertMany(notifications);
+      } catch (error) {
+        console.error("updatePlanMappingRoutes notification persistence error:", error);
+        const io = getIO();
+        if (io) io.emit("bus-update", { actionType: "PLAN_MAPPING_CHANGED" });
+        return res.status(500).json({
+          success: false,
+          routeUpdated: true,
+          error: "Route updated, but affected users could not be notified.",
+        });
+      }
+      const io = getIO();
+      if (io) {
+        notifications.forEach((notification) => {
+          io.to(`user_${String(notification.user_id)}`).emit("notification", {
+            type: notification.type,
+            message: notification.message,
+            newPreview: notification.new_preview,
+            isBusActive: true,
+          });
+        });
+      }
+    }
+    const io = getIO();
+    if (io) io.emit("bus-update", { actionType: "PLAN_MAPPING_CHANGED" });
+
+    res.json({
+      success: true,
+      stops: normalizedStops.map((stop) => ({
+        stopName: stop.stop_name,
+        stopId: stop.stopId,
+        stopOrder: stop.stop_order,
+        arrivalTime: stop.arrival_time,
+      })),
+      notifiedUsers: notifications.length,
+    });
+  } catch (error) {
+    console.error("updatePlanMappingRoutes error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Could not update the root bus route.",
     });
   }
 }
@@ -408,4 +718,5 @@ module.exports = {
   deletePlanMapping,
   getPlanMappingData,
   savePlanMapping,
+  updatePlanMappingRoutes,
 };

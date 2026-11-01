@@ -14,6 +14,23 @@ function getEffectiveBusId(busId, planName, clusters) {
   return String(cluster?.root_bus_id || busId);
 }
 
+function getPlanClusterForBus(busId, planName, clusters) {
+  const normalizedPlan = String(planName || "PLAN A").trim().toUpperCase();
+  return (clusters || []).find(
+    (item) =>
+      String(item.plan_name).toUpperCase() === normalizedPlan &&
+      (String(item.root_bus_id) === String(busId) ||
+        (item.member_bus_ids || []).some(
+          (memberId) => String(memberId) === String(busId),
+        )),
+  ) || null;
+}
+
+function getEffectiveLocationBusId(busId, planName, clusters) {
+  const cluster = getPlanClusterForBus(busId, planName, clusters);
+  return String(cluster?.location_bus_id || getEffectiveBusId(busId, planName, clusters));
+}
+
 function validateCluster(input, busesById, existingClusters) {
   const errors = [];
   const planName = String(input?.planName || "").trim().toUpperCase();
@@ -103,6 +120,8 @@ module.exports = {
   DEFAULT_PLAN_NAMES,
   findUncoveredAssignments,
   getEffectiveBusId,
+  getEffectiveLocationBusId,
+  getPlanClusterForBus,
   normalizeArrivalTime,
   validateCluster,
 };

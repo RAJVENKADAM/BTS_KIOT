@@ -306,16 +306,25 @@
 
             <section class="form-card change-form-card" data-change-form="alter">
               <div class="section-heading">
-                <div><h2>Alter a bus</h2><p>The clicked bus keeps its stops; the replacement bus supplies its live location.</p></div>
+                <div><h2>Alter a bus</h2><p>Move the source bus’s riders to an empty replacement bus. The source bus’s stops stay unchanged; the replacement supplies live location.</p></div>
               </div>
               <form id="temporary-alter-form" class="admin-form">
-                <div class="form-grid">
-                  <label class="field"><span>Bus whose service is altered</span><select id="alter-source" name="sourceBusNo" required></select></label>
-                  <label class="field"><span>Replacement bus providing location</span><select id="alter-target" name="targetBusNo" required></select></label>
+                <div class="bus-picker-grid">
+                  <section class="bus-picker-section" aria-labelledby="alter-source-title">
+                    <h3 id="alter-source-title">1. Choose source bus</h3>
+                    <p>Its riders will be assigned to the replacement bus.</p>
+                    <input id="alter-source" name="sourceBusNo" type="hidden" required />
+                    <div id="alter-source-picker" class="bus-picker-list" role="group" aria-labelledby="alter-source-title"></div>
+                  </section>
+                  <section class="bus-picker-section" aria-labelledby="alter-target-title">
+                    <h3 id="alter-target-title">2. Choose zero-rider replacement bus</h3>
+                    <p>Only buses with 0 riders are listed. This bus supplies location, not route stops.</p>
+                    <input id="alter-target" name="targetBusNo" type="hidden" required />
+                    <div id="alter-target-picker" class="bus-picker-list" role="group" aria-labelledby="alter-target-title"></div>
+                  </section>
                 </div>
                 <div class="change-impact-panel">
-                  <div><strong>Replacement bus riders</strong><p>Choose an assignment for every rider. Leaving them without a bus does not deactivate their account; Home will ask them to contact administration.</p></div>
-                  <div id="alter-rider-assignments" class="assignment-list"></div>
+                  <div><strong>Rider and route impact</strong><p id="alter-impact-summary">Choose a source bus with riders and a replacement bus with 0 riders. Source riders will move to the replacement, while Home continues to show the source bus’s stops.</p></div>
                 </div>
                 <div id="temporary-alter-error" class="notice notice-error" role="alert" hidden></div>
                 <button id="temporary-alter-submit" class="button button-primary" type="submit">Apply temporary alteration</button>
@@ -324,29 +333,36 @@
 
             <section class="form-card change-form-card" data-change-form="combine" hidden>
               <div class="section-heading">
-                <div><h2>Combine buses</h2><p>Move source-bus riders to the handling bus, which supplies the location for the combined service.</p></div>
+                <div><h2>Combine buses</h2><p>Move every source-bus rider to the replacement bus. The source bus is left with 0 riders and can be used in another temporary change.</p></div>
               </div>
               <form id="temporary-combine-form" class="admin-form">
-                <div class="form-grid">
-                  <label class="field"><span>Bus to combine into another</span><select id="combine-source" name="sourceBusNo" required></select></label>
-                  <label class="field"><span>Bus handling the combined service</span><select id="combine-target" name="targetBusNo" required></select></label>
+                <div class="bus-picker-grid">
+                  <section class="bus-picker-section" aria-labelledby="combine-source-title">
+                    <h3 id="combine-source-title">1. Choose source bus</h3>
+                    <p>All of its riders will move to the replacement bus.</p>
+                    <input id="combine-source" name="sourceBusNo" type="hidden" />
+                    <div id="combine-source-picker" class="bus-picker-list" role="group" aria-labelledby="combine-source-title"></div>
+                  </section>
+                  <section class="bus-picker-section" aria-labelledby="combine-target-title">
+                    <h3 id="combine-target-title">2. Choose replacement bus</h3>
+                    <p>It provides the combined service and selected route stops.</p>
+                    <input id="combine-target" name="targetBusNo" type="hidden" />
+                    <div id="combine-target-picker" class="bus-picker-list" role="group" aria-labelledby="combine-target-title"></div>
+                  </section>
                 </div>
-                <label class="field">
-                  <span>Stops for the combined service</span>
-                  <select id="combine-route-source" name="routeSource" required>
-                    <option value="source">Use source bus stops</option>
-                    <option value="target">Use handling bus stops</option>
-                    <option value="custom">Upload new routes</option>
-                  </select>
-                </label>
+                <section class="route-picker-section" aria-labelledby="combine-route-title">
+                  <h3 id="combine-route-title">3. Choose route stops</h3>
+                  <p>All combined riders follow exactly one of these temporary route sets.</p>
+                  <input id="combine-route-source" name="routeSource" type="hidden" value="source" />
+                  <div id="combine-route-picker" class="route-picker-list" role="group" aria-labelledby="combine-route-title"></div>
+                </section>
                 <label id="combine-routes-file-field" class="field" hidden>
-                  <span>New route workbook</span>
+                  <span>Custom route Excel workbook</span>
                   <input id="combine-routes-file" name="routesFile" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
-                  <small class="field-hint">Use PLAN A, PLAN B, PLAN C, or PLAN D columns; optional arrival-time columns follow the existing route workbook format.</small>
+                  <small class="field-hint">Use PLAN A, PLAN B, PLAN C, or PLAN D columns. Optional arrival-time columns follow the existing route workbook format. The uploaded routes apply only until rollback.</small>
                 </label>
                 <div class="change-impact-panel">
-                  <strong>Rider impact</strong>
-                  <p id="combine-impact-summary">Source-bus riders will move to the handling bus. The source bus remains active and available with no assigned riders.</p>
+                  <div><strong>Rider impact and rollback</strong><p id="combine-impact-summary">Choose both buses to review rider counts. The source bus will have 0 riders after combining and can be reused. Before rollback, undo any newer changes involving it and make sure it has 0 riders.</p></div>
                 </div>
                 <div id="temporary-combine-error" class="notice notice-error" role="alert" hidden></div>
                 <button id="temporary-combine-submit" class="button button-primary" type="submit">Apply temporary combination</button>
@@ -355,7 +371,7 @@
 
             <section class="existing-records temporary-changes-list">
               <div class="section-heading">
-                <div><h2>Active temporary changes</h2><p>Rollback restores saved bus routes and riders’ previous assignments. A rollback is blocked if a rider was reassigned afterwards.</p></div>
+                <div><h2>Active temporary changes</h2><p>Rollback restores saved routes and rider assignments. For reused buses, roll back newer changes first; a combination source must have 0 riders.</p></div>
                 <button id="refresh-temporary-changes" class="button button-quiet" type="button">Refresh changes</button>
               </div>
               <div id="temporary-changes-list" class="temporary-change-list" aria-live="polite"></div>

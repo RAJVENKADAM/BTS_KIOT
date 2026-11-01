@@ -442,14 +442,45 @@
     );
   }
 
-  function activeRouteBuses(excludedBusNos = []) {
-    return activeBuses(excludedBusNos).filter((bus) =>
-      (bus.plans || []).includes(state.data.activePlan) ||
-      state.data.clusters.some((cluster) =>
-        cluster.planName === state.data.activePlan &&
-        cluster.rootBus?.plans?.includes(state.data.activePlan) &&
-        cluster.memberBuses?.some((member) => member.id === bus.id),
+  function isReusableCombinedSource(bus) {
+    if (!bus || bus.status !== "active" || bus.isAltered || activeRiderCount(bus) !== 0) {
+      return false;
+    }
+    const busNo = normalizedBusNo(bus.busNo);
+    const relatedChanges = state.temporaryChanges.filter(
+      (change) =>
+        change.status !== "rolled_back" &&
+        [change.sourceBusNo, change.targetBusNo].some(
+          (identifier) => normalizedBusNo(identifier) === busNo,
+        ),
+    );
+    return relatedChanges.length > 0 && relatedChanges.every(
+      (change) =>
+        change.type === "combine" &&
+        normalizedBusNo(change.sourceBusNo) === busNo,
+    );
+  }
+
+  function reusableCombinedSources(excludedBusNos = []) {
+    const excluded = new Set(excludedBusNos.map(normalizedBusNo));
+    return state.adminBuses.filter(
+      (bus) =>
+        !excluded.has(normalizedBusNo(bus.busNo)) &&
+        isReusableCombinedSource(bus),
+    );
+  }
+
+  function replacementBuses(excludedBusNos = []) {
+    const excluded = new Set(excludedBusNos.map(normalizedBusNo));
+    const availableBusNos = new Set(
+      [...activeBuses(), ...reusableCombinedSources()].map((bus) =>
+        normalizedBusNo(bus.busNo),
       ),
+    );
+    return state.adminBuses.filter(
+      (bus) =>
+        !excluded.has(normalizedBusNo(bus.busNo)) &&
+        availableBusNos.has(normalizedBusNo(bus.busNo)),
     );
   }
 
@@ -465,61 +496,59 @@
     ).length;
   }
 
-  function populateBusSelect(id, buses, selectedValue) {
-    const select = byId(id);
-    const currentValue = selectedValue ?? select.value;
-    select.innerHTML = [
-      '<option value="">Choose a bus</option>',
-      ...buses.map((bus) =>
-        `<option value="${escapeHtml(bus.busNo)}">${escapeHtml(busName(bus))} · ${activeRiderCount(bus)} riders</option>`,
-      ),
-    ].join("");
-    if (buses.some((bus) => bus.busNo === currentValue)) {
-      select.value = currentValue;
+  function renderBusPicker(containerId, buses, selectedBusNo, inputId) {
+    const container = byId(containerId);
+    const selected = normalizedBusNo(selectedBusNo);
+    if (!buses.length) {
+      container.innerHTML = '<div class="member-empty">No eligible buses are available.</div>';
+      return;
     }
+    container.innerHTML = buses.map((bus) => {
+      const isSelected = normalizedBusNo(bus.busNo) === selected;
+      const reusable = isReusableCombinedSource(bus);
+      const plans = (bus.plans || []).length
+        ? bus.plans.join(", ")
+        : "Routes not listed";
+      return `
+        <button type="button" class="bus-picker-card${isSelected ? " is-selected" : ""}" aria-pressed="${isSelected}" data-bus-picker="${inputId}" data-bus-no="${escapeHtml(bus.busNo)}">
+          <span class="bus-picker-card-heading"><strong>${escapeHtml(busName(bus))}</strong><span>${activeRiderCount(bus)} riders</span></span>
+          <span class="bus-picker-card-meta">${escapeHtml(bus.busNo)} · ${escapeHtml(plans)}</span>
+          ${reusable ? '<span class="bus-picker-card-badge">Available · 0 riders</span>' : ""}
+        </button>`;
+    }).join("");
   }
 
-  function renderReplacementRiderAssignments(sourceBus, targetBus, availableBuses) {
-    const container = byId("alter-rider-assignments");
-    if (!sourceBus || !targetBus) {
-      container.innerHTML = '<div class="member-empty">Choose both buses to review the replacement bus riders.</div>';
-      return;
-    }
-    const targetNumbers = new Set(
-      [targetBus.busNo, targetBus.previewNumber].map(normalizedBusNo).filter(Boolean),
-    );
-    const riders = state.users.filter((user) =>
-      user.role === "student" &&
-      user.is_active !== false &&
-      targetNumbers.has(normalizedBusNo(user.bus_no)),
-    );
-    if (!riders.length) {
-      container.innerHTML = '<div class="member-empty">No active students are assigned to the replacement bus.</div>';
-      return;
-    }
-
-    const assignmentOptions = [
-      `<option value="${escapeHtml(sourceBus.busNo)}">Bus ${escapeHtml(getDisplayBusNumberForAdmin(sourceBus))} · original stops</option>`,
-      ...availableBuses
-        .filter((bus) => bus.busNo !== targetBus.busNo)
-        .map((bus) =>
-          `<option value="${escapeHtml(bus.busNo)}">${escapeHtml(busName(bus))} · its stops</option>`,
-        ),
-      '<option value="__unassigned__">No bus assigned · contact administration</option>',
+  function renderRoutePicker(sourceBus, targetBus, selectedRoute) {
+    const container = byId("combine-route-picker");
+    const choices = [
+      {
+        value: "source",
+        title: sourceBus ? `${busName(sourceBus)} routes` : "Source bus routes",
+        detail: sourceBus
+          ? (sourceBus.plans || []).join(", ") || "Saved route details unavailable"
+          : "Choose the source bus first",
+      },
+      {
+        value: "target",
+        title: targetBus ? `${busName(targetBus)} routes` : "Replacement bus routes",
+        detail: targetBus
+          ? (targetBus.plans || []).join(", ") || "Saved route details unavailable"
+          : "Choose the replacement bus first",
+      },
+      {
+        value: "custom",
+        title: "Custom Excel routes",
+        detail: "Upload a workbook with plan columns and optional arrival times",
+      },
     ];
-    container.innerHTML = riders.map((user) => `
-      <label class="assignment-row">
-        <span class="assignment-user"><strong>${escapeHtml(user.name || "Unnamed student")}</strong><small>${escapeHtml(user.email || "")}</small></span>
-        <select name="replacementAssignment" data-user-id="${escapeHtml(user.id)}" required aria-label="New bus assignment for ${escapeHtml(user.name || user.email || "student")}">
-          <option value="">Choose this rider's outcome</option>
-          ${assignmentOptions.join("")}
-        </select>
-      </label>
-    `).join("");
-  }
-
-  function getDisplayBusNumberForAdmin(bus) {
-    return bus.previewNumber ?? bus.busNo ?? "—";
+    container.innerHTML = choices.map((choice) => {
+      const isSelected = choice.value === selectedRoute;
+      return `
+        <button type="button" class="route-picker-card${isSelected ? " is-selected" : ""}" aria-pressed="${isSelected}" data-route-picker="${choice.value}">
+          <span class="route-picker-indicator" aria-hidden="true"></span>
+          <span><strong>${escapeHtml(choice.title)}</strong><small>${escapeHtml(choice.detail)}</small></span>
+        </button>`;
+    }).join("");
   }
 
   function renderTemporaryChangeList() {
@@ -532,6 +561,10 @@
     container.innerHTML = state.temporaryChanges.map((change) => {
       const isAlter = change.type === "alter";
       const isApplying = change.status === "applying";
+      const sourceBus = state.adminBuses.find(
+        (bus) => normalizedBusNo(bus.busNo) === normalizedBusNo(change.sourceBusNo),
+      );
+      const sourceRiders = sourceBus ? activeRiderCount(sourceBus) : 0;
       const routeChoice = change.routeSource === "custom"
         ? "Custom uploaded routes"
         : change.routeSource === "source"
@@ -546,7 +579,7 @@
             <h3>${escapeHtml(busName({ previewNumber: change.sourcePreview, busNo: change.sourceBusNo }))} ${isAlter ? "using location from" : "combined with"} ${escapeHtml(busName({ previewNumber: change.targetPreview, busNo: change.targetBusNo }))}</h3>
             <p>${isAlter
               ? "Original stops are preserved; replacement bus supplies live location."
-              : `Source riders follow the handling bus. ${escapeHtml(routeChoice)}.`}</p>
+              : `Source riders follow the replacement bus. ${escapeHtml(routeChoice)}. Source bus currently has ${sourceRiders} rider(s); roll back newer changes first and make it empty.`}</p>
             <small>${Number(change.affectedUsersCount || 0)} affected riders · ${escapeHtml(change.status === "applying" ? "Change is being applied" : new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(change.createdAt)))}</small>
           </div>
           <button type="button" class="button button-quiet" data-rollback-change="${escapeHtml(change.id)}" data-legacy="${Boolean(change.legacy)}" ${isApplying ? "disabled" : ""}>${isApplying ? "Applying…" : "Rollback to normal"}</button>
@@ -555,35 +588,65 @@
   }
 
   function renderBusChangePage() {
-    const sourceBusNo = byId("alter-source")?.value;
-    const targetBusNo = byId("alter-target")?.value;
-    const alterSourceBuses = activeBuses();
-    const alterSource = state.adminBuses.find((bus) => bus.busNo === sourceBusNo);
-    const alterTargetBuses = activeBuses([sourceBusNo]);
-    const alterTarget = state.adminBuses.find((bus) => bus.busNo === targetBusNo);
-    populateBusSelect("alter-source", alterSourceBuses, sourceBusNo);
-    populateBusSelect("alter-target", alterTargetBuses, targetBusNo);
-    renderReplacementRiderAssignments(
-      alterSource && alterSourceBuses.some((bus) => bus.busNo === alterSource.busNo)
-        ? alterSource
-        : null,
-      alterTarget && alterTargetBuses.some((bus) => bus.busNo === alterTarget.busNo)
-        ? alterTarget
-        : null,
-      activeRouteBuses([sourceBusNo, targetBusNo]),
+    let sourceBusNo = byId("alter-source")?.value;
+    let targetBusNo = byId("alter-target")?.value;
+    const alterSourceBuses = activeBuses().filter(
+      (bus) => activeRiderCount(bus) > 0,
     );
+    if (!alterSourceBuses.some((bus) => normalizedBusNo(bus.busNo) === normalizedBusNo(sourceBusNo))) {
+      sourceBusNo = "";
+      byId("alter-source").value = "";
+    }
+    const alterTargetBuses = replacementBuses([sourceBusNo]).filter(
+      (bus) => activeRiderCount(bus) === 0,
+    );
+    if (!alterTargetBuses.some((bus) => normalizedBusNo(bus.busNo) === normalizedBusNo(targetBusNo))) {
+      targetBusNo = "";
+      byId("alter-target").value = "";
+    }
+    renderBusPicker("alter-source-picker", alterSourceBuses, sourceBusNo, "alter-source");
+    renderBusPicker("alter-target-picker", alterTargetBuses, targetBusNo, "alter-target");
+    const alterSource = state.adminBuses.find(
+      (bus) => normalizedBusNo(bus.busNo) === normalizedBusNo(sourceBusNo),
+    );
+    const alterTarget = state.adminBuses.find(
+      (bus) => normalizedBusNo(bus.busNo) === normalizedBusNo(targetBusNo),
+    );
+    byId("alter-impact-summary").textContent =
+      alterSource && alterTarget
+        ? `${activeRiderCount(alterSource)} source rider(s) will be assigned to ${busName(alterTarget)}. The replacement bus has 0 riders now. Route stops remain from ${busName(alterSource)}; ${busName(alterTarget)} supplies only live location.`
+        : "Choose a source bus with riders and a replacement bus with 0 riders. Source riders will move to the replacement, while Home continues to show the source bus’s stops.";
 
-    const combineSourceNo = byId("combine-source")?.value;
-    const combineTargetNo = byId("combine-target")?.value;
-    const combineSourceBuses = activeBuses();
-    const combineTargetBuses = activeBuses([combineSourceNo]);
-    populateBusSelect("combine-source", combineSourceBuses, combineSourceNo);
-    populateBusSelect("combine-target", combineTargetBuses, combineTargetNo);
+    let combineSourceNo = byId("combine-source")?.value;
+    let combineTargetNo = byId("combine-target")?.value;
+    const combineSourceBuses = [
+      ...activeBuses(),
+      ...reusableCombinedSources(),
+    ];
+    if (!combineSourceBuses.some((bus) => normalizedBusNo(bus.busNo) === normalizedBusNo(combineSourceNo))) {
+      combineSourceNo = "";
+      byId("combine-source").value = "";
+    }
+    const combineTargetBuses = replacementBuses([combineSourceNo]);
+    if (!combineTargetBuses.some((bus) => normalizedBusNo(bus.busNo) === normalizedBusNo(combineTargetNo))) {
+      combineTargetNo = "";
+      byId("combine-target").value = "";
+    }
+    renderBusPicker("combine-source-picker", combineSourceBuses, combineSourceNo, "combine-source");
+    renderBusPicker("combine-target-picker", combineTargetBuses, combineTargetNo, "combine-target");
     const combineSource = state.adminBuses.find((bus) => bus.busNo === combineSourceNo);
     const combineTarget = state.adminBuses.find((bus) => bus.busNo === combineTargetNo);
+    renderRoutePicker(
+      combineSource,
+      combineTarget,
+      byId("combine-route-source").value || "source",
+    );
     if (combineSource && combineTarget) {
       byId("combine-impact-summary").textContent =
-        `${activeRiderCount(combineSource)} source-bus rider(s) will move to ${busName(combineTarget)}. ${activeRiderCount(combineTarget)} existing handling-bus rider(s) will follow the selected stops. The source bus remains active and available with no assigned riders.`;
+        `${activeRiderCount(combineSource)} source-bus rider(s) will move to ${busName(combineTarget)}. The source bus will have 0 riders and can be reused. Before rollback, undo newer changes involving the source and reassign any riders from it so it has 0 riders.`;
+    } else {
+      byId("combine-impact-summary").textContent =
+        "Choose both buses to review rider counts. The source bus will have 0 riders after combining and can be reused. Before rollback, undo newer changes involving it and make sure it has 0 riders.";
     }
     const useCustomRoutes = byId("combine-route-source").value === "custom";
     byId("combine-routes-file-field").hidden = !useCustomRoutes;
@@ -997,20 +1060,26 @@
       errorBox.hidden = false;
       return;
     }
-    const assignments = [...form.querySelectorAll("[name='replacementAssignment']")];
-    if (assignments.some((select) => !select.value)) {
-      errorBox.textContent = "Choose an outcome for every replacement-bus rider.";
+    const source = state.adminBuses.find(
+      (bus) => normalizedBusNo(bus.busNo) === normalizedBusNo(sourceBusNo),
+    );
+    const target = state.adminBuses.find(
+      (bus) => normalizedBusNo(bus.busNo) === normalizedBusNo(targetBusNo),
+    );
+    if (!source || activeRiderCount(source) === 0) {
+      errorBox.textContent = "Choose a source bus with riders to move.";
       errorBox.hidden = false;
       return;
     }
-    const selectedNoAssignment = assignments.filter(
-      (select) => select.value === "__unassigned__",
-    ).length;
-    const confirmation = [
-      `Alter Bus ${sourceBusNo} to use Bus ${targetBusNo} for live location?`,
-      `${assignments.length} current replacement-bus rider(s) will be reassigned; ${selectedNoAssignment} will have no bus and will be told to contact administration.`,
-      "The clicked bus's stops remain unchanged.",
-    ].join("\n\n");
+    if (!target || activeRiderCount(target) !== 0) {
+      errorBox.textContent = "Choose a replacement bus with 0 riders.";
+      errorBox.hidden = false;
+      return;
+    }
+    const confirmation =
+      `Temporarily alter ${busName(source)} to use ${busName(target)} for live location?\n\n` +
+      `${activeRiderCount(source)} source rider(s) will be assigned to the replacement bus. ` +
+      "The source bus's stops remain unchanged; the replacement bus has 0 riders before the change.";
     if (!window.confirm(confirmation)) return;
 
     submit.disabled = true;
@@ -1022,10 +1091,6 @@
           method: "POST",
           body: JSON.stringify({
             newBusNo: targetBusNo,
-            replacementAssignments: assignments.map((select) => ({
-              userId: select.dataset.userId,
-              busNo: select.value === "__unassigned__" ? null : select.value,
-            })),
           }),
         },
       );
@@ -1069,7 +1134,7 @@
         ? "handling bus stops"
         : "the uploaded routes";
     if (!window.confirm(
-      `Combine ${busName(source)} with ${busName(target)} using ${routeLabel}?\n\n${activeRiderCount(source)} source rider(s) will move to the handling bus. Existing handling-bus riders will use ${routeLabel}. The source bus remains available for future use.`,
+      `Temporarily combine ${busName(source)} with ${busName(target)} using ${routeLabel}?\n\n${activeRiderCount(source)} source rider(s) will move to the replacement bus, leaving the source with 0 riders. It can be reused in another temporary change. Roll back newer changes first and make sure this source has 0 riders before rolling back this combination.`,
     )) return;
 
     submit.disabled = true;
@@ -1377,6 +1442,19 @@
         state.changeMode = tab.dataset.changeMode;
         renderBusChangePage();
       });
+    });
+    document.addEventListener("click", (event) => {
+      const busChoice = event.target.closest("[data-bus-picker]");
+      if (busChoice) {
+        byId(busChoice.dataset.busPicker).value = busChoice.dataset.busNo;
+        renderBusChangePage();
+        return;
+      }
+      const routeChoice = event.target.closest("[data-route-picker]");
+      if (routeChoice) {
+        byId("combine-route-source").value = routeChoice.dataset.routePicker;
+        renderBusChangePage();
+      }
     });
     ["alter-source", "alter-target", "combine-source", "combine-target", "combine-route-source"]
       .forEach((id) => byId(id).addEventListener("change", renderBusChangePage));

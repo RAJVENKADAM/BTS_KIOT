@@ -19,7 +19,7 @@ const {
 } = require("../utils/resolveBusServiceRoutes");
 const selectAlterationRoutes = require("../utils/selectAlterationRoutes");
 const findVerifiedStop = require("../utils/findVerifiedStop");
-const normalizeReplacementAssignments = require("../utils/normalizeReplacementAssignments");
+const isReusableCombinedSource = require("../utils/isReusableCombinedSource");
 const normalizeStopName = require("../utils/normalizeStopName");
 const {
   getEffectiveBusId,
@@ -135,8 +135,31 @@ async function resolvePlanMappingBus(bus, planName) {
     .select("root_bus_id")
     .lean();
   if (!mapping) return bus;
-  const rootBus = await Bus.findById(mapping.root_bus_id);
-  return rootBus || bus;
+  return (await Bus.findById(mapping.root_bus_id)) || bus;
+}
+
+async function resolvePlanMappingAssignment(bus, planName) {
+  if (!bus || planName === "PLAN A") {
+    return { routeBus: bus, locationBus: bus, hasTemporaryLocationBus: false };
+  }
+  const mapping = await PlanMapping.findOne({
+    plan_name: planName,
+    $or: [{ root_bus_id: bus._id }, { member_bus_ids: bus._id }],
+  }).lean();
+  if (!mapping) {
+    return { routeBus: bus, locationBus: bus, hasTemporaryLocationBus: false };
+  }
+  const isMember = (mapping.member_bus_ids || []).some(
+    (memberBusId) => String(memberBusId) === String(bus._id),
+  );
+  const routeBus = isMember
+    ? (await Bus.findById(mapping.root_bus_id)) || bus
+    : bus;
+  const hasTemporaryLocationBus = Boolean(mapping.location_bus_id);
+  const locationBus = hasTemporaryLocationBus
+    ? (await Bus.findById(mapping.location_bus_id)) || routeBus
+    : routeBus;
+  return { routeBus, locationBus, hasTemporaryLocationBus };
 }
 
 async function getEffectiveRoutesForAllPlans(bus) {
@@ -224,9 +247,7 @@ async function getRoutesForBus(bus) {
   );
   if (selectedRoutes) return hydrateRouteRows(selectedRoutes);
 
-  const incomingChanges = (await getIncomingBusChanges(bus)).filter(
-    (changedBus) => changedBus.alteration_type === "combine",
-  );
+  const incomingChanges = await getIncomingBusChanges(bus);
   const incomingRouteGroups = await Promise.all(
     incomingChanges.map(async (changedBus) => {
       const changedBusRoutes = await getBusRouteRows(changedBus._id);
@@ -1041,6 +1062,23 @@ async function rollbackTemporaryBusChange(req, res) {
       _id: { $in: change.assignmentSnapshots.map((snapshot) => snapshot.userId) },
     }).select("_id bus_no role is_active");
     const usersById = new Map(users.map((user) => [String(user._id), user]));
+    if (buses.length !== change.busSnapshots.length) {
+      return res.status(409).json({
+        success: false,
+        error: "A bus involved in this temporary change no longer exists; rollback cannot safely restore it.",
+      });
+    }
+    if (change.type === "combine") {
+      const sourceBus = busesById.get(String(change.sourceBusId));
+      const currentRiders = await findStudentsAssignedToBus(sourceBus);
+      if (currentRiders.length) {
+        return res.status(409).json({
+          success: false,
+          error: `Bus ${change.sourcePreview ?? change.sourceBusNo} now has ${currentRiders.length} rider(s). Reassign them so the bus has 0 riders before rolling back this combination.`,
+        });
+      }
+    }
+
     const assignmentConflicts = change.assignmentSnapshots.filter((snapshot) => {
       const user = usersById.get(String(snapshot.userId));
       if (!user) return false;
@@ -1059,11 +1097,31 @@ async function rollbackTemporaryBusChange(req, res) {
         error: `${assignmentConflicts.length} affected rider(s) have since been reassigned. Resolve those assignments before rolling back.`,
       });
     }
-    if (buses.length !== change.busSnapshots.length) {
-      return res.status(409).json({
-        success: false,
-        error: "A bus involved in this temporary change no longer exists; rollback cannot safely restore it.",
-      });
+
+    if (change.type === "combine") {
+
+      const newerChanges = await BusChange.find({
+        _id: { $ne: change._id },
+        status: { $in: ["applying", "active"] },
+        $or: [
+          { createdAt: { $gt: change.createdAt } },
+          { createdAt: change.createdAt, _id: { $gt: change._id } },
+        ],
+        $and: [
+          {
+            $or: [
+              { sourceBusId: { $in: change.busSnapshots.map((snapshot) => snapshot.busId) } },
+              { targetBusId: { $in: change.busSnapshots.map((snapshot) => snapshot.busId) } },
+            ],
+          },
+        ],
+      }).select("_id");
+      if (newerChanges.length) {
+        return res.status(409).json({
+          success: false,
+          error: "Roll back the newer temporary change using this bus first, then retry this combination rollback.",
+        });
+      }
     }
 
     for (const snapshot of change.busSnapshots) {
@@ -1187,20 +1245,28 @@ async function changeBus(req, res, alterationType) {
     }
     const activeChanges = await BusChange.find({
       status: { $in: ["applying", "active"] },
-    }).select("sourceBusId targetBusId").lean();
+    }).select("sourceBusId targetBusId type").lean();
     const activeChangeBusIds = new Set(
       activeChanges.flatMap((change) => [
         String(change.sourceBusId),
         String(change.targetBusId),
       ]),
     );
+    const sourceCanBeReused = isReusableCombinedSource(
+      activeChanges,
+      sourceBus._id,
+    );
+    const targetCanBeReused = isReusableCombinedSource(
+      activeChanges,
+      targetBus._id,
+    );
     if (
-      activeChangeBusIds.has(String(sourceBus._id)) ||
-      activeChangeBusIds.has(String(targetBus._id))
+      (activeChangeBusIds.has(String(sourceBus._id)) && !sourceCanBeReused) ||
+      (activeChangeBusIds.has(String(targetBus._id)) && !targetCanBeReused)
     ) {
       return res.status(409).json({
         success: false,
-        error: "Rollback the existing temporary bus change before using either bus again.",
+        error: "Only an empty source bus from an active combination can be reused. Roll back other temporary changes before using these buses.",
       });
     }
     const legacyAlterationTargets = await Bus.distinct("altered_to_bus_id", {
@@ -1218,7 +1284,7 @@ async function changeBus(req, res, alterationType) {
       });
     }
 
-    const { routeSource, routesByPlan, replacementAssignments } = req.body || {};
+    const { routeSource, routesByPlan } = req.body || {};
     const activePlan = await getCurrentGlobalPlan();
     const isCombined = alterationType === "combine";
     if (!isCombined && routeSource !== undefined) {
@@ -1346,51 +1412,34 @@ async function changeBus(req, res, alterationType) {
 
     const sourceUsers = await findStudentsAssignedToBus(sourceBus);
     const targetUsers = await findStudentsAssignedToBus(targetBus);
-    const assignmentByUserId = new Map();
-    const candidateAssignmentBuses = await Bus.find({
-      status: "active",
-      _id: {
-        $nin: [
-          sourceBus._id,
-          targetBus._id,
-          ...[...activeChangeBusIds],
-          ...legacyAlterationTargets,
-        ],
-      },
-      altered_to_bus_id: null,
-      combined_route_source: null,
-    }).select("_id bus_no preview_number").lean();
-    const availableAssignmentBuses = [];
-    for (const bus of candidateAssignmentBuses) {
-      const routeBus = await resolvePlanMappingBus(bus, activePlan);
-      const routes = await getRoutesForBus(routeBus);
-      if (hasRouteForPlan(routes, activePlan)) {
-        availableAssignmentBuses.push(bus);
-      }
-    }
-    const allowedAssignmentBusNos = new Set([
-      sourceBus.bus_no.toUpperCase(),
-      ...availableAssignmentBuses.map((bus) => bus.bus_no.toUpperCase()),
-    ]);
-
-    if (!isCombined) {
-      try {
-        const requestedAssignments = normalizeReplacementAssignments(
-          replacementAssignments,
-          targetUsers,
-          allowedAssignmentBusNos,
-        );
-        requestedAssignments.forEach((busNo, userId) => {
-          assignmentByUserId.set(userId, busNo);
-        });
-      } catch (error) {
-        return res.status(400).json({ success: false, error: error.message });
-      }
-    } else {
-      sourceUsers.forEach((user) => {
-        assignmentByUserId.set(String(user._id), targetBus.bus_no);
+    if (!isCombined && sourceUsers.length === 0) {
+      return res.status(409).json({
+        success: false,
+        error: "Choose a source bus with riders to move to the replacement bus.",
       });
     }
+    if (!isCombined && targetUsers.length > 0) {
+      return res.status(409).json({
+        success: false,
+        error: `Replacement Bus ${targetBus.preview_number ?? targetBus.bus_no} has ${targetUsers.length} rider(s). Choose a replacement bus with 0 riders.`,
+      });
+    }
+    if (
+      (sourceCanBeReused && sourceUsers.length > 0) ||
+      (targetCanBeReused && targetUsers.length > 0)
+    ) {
+      const bus = sourceCanBeReused && sourceUsers.length
+        ? sourceBus
+        : targetBus;
+      const count = bus === sourceBus ? sourceUsers.length : targetUsers.length;
+      return res.status(409).json({
+        success: false,
+        error: `Bus ${bus.preview_number ?? bus.bus_no} has ${count} rider(s) and cannot be reused until it has 0 riders.`,
+      });
+    }
+    const assignmentByUserId = new Map(
+      sourceUsers.map((user) => [String(user._id), targetBus.bus_no]),
+    );
 
     const assignmentSnapshots = [
       ...sourceUsers,
@@ -1455,52 +1504,39 @@ async function changeBus(req, res, alterationType) {
         { $set: { bus_no: busNo } },
       );
     }
+    if (isCombined) {
+      const remainingSourceUsers = await findStudentsAssignedToBus(sourceBus);
+      if (remainingSourceUsers.length) {
+        change.status = "active";
+        await change.save();
+        return res.status(409).json({
+          success: false,
+          error: `Combination is incomplete: ${remainingSourceUsers.length} rider(s) remain on source Bus ${sourceBus.preview_number ?? sourceBus.bus_no}. Reassign them so it has 0 riders, then retry or roll back.`,
+        });
+      }
+    }
 
     const uniqueUsers = new Map(
       [...sourceUsers, ...targetUsers].map((user) => [String(user._id), user]),
     );
     const previewMessage = isCombined
       ? `Bus ${sourceBus.preview_number} has been combined with Bus ${targetBus.preview_number}. Your location and stops now follow Bus ${targetBus.preview_number}.`
-      : `Bus ${sourceBus.preview_number} is using Bus ${targetBus.preview_number}'s live location. Your original stops remain unchanged.`;
+      : `Riders from Bus ${sourceBus.preview_number} are assigned to Bus ${targetBus.preview_number}. They keep Bus ${sourceBus.preview_number}'s stops and use Bus ${targetBus.preview_number}'s live location.`;
     for (const user of uniqueUsers.values()) {
       const isSourceRider = sourceUsers.some(
         (sourceUser) => String(sourceUser._id) === String(user._id),
       );
-      if (isCombined && isSourceRider) {
+      if (isSourceRider) {
         await notifyBusChange(user, {
-          type: "bus_combined",
-          message: `You are now combined with Bus ${targetBus.preview_number}. Your Home page shows its location and the selected stops.`,
+          type: isCombined ? "bus_combined" : "bus_altered",
+          message: isCombined
+            ? `You are now combined with Bus ${targetBus.preview_number}. Your Home page shows its location and the selected stops.`
+            : `You are temporarily assigned to Bus ${targetBus.preview_number}. Your original route stops remain unchanged; Home shows the replacement bus location.`,
           oldBusNo: sourceBus.bus_no,
           newBusNo: targetBus.bus_no,
           oldPreview: sourceBus.preview_number,
           newPreview: targetBus.preview_number,
           assignmentBusNo: targetBus.bus_no,
-        });
-        continue;
-      }
-      if (!isCombined && !isSourceRider) {
-        const assignedBusNo = assignmentByUserId.get(String(user._id));
-        if (!assignedBusNo) {
-          await notifyBusChange(user, {
-            type: "bus_unassigned",
-            message: "You currently have no bus assigned. Please contact administration for assistance.",
-            oldBusNo: targetBus.bus_no,
-            oldPreview: targetBus.preview_number,
-            assignmentBusNo: null,
-          });
-          continue;
-        }
-        const assignedBus = assignedBusNo === sourceBus.bus_no
-          ? sourceBus
-          : availableAssignmentBuses.find((bus) => bus.bus_no === assignedBusNo);
-        await notifyBusChange(user, {
-          type: "bus_reassigned",
-          message: `Your previous bus assignment has changed. You are now assigned to Bus ${assignedBus?.preview_number ?? assignedBusNo}. Your Home page will show that bus's location and stops.`,
-          oldBusNo: targetBus.bus_no,
-          newBusNo: assignedBusNo,
-          oldPreview: targetBus.preview_number,
-          newPreview: assignedBus?.preview_number ?? null,
-          assignmentBusNo: assignedBusNo,
         });
         continue;
       }
@@ -1511,7 +1547,8 @@ async function changeBus(req, res, alterationType) {
         newBusNo: targetBus.bus_no,
         oldPreview: sourceBus.preview_number,
         newPreview: targetBus.preview_number,
-        assignmentBusNo: user.bus_no,
+        assignmentBusNo:
+          assignmentByUserId.get(String(user._id)) ?? user.bus_no,
       });
     }
     change.status = "active";
@@ -1658,7 +1695,9 @@ async function getBusRoutes(req, res) {
     const activePlan = await getCurrentGlobalPlan();
     const isSuperadmin =
       req.user && String(req.user.role || "").toLowerCase() === "superadmin";
-    const mappedBus = await resolvePlanMappingBus(bus, activePlan);
+    const assignment = await resolvePlanMappingAssignment(bus, activePlan);
+    const mappedBus = assignment.routeBus;
+    const locationBus = assignment.locationBus;
     const routes = isSuperadmin
       ? await getEffectiveRoutesForAllPlans(bus)
       : await getRoutesForBus(mappedBus);
@@ -1701,7 +1740,7 @@ async function getBusRoutes(req, res) {
       success: true,
       busNo: isSuperadmin ? bus.bus_no : String(bus.preview_number ?? bus.bus_no),
       previewNumber: bus.preview_number,
-      effectivePreviewNumber: mappedBus.preview_number,
+      effectivePreviewNumber: locationBus.preview_number,
       routeBusPreviewNumber,
       isReplacementRoute,
       routeSelectionLabel,
@@ -1834,15 +1873,36 @@ async function getLiveLocation(req, res) {
     }
 
     const activePlan = await getCurrentGlobalPlan();
-    const mappedBus = await resolvePlanMappingBus(bus, activePlan);
-    const locationBus = bus.altered_to_bus_id ? bus : mappedBus;
-    const effectiveBus = await resolveEffectiveBus(locationBus);
+    const assignment = await resolvePlanMappingAssignment(bus, activePlan);
+    const mappedBus = assignment.routeBus;
+    const locationBus = assignment.hasTemporaryLocationBus
+      ? assignment.locationBus
+      : bus.altered_to_bus_id
+        ? bus
+        : mappedBus;
+    const effectiveBus = assignment.hasTemporaryLocationBus
+      ? assignment.locationBus
+      : await resolveEffectiveBus(locationBus);
     const incomingChanges = await getIncomingBusChanges(bus);
-    const alteration = !mappedBus._id.equals(bus._id)
+    const alteration = assignment.hasTemporaryLocationBus
       ? {
           isAltered: true,
           alterationType: "plan_mapping",
-          message: `Your route plan has changed. Use Bus ${effectiveBus.preview_number ?? mappedBus.preview_number ?? "the assigned bus"} today. Home shows this bus's location; tap View stops to find a nearby stop and wait at the listed time.`,
+          message:
+            `Bus: Uses Bus ${effectiveBus.preview_number ?? effectiveBus.bus_no} location\n` +
+            `Stops: Uses Bus ${mappedBus.preview_number ?? mappedBus.bus_no} stops; find them on the Home page.\n` +
+            "If you have any doubts, ask your administration.",
+          newPreview: effectiveBus.preview_number ?? null,
+          effectivePreview: effectiveBus.preview_number ?? null,
+        }
+      : !mappedBus._id.equals(bus._id)
+      ? {
+          isAltered: true,
+          alterationType: "plan_mapping",
+          message:
+            `Bus: Uses Bus ${effectiveBus.preview_number ?? mappedBus.preview_number ?? "the assigned bus"} location\n` +
+            `Stops: Uses Bus ${mappedBus.preview_number ?? mappedBus.bus_no} stops; find them on the Home page.\n` +
+            "If you have any doubts, ask your administration.",
           newPreview: effectiveBus.preview_number ?? null,
           effectivePreview: effectiveBus.preview_number ?? null,
         }
@@ -1966,15 +2026,36 @@ async function trackByPreview(req, res) {
     }
 
     const activePlan = await getCurrentGlobalPlan();
-    const mappedBus = await resolvePlanMappingBus(bus, activePlan);
-    const locationBus = bus.altered_to_bus_id ? bus : mappedBus;
-    const effectiveBus = await resolveEffectiveBus(locationBus);
+    const assignment = await resolvePlanMappingAssignment(bus, activePlan);
+    const mappedBus = assignment.routeBus;
+    const locationBus = assignment.hasTemporaryLocationBus
+      ? assignment.locationBus
+      : bus.altered_to_bus_id
+        ? bus
+        : mappedBus;
+    const effectiveBus = assignment.hasTemporaryLocationBus
+      ? assignment.locationBus
+      : await resolveEffectiveBus(locationBus);
     const incomingChanges = await getIncomingBusChanges(bus);
-    const alteration = !mappedBus._id.equals(bus._id)
+    const alteration = assignment.hasTemporaryLocationBus
       ? {
           isAltered: true,
           alterationType: "plan_mapping",
-          message: `Your route plan has changed. Use Bus ${effectiveBus.preview_number ?? mappedBus.preview_number ?? "the assigned bus"} today. Home shows this bus's location; tap View stops to find a nearby stop and wait at the listed time.`,
+          message:
+            `Bus: Uses Bus ${effectiveBus.preview_number ?? effectiveBus.bus_no} location\n` +
+            `Stops: Uses Bus ${mappedBus.preview_number ?? mappedBus.bus_no} stops; find them on the Home page.\n` +
+            "If you have any doubts, ask your administration.",
+          newPreview: effectiveBus.preview_number ?? null,
+          effectivePreview: effectiveBus.preview_number ?? null,
+        }
+      : !mappedBus._id.equals(bus._id)
+      ? {
+          isAltered: true,
+          alterationType: "plan_mapping",
+          message:
+            `Bus: Uses Bus ${effectiveBus.preview_number ?? mappedBus.preview_number ?? "the assigned bus"} location\n` +
+            `Stops: Uses Bus ${mappedBus.preview_number ?? mappedBus.bus_no} stops; find them on the Home page.\n` +
+            "If you have any doubts, ask your administration.",
           newPreview: effectiveBus.preview_number ?? null,
           effectivePreview: effectiveBus.preview_number ?? null,
         }

@@ -32,6 +32,7 @@ function PlanMappingScreen() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [routeForm, setRouteForm] = useState(null);
   const isSuperadmin = String(user?.role || "").toLowerCase() === "superadmin";
 
   const load = useCallback(async (isRefresh = false) => {
@@ -109,6 +110,7 @@ function PlanMappingScreen() {
       planName: selectedPlan,
       clusterName: `Cluster ${clusters.length + 1}`,
       rootBusId: "",
+      locationBusId: "",
       memberBusIds: [],
     });
   };
@@ -121,12 +123,19 @@ function PlanMappingScreen() {
       planName: cluster.planName,
       clusterName: cluster.clusterName,
       rootBusId: cluster.rootBus?.id || "",
+      locationBusId: cluster.locationBus?.id || "",
       memberBusIds: (cluster.memberBuses || []).map((bus) => bus.id),
     });
   };
 
   const updateForm = (key, value) => {
-    setForm((current) => ({ ...current, [key]: value }));
+    setForm((current) => ({
+      ...current,
+      [key]: value,
+      ...(key === "rootBusId" && current?.locationBusId === value
+        ? { locationBusId: "" }
+        : {}),
+    }));
   };
 
   const toggleMember = (busId) => {
@@ -138,6 +147,9 @@ function PlanMappingScreen() {
         memberBusIds: selected
           ? current.memberBusIds.filter((id) => id !== busId)
           : [...current.memberBusIds, busId],
+        ...(selected || current.locationBusId !== busId
+          ? {}
+          : { locationBusId: "" }),
       };
     });
   };
@@ -159,6 +171,7 @@ function PlanMappingScreen() {
     try {
       await planMappingApi.save(token, {
         ...form,
+        locationBusId: form.locationBusId || null,
         clusterName: form.clusterName.trim(),
       });
       setForm(null);
@@ -173,6 +186,66 @@ function PlanMappingScreen() {
             : ""
         }`,
       );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const availableLocationBuses = useMemo(
+    () =>
+      data.buses.filter(
+        (bus) =>
+          bus.canBeTemporaryLocation &&
+          bus.id !== form?.rootBusId &&
+          !(form?.memberBusIds || []).includes(bus.id) &&
+          (bus.id === form?.locationBusId || !bus.currentlyInUse),
+      ),
+    [data.buses, form?.locationBusId, form?.memberBusIds, form?.rootBusId],
+  );
+
+  const openRouteEditor = (cluster) => {
+    setError("");
+    setMessage("");
+    setRouteForm({
+      cluster,
+      stops: (cluster.rootStops || []).map((stop) => ({
+        stopName: stop.stopName || "",
+        stopId: stop.stopId || "",
+        arrivalTime: stop.arrivalTime || "",
+      })),
+    });
+  };
+
+  const updateRouteStop = (index, key, value) => {
+    setRouteForm((current) => ({
+      ...current,
+      stops: current.stops.map((stop, stopIndex) => {
+        if (stopIndex !== index) return stop;
+        return {
+          ...stop,
+          [key]: value,
+          ...(key === "stopName" ? { stopId: "" } : {}),
+        };
+      }),
+    }));
+  };
+
+  const saveRootRoutes = async () => {
+    if (!routeForm) return;
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      await planMappingApi.updateRoutes(
+        token,
+        routeForm.cluster.id,
+        routeForm.stops,
+      );
+      setRouteForm(null);
+      setMessage("Root route updated. Riders in this cluster have been notified.");
+      await load(true);
+    } catch (requestError) {
+      setError(requestError.message || "Could not update the root route.");
     } finally {
       setSaving(false);
     }
@@ -358,12 +431,27 @@ function PlanMappingScreen() {
                 </View>
 
                 <View style={styles.tree}>
-                  <Text style={styles.nodeGroupLabel}>ROOT · LOCATION AND ROUTE SOURCE</Text>
+                  <View style={styles.rootActions}>
+                    <Text style={styles.nodeGroupLabel}>ROOT · ROUTE SOURCE</Text>
+                    <Pressable
+                      accessibilityRole="button"
+                      onPress={() => openRouteEditor(cluster)}
+                      disabled={saving}
+                      style={styles.smallButton}
+                    >
+                      <Text style={styles.smallButtonText}>Edit routes</Text>
+                    </Pressable>
+                  </View>
                   {cluster.rootBus ? (
                     renderBusNode(cluster.rootBus, { root: true })
                   ) : (
                     <Text style={styles.errorText}>This cluster has no root bus.</Text>
                   )}
+                  {cluster.locationBus ? (
+                    <Text style={styles.nodeMeta}>
+                      Temporary live location: {busLabel(cluster.locationBus)}
+                    </Text>
+                  ) : null}
                   {cluster.rootStops?.length ? (
                     <View style={styles.stopList}>
                       <Text style={styles.stopListTitle}>Root stops and arrival times</Text>
@@ -479,6 +567,36 @@ function PlanMappingScreen() {
                 <Text style={styles.emptyMember}>No available Plan A-only buses for this service.</Text>
               ) : null}
 
+              <Text style={styles.fieldLabel}>Temporary live-location bus (optional)</Text>
+              <Text style={styles.sectionDescription}>
+                Route stops stay with the root. Select an available bus with no riders currently using it.
+              </Text>
+              <Pressable
+                accessibilityRole="radio"
+                accessibilityState={{ checked: !form?.locationBusId }}
+                onPress={() => updateForm("locationBusId", "")}
+                style={[styles.selectionNode, !form?.locationBusId && styles.selectedNode]}
+              >
+                <Text style={styles.nodeName}>Use root bus location</Text>
+              </Pressable>
+              {availableLocationBuses.map((bus) => (
+                <Pressable
+                  key={bus.id}
+                  accessibilityRole="radio"
+                  accessibilityState={{ checked: form?.locationBusId === bus.id }}
+                  onPress={() => updateForm("locationBusId", bus.id)}
+                  style={[
+                    styles.selectionNode,
+                    form?.locationBusId === bus.id && styles.selectedNode,
+                  ]}
+                >
+                  {renderBusNode(bus)}
+                </Pressable>
+              ))}
+              {!availableLocationBuses.length ? (
+                <Text style={styles.emptyMember}>No spare buses are currently available.</Text>
+              ) : null}
+
               {error ? <Text accessibilityRole="alert" style={styles.errorBanner}>{error}</Text> : null}
               <View style={styles.modalActions}>
                 <Pressable
@@ -496,6 +614,84 @@ function PlanMappingScreen() {
                   style={[styles.primaryButton, (saving || !roots.length) && styles.disabledButton]}
                 >
                   <Text style={styles.primaryButtonText}>{saving ? "Saving…" : "Save tree"}</Text>
+                </Pressable>
+              </View>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+      <Modal
+        visible={Boolean(routeForm)}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setRouteForm(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <ScrollView keyboardShouldPersistTaps="handled">
+              <Text style={styles.modalTitle}>Edit root route</Text>
+              <Text style={styles.sectionDescription}>
+                Use existing stop names. New stops must be verified. Arrival time format: 8:10AM.
+              </Text>
+              {error ? <Text accessibilityRole="alert" style={styles.errorBanner}>{error}</Text> : null}
+              {(routeForm?.stops || []).map((stop, index) => (
+                <View key={`route-stop-${index}`} style={styles.routeEditorRow}>
+                  <TextInput
+                    value={stop.stopName}
+                    onChangeText={(value) => updateRouteStop(index, "stopName", value)}
+                    style={[styles.textInput, styles.routeStopName]}
+                    placeholder={`Stop ${index + 1}`}
+                  />
+                  <TextInput
+                    value={stop.arrivalTime}
+                    onChangeText={(value) => updateRouteStop(index, "arrivalTime", value)}
+                    style={[styles.textInput, styles.routeStopTime]}
+                    placeholder="8:10AM"
+                    autoCapitalize="characters"
+                  />
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() =>
+                      setRouteForm((current) => ({
+                        ...current,
+                        stops: current.stops.filter((_, stopIndex) => stopIndex !== index),
+                      }))
+                    }
+                    style={styles.smallButton}
+                  >
+                    <Text style={styles.dangerButtonText}>Remove</Text>
+                  </Pressable>
+                </View>
+              ))}
+              <Pressable
+                accessibilityRole="button"
+                onPress={() =>
+                  setRouteForm((current) => ({
+                    ...current,
+                    stops: [...current.stops, { stopName: "", stopId: "", arrivalTime: "" }],
+                  }))
+                }
+                disabled={(routeForm?.stops || []).length >= 100}
+                style={styles.secondaryButton}
+              >
+                <Text style={styles.secondaryButtonText}>Add stop</Text>
+              </Pressable>
+              <View style={styles.modalActions}>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => setRouteForm(null)}
+                  disabled={saving}
+                  style={styles.secondaryButton}
+                >
+                  <Text style={styles.secondaryButtonText}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={saveRootRoutes}
+                  disabled={saving || !routeForm?.stops.length}
+                  style={[styles.primaryButton, (saving || !routeForm?.stops.length) && styles.disabledButton]}
+                >
+                  <Text style={styles.primaryButtonText}>{saving ? "Saving…" : "Save routes"}</Text>
                 </Pressable>
               </View>
             </ScrollView>
@@ -546,6 +742,10 @@ const styles = StyleSheet.create({
   clusterName: { color: COLORS.textHeader, fontSize: 14, fontWeight: "800" },
   clusterActions: { flexDirection: "row", gap: 6 },
   tree: { padding: 12, gap: 9 },
+  rootActions: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  routeEditorRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 8 },
+  routeStopName: { flex: 1 },
+  routeStopTime: { width: 92 },
   nodeGroupLabel: { color: COLORS.textBody, fontSize: 9, fontWeight: "800", letterSpacing: 0.7 },
   busNode: { minHeight: 56, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10, borderWidth: 1, borderColor: "#CBD7E7", borderRadius: 10, backgroundColor: COLORS.white, paddingHorizontal: 11, paddingVertical: 9 },
   rootNode: { borderWidth: 2, borderColor: "#88AEF4", backgroundColor: "#F4F8FF" },

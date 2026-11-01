@@ -19,6 +19,11 @@ const planMappingSchema = new mongoose.Schema(
       ref: "Bus",
       required: true,
     },
+    location_bus_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Bus",
+      default: null,
+    },
     member_bus_ids: {
       type: [mongoose.Schema.Types.ObjectId],
       ref: "Bus",

@@ -22,6 +22,16 @@ const planMappingApi = {
       body: JSON.stringify(mapping),
     }),
 
+  updateRoutes: (token, clusterId, stops) =>
+    fetchJson(
+      `${API_BASE_URL}/api/bus/plan-mappings/${encodeURIComponent(clusterId)}/routes`,
+      {
+        method: "PUT",
+        headers: authHeaders(token),
+        body: JSON.stringify({ stops }),
+      },
+    ),
+
   remove: (token, clusterId) =>
     fetchJson(
       `${API_BASE_URL}/api/bus/plan-mappings/${encodeURIComponent(clusterId)}`,

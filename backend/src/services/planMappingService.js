@@ -5,6 +5,7 @@ const User = require("../models/User");
 const {
   findUncoveredAssignments,
   getEffectiveBusId,
+  getEffectiveLocationBusId,
 } = require("../utils/planMapping");
 
 function normalizeIdentifier(value) {
@@ -17,7 +18,9 @@ async function loadPlanState() {
       .select("_id bus_no preview_number status altered_to_bus_id combined_routes")
       .lean(),
     BusRoute.find({}).select("bus_id plan_name arrival_time").lean(),
-    PlanMapping.find({}).select("plan_name root_bus_id member_bus_ids").lean(),
+    PlanMapping.find({})
+      .select("plan_name root_bus_id location_bus_id member_bus_ids")
+      .lean(),
     User.find({
       role: "student",
       is_active: true,
@@ -108,6 +111,58 @@ function getEffectiveBusForPlan(busId, planName, clusters, busesById) {
   return busesById[effectiveBusId] ? effectiveBusId : null;
 }
 
+function getInUseLocationBusIds(busIdsByUser, planName, clusters) {
+  const inUseBusIds = new Set();
+  for (const busId of busIdsByUser.filter(Boolean)) {
+    inUseBusIds.add(String(busId));
+    inUseBusIds.add(getEffectiveBusId(busId, planName, clusters));
+    inUseBusIds.add(getEffectiveLocationBusId(busId, planName, clusters));
+  }
+  return inUseBusIds;
+}
+
+function getClusterChangeNotifications(
+  state,
+  cluster,
+  planName,
+  routesChanged = false,
+) {
+  const rootBusId = String(cluster.root_bus_id);
+  const locationBusId = String(cluster.location_bus_id || rootBusId);
+  const serviceBusIds = new Set([
+    rootBusId,
+    ...(cluster.member_bus_ids || []).map(String),
+  ]);
+  const busById = new Map(state.buses.map((bus) => [String(bus._id), bus]));
+  const rootBus = busById.get(rootBusId);
+  const locationBus = busById.get(locationBusId);
+  const locationPreview =
+    locationBus?.preview_number ?? locationBus?.bus_no ?? locationBusId;
+  const routePreview =
+    rootBus?.preview_number ?? rootBus?.bus_no ?? rootBusId;
+
+  return state.users.flatMap((user, index) => {
+    const assignedBusId = state.busIdsByUser[index];
+    if (!serviceBusIds.has(assignedBusId)) return [];
+    const busChanged = assignedBusId !== locationBusId;
+    const routeChanged = routesChanged || assignedBusId !== rootBusId;
+    return [{
+          user_id: user._id,
+          type: "plan_changed",
+          message:
+            `Bus: ${busChanged ? `Uses Bus ${locationPreview} location` : "No bus change"}\n` +
+            `Stops: ${routeChanged ? `Uses Bus ${routePreview} stops; find them on the Home page.` : "No change"}\n` +
+            "If you have any doubts, ask your administration.",
+          old_bus_no: rootBus?.bus_no ?? user.bus_no ?? null,
+          new_bus_no: locationBus?.bus_no ?? null,
+          old_preview: rootBus?.preview_number ?? null,
+          new_preview: locationBus?.preview_number ?? null,
+          plan_name: planName,
+          is_bus_active: true,
+        }];
+  });
+}
+
 function getPlanChangeNotifications(state, planName) {
   const normalizedPlan = String(planName || "").trim().toUpperCase();
   const busById = new Map(state.buses.map((bus) => [String(bus._id), bus]));
@@ -119,6 +174,12 @@ function getPlanChangeNotifications(state, planName) {
       ? getEffectiveBusId(assignedBusId, normalizedPlan, state.clusters)
       : null;
     const effectiveBus = effectiveBusId ? busById.get(effectiveBusId) : null;
+    const effectiveLocationBusId = assignedBusId
+      ? getEffectiveLocationBusId(assignedBusId, normalizedPlan, state.clusters)
+      : null;
+    const effectiveLocationBus = effectiveLocationBusId
+      ? busById.get(effectiveLocationBusId)
+      : null;
     const effectiveState = effectiveBusId
       ? state.busesById[effectiveBusId]
       : null;
@@ -127,22 +188,30 @@ function getPlanChangeNotifications(state, planName) {
       effectiveState.plans.includes(normalizedPlan);
 
     if (hasEffectiveRoute) {
-      const displayBus =
+      const locationChanged = effectiveLocationBusId !== assignedBusId;
+      const locationDisplay =
+        effectiveLocationBus?.preview_number ??
+        effectiveLocationBus?.bus_no ??
+        effectiveLocationBusId;
+      const stopsChanged = effectiveBusId !== assignedBusId;
+      const routeDisplay =
         effectiveBus?.preview_number ?? effectiveBus?.bus_no ?? effectiveBusId;
       return [{
         user_id: user._id,
         type: "plan_changed",
-        message:
-          normalizedPlan === "PLAN A"
-            ? "Today's service is back to your normal route. Follow your usual routine and check the Home page for your stops and arrival times."
-            : effectiveBusId !== assignedBusId
-              ? `Your route has changed for today. Use Bus ${displayBus}. ` +
-                "Find the stops on the Home page and wait at the listed time."
-              : "Your route has changed for today. Find your stops on the Home page and wait at the listed time.",
+        message: [
+          locationChanged
+            ? `Bus: Uses Bus ${locationDisplay} location`
+            : "Bus: No bus change",
+          stopsChanged
+            ? `Stops: Uses Bus ${routeDisplay} stops; find them on the Home page.`
+            : "Stops: No change",
+          "If you have any doubts, ask your administration.",
+        ].join("\n"),
         old_bus_no: assignedBus?.bus_no ?? user.bus_no ?? null,
-        new_bus_no: effectiveBus?.bus_no ?? null,
+        new_bus_no: effectiveLocationBus?.bus_no ?? null,
         old_preview: assignedBus?.preview_number ?? null,
-        new_preview: effectiveBus?.preview_number ?? null,
+        new_preview: effectiveLocationBus?.preview_number ?? null,
         plan_name: normalizedPlan,
         is_bus_active: true,
       }];
@@ -151,13 +220,18 @@ function getPlanChangeNotifications(state, planName) {
     if (hasEffectiveRoute) return [];
 
     const assignedDisplay =
-      assignedBus?.preview_number ?? assignedBus?.bus_no ?? user.bus_no ?? "assigned bus";
+      assignedBus?.preview_number ?? assignedBus?.bus_no ?? user.bus_no;
+    const isAssignedBusAvailable = Boolean(assignedBusId && assignedBus);
     return [{
       user_id: user._id,
       type: "plan_changed",
-      message: assignedBus
-        ? `Your assigned bus ${assignedDisplay} has no route or mapped replacement today, so it is inactive. Contact the Super Admin for assistance.`
-        : `Your assigned bus ${assignedDisplay} is no longer available and has no service today, so it is inactive. Contact the Super Admin for assistance.`,
+      message: [
+        isAssignedBusAvailable
+          ? `Bus: Assigned Bus ${assignedDisplay} has no service`
+          : "Bus: No assigned buses",
+        "Stops: No assigned stops",
+        "If you have any doubts, ask your administration.",
+      ].join("\n"),
       old_bus_no: assignedBus?.bus_no ?? user.bus_no ?? null,
       new_bus_no: null,
       old_preview: assignedBus?.preview_number ?? null,
@@ -190,6 +264,16 @@ function getPlanMappingChangeNotifications(
       normalizedPlan,
       state.clusters,
     );
+    const previousLocationBusId = getEffectiveLocationBusId(
+      assignedBusId,
+      normalizedPlan,
+      previousClusters,
+    );
+    const nextLocationBusId = getEffectiveLocationBusId(
+      assignedBusId,
+      normalizedPlan,
+      state.clusters,
+    );
     const previousBusState = state.busesById[previousBusId];
     const nextBusState = state.busesById[nextBusId];
     const previousBusActive =
@@ -201,24 +285,33 @@ function getPlanMappingChangeNotifications(
 
     if (
       previousBusActive === nextBusActive &&
-      (!nextBusActive || previousBusId === nextBusId)
+      (!nextBusActive ||
+        (previousBusId === nextBusId &&
+          previousLocationBusId === nextLocationBusId))
     ) {
       return [];
     }
 
     const previousBus = busById.get(previousBusId);
-    const nextBus = busById.get(nextBusId);
+    const previousLocationBus = busById.get(previousLocationBusId);
+    const nextBus = busById.get(nextLocationBusId);
     if (nextBusActive) {
-      const displayBus = nextBus?.preview_number ?? nextBus?.bus_no ?? nextBusId;
+      const locationChanged = previousLocationBusId !== nextLocationBusId;
+      const routeBus = busById.get(nextBusId);
+      const displayBus =
+        nextBus?.preview_number ?? nextBus?.bus_no ?? nextLocationBusId;
+      const routeBusDisplay =
+        routeBus?.preview_number ?? routeBus?.bus_no ?? nextBusId;
       return [{
         user_id: user._id,
         type: "plan_changed",
         message:
-          `Your route plan has changed. Use Bus ${displayBus}. In Home, you can see ` +
-          "this bus's location. Tap View stops to find a nearby stop and wait at the listed time.",
-        old_bus_no: previousBus?.bus_no ?? user.bus_no ?? null,
+          `Bus: ${locationChanged ? `Uses Bus ${displayBus} location` : "No bus change"}\n` +
+          `Stops: Uses Bus ${routeBusDisplay} stops; find them on the Home page.\n` +
+          "If you have any doubts, ask your administration.",
+        old_bus_no: previousLocationBus?.bus_no ?? user.bus_no ?? null,
         new_bus_no: nextBus?.bus_no ?? null,
-        old_preview: previousBus?.preview_number ?? null,
+        old_preview: previousLocationBus?.preview_number ?? null,
         new_preview: nextBus?.preview_number ?? null,
         plan_name: normalizedPlan,
         is_bus_active: true,
@@ -226,6 +319,8 @@ function getPlanMappingChangeNotifications(
     }
 
     const assignedDisplay =
+      previousLocationBus?.preview_number ??
+      previousLocationBus?.bus_no ??
       previousBus?.preview_number ??
       previousBus?.bus_no ??
       user.bus_no ??
@@ -233,12 +328,14 @@ function getPlanMappingChangeNotifications(
     return [{
       user_id: user._id,
       type: "plan_changed",
-      message:
-        `Your assigned bus ${assignedDisplay} has no ${normalizedPlan} route or mapped ` +
-        "replacement, so it is inactive today. Contact the Super Admin for assistance.",
-      old_bus_no: previousBus?.bus_no ?? user.bus_no ?? null,
+      message: [
+        `Bus: Assigned Bus ${assignedDisplay} has no service`,
+        "Stops: No assigned stops",
+        "If you have any doubts, ask your administration.",
+      ].join("\n"),
+      old_bus_no: previousLocationBus?.bus_no ?? user.bus_no ?? null,
       new_bus_no: null,
-      old_preview: previousBus?.preview_number ?? null,
+      old_preview: previousLocationBus?.preview_number ?? null,
       new_preview: null,
       plan_name: normalizedPlan,
       is_bus_active: false,
@@ -248,7 +345,9 @@ function getPlanMappingChangeNotifications(
 
 module.exports = {
   getCoverageErrors,
+  getClusterChangeNotifications,
   getEffectiveBusForPlan,
+  getInUseLocationBusIds,
   getPlanMappingChangeNotifications,
   getPlanChangeNotifications,
   loadPlanState,

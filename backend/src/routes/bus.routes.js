@@ -25,6 +25,13 @@ router.post(
   PlanMappingController.savePlanMapping,
 );
 
+router.put(
+  '/plan-mappings/:clusterId/routes',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  PlanMappingController.updatePlanMappingRoutes,
+);
+
 router.delete(
   '/plan-mappings/:clusterId',
   authenticateToken,

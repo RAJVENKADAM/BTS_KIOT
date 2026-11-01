@@ -13,6 +13,7 @@ export default function PlanMappingScreen({ navigation }) {
   const [data, setData] = useState({ buses: [], clusters: [], activePlan: "PLAN A" });
   const [selectedPlan, setSelectedPlan] = useState("PLAN B");
   const [form, setForm] = useState(null);
+  const [routeForm, setRouteForm] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
@@ -72,16 +73,29 @@ export default function PlanMappingScreen({ navigation }) {
   );
 
   const updateForm = (key, value) =>
-    setForm((current) => ({ ...current, [key]: value }));
+    setForm((current) => ({
+      ...current,
+      [key]: value,
+      ...(key === "rootBusId" && current?.locationBusId === value
+        ? { locationBusId: "" }
+        : {}),
+      ...(key === "memberBusIds" &&
+      Array.isArray(value) &&
+      value.includes(current?.locationBusId)
+        ? { locationBusId: "" }
+        : {}),
+    }));
 
   const createCluster = () => {
     setError("");
     setMessage("");
+    setRouteForm(null);
     setForm({
       clusterId: null,
       planName: selectedPlan,
       clusterName: `Cluster ${clusters.length + 1}`,
       rootBusId: "",
+      locationBusId: "",
       memberBusIds: [],
     });
   };
@@ -89,13 +103,76 @@ export default function PlanMappingScreen({ navigation }) {
   const editCluster = (cluster) => {
     setError("");
     setMessage("");
+    setRouteForm(null);
     setForm({
       clusterId: cluster.id,
       planName: cluster.planName,
       clusterName: cluster.clusterName,
       rootBusId: cluster.rootBus?.id || "",
+      locationBusId: cluster.locationBus?.id || "",
       memberBusIds: cluster.memberBuses.map((bus) => bus.id),
     });
+  };
+
+  const spareBuses = useMemo(
+    () =>
+      data.buses.filter(
+        (bus) =>
+          bus.canBeTemporaryLocation &&
+          bus.id !== form?.rootBusId &&
+          !(form?.memberBusIds || []).includes(bus.id) &&
+          (bus.id === form?.locationBusId || !bus.currentlyInUse),
+      ),
+    [data.buses, form?.locationBusId, form?.memberBusIds, form?.rootBusId],
+  );
+
+  const editRoutes = (cluster) => {
+    setError("");
+    setMessage("");
+    setForm(null);
+    setRouteForm({
+      cluster,
+      stops: (cluster.rootStops || []).map((stop) => ({
+        stopName: stop.stopName || "",
+        stopId: stop.stopId || "",
+        arrivalTime: stop.arrivalTime || "",
+      })),
+    });
+  };
+
+  const updateRouteStop = (index, key, value) =>
+    setRouteForm((current) => ({
+      ...current,
+      stops: current.stops.map((stop, stopIndex) => {
+        if (stopIndex !== index) return stop;
+        return {
+          ...stop,
+          [key]: value,
+          ...(key === "stopName" ? { stopId: "" } : {}),
+        };
+      }),
+    }));
+
+  const saveRoutes = async (event) => {
+    event.preventDefault();
+    if (!routeForm) return;
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      await planMappingApi.updateRoutes(
+        token,
+        routeForm.cluster.id,
+        routeForm.stops,
+      );
+      setRouteForm(null);
+      setMessage("Root route updated. Riders in this cluster have been notified.");
+      await load();
+    } catch (requestError) {
+      setError(requestError.message || "Could not update the root route.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const save = async (event) => {
@@ -105,7 +182,10 @@ export default function PlanMappingScreen({ navigation }) {
     setError("");
     setMessage("");
     try {
-      await planMappingApi.save(token, form);
+      await planMappingApi.save(token, {
+        ...form,
+        locationBusId: form.locationBusId || null,
+      });
       setForm(null);
       setMessage("Cluster saved. The mapping is now available to the bus service.");
       await load();
@@ -184,6 +264,8 @@ export default function PlanMappingScreen({ navigation }) {
         planName: selectedPlan,
         clusterName: cluster.clusterName,
         rootBusId: bus.id,
+        locationBusId:
+          cluster.locationBus?.id === bus.id ? "" : cluster.locationBus?.id || "",
         memberBusIds: cluster.memberBuses
           .filter((member) => member.plans.includes("PLAN A"))
           .map((member) => member.id),
@@ -207,6 +289,7 @@ export default function PlanMappingScreen({ navigation }) {
         planName: selectedPlan,
         clusterName: cluster.clusterName,
         rootBusId: cluster.rootBus?.id || "",
+        locationBusId: cluster.locationBus?.id || "",
         memberBusIds: [
           ...new Set([
             ...cluster.memberBuses.map((member) => member.id),
@@ -230,6 +313,7 @@ export default function PlanMappingScreen({ navigation }) {
       planName: selectedPlan,
       clusterName: cluster.clusterName,
       rootBusId: cluster.rootBus?.id || "",
+      locationBusId: cluster.locationBus?.id || "",
       memberBusIds: cluster.memberBuses
         .filter((bus) => bus.id !== busId)
         .map((bus) => bus.id),
@@ -294,6 +378,9 @@ export default function PlanMappingScreen({ navigation }) {
         .pm-field { display:grid; gap:7px; margin-bottom:14px; }
         .pm-field label { color:#334155; font-size:12px; font-weight:750; }
         .pm-field input,.pm-field select { width:100%; min-height:42px; padding:9px 11px; border:1px solid #d7e0eb; border-radius:10px; background:#fff; font:inherit; }
+        .pm-route-row { display:grid; grid-template-columns:minmax(0,1fr) 110px auto; gap:7px; margin-top:9px; }
+        .pm-route-row input { min-width:0; min-height:42px; padding:9px 11px; border:1px solid #d7e0eb; border-radius:10px; background:#fff; font:inherit; }
+        .pm-field small { color:#64748b; line-height:1.5; }
         .pm-available { margin-top:22px; padding:14px; border:1px dashed #b8c8d9; border-radius:13px; background:#f8fafc; }
         .pm-available strong { display:block; margin-bottom:9px; font-size:12px; }
         .pm-available .pm-nodes { max-height:210px; overflow:auto; }
@@ -319,7 +406,7 @@ export default function PlanMappingScreen({ navigation }) {
         <div className="pm-heading">
           <div>
             <h1>Plan Mapping</h1>
-            <p>Create bus clusters and choose the service used by mapped riders.</p>
+            <p>Create bus clusters, edit root routes, and optionally use an available bus for live location.</p>
           </div>
           <button className="pm-button secondary" onClick={load} disabled={loading || saving}>
             Refresh data
@@ -381,12 +468,15 @@ export default function PlanMappingScreen({ navigation }) {
                       onDrop={(event) => moveBusToCluster(event, cluster)}
                       title="Drop a bus here to make it the root or add it as a node"
                     >
-                      <div className="pm-root-label">Root · location and stops source</div>
+                      <div className="pm-root-label">Root · stops source</div>
                       <strong>{busLabel(cluster.rootBus)}</strong>
                       <small>{cluster.clusterName} · {cluster.rootBus?.assignedUsers || 0} assigned riders</small>
+                      {cluster.locationBus ? (
+                        <small>Temporary live location: {busLabel(cluster.locationBus)}</small>
+                      ) : null}
                     </div>
                     <div className="pm-members" onDragOver={(event) => event.preventDefault()} onDrop={(event) => moveBusToCluster(event, cluster)}>
-                      <div className="pm-members-label">Mapped buses · share root location and stops</div>
+                      <div className="pm-members-label">Mapped buses · share cluster location and root stops</div>
                       <div className="pm-nodes">
                         {cluster.memberBuses.length ? cluster.memberBuses.map((bus) => (
                           <div key={bus.id} className="pm-node" draggable onDragStart={(event) => onDragStart(event, bus.id)}>
@@ -396,13 +486,16 @@ export default function PlanMappingScreen({ navigation }) {
                       </div>
                     </div>
                     <div className="pm-cluster-foot">
-                      <button className="pm-button secondary" onClick={() => editCluster(cluster)} disabled={saving}>Edit tree</button>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button className="pm-button secondary" onClick={() => editRoutes(cluster)} disabled={saving}>Edit routes</button>
+                        <button className="pm-button secondary" onClick={() => editCluster(cluster)} disabled={saving}>Edit tree</button>
+                      </div>
                       <button className="pm-button danger" onClick={() => removeCluster(cluster)} disabled={saving}>Delete</button>
                     </div>
                     {cluster.rootStops?.length ? (
                       <details className="pm-stops">
                         <summary>Preview root stops and arrival times</summary>
-                        {cluster.rootStops.map((stop) => (
+                        {(cluster.rootStops || []).map((stop) => (
                           <div className="pm-stop" key={`${stop.stopOrder}-${stop.stopName}`}>
                             <span>{stop.stopOrder}. {stop.stopName}</span><time>{stop.arrivalTime || "Time not uploaded"}</time>
                           </div>
@@ -452,9 +545,75 @@ export default function PlanMappingScreen({ navigation }) {
                     {!members.length ? <span className="pm-node" style={{ cursor: "default" }}>No unmapped Plan A-only buses</span> : null}
                   </div>
                 </div>
+                <div className="pm-field">
+                  <label htmlFor="location-bus">Temporary live-location bus (optional)</label>
+                  <select
+                    id="location-bus"
+                    value={form.locationBusId || ""}
+                    onChange={(event) => updateForm("locationBusId", event.target.value)}
+                  >
+                    <option value="">Use root bus location</option>
+                    {spareBuses.map((bus) => (
+                      <option key={bus.id} value={bus.id}>
+                        {busLabel(bus)} · {bus.assignedUsers} riders
+                      </option>
+                    ))}
+                  </select>
+                  <small>Stops remain from the root bus. Only the live location and preview number use this bus.</small>
+                </div>
                 <div style={{ display: "flex", gap: 8 }}>
                   <button className="pm-button" disabled={saving} type="submit">{saving ? "Saving…" : "Save tree"}</button>
                   <button className="pm-button secondary" type="button" onClick={() => setForm(null)}>Cancel</button>
+                </div>
+              </form>
+            ) : routeForm ? (
+              <form onSubmit={saveRoutes}>
+                <h2>Edit root route · {routeForm.cluster.clusterName}</h2>
+                <p>Use existing stop names. New stops must be verified. Use arrival times like 8:10AM.</p>
+                {routeForm.stops.map((stop, index) => (
+                  <div className="pm-route-row" key={`route-stop-${index}`}>
+                    <input
+                      aria-label={`Stop ${index + 1}`}
+                      value={stop.stopName}
+                      placeholder={`Stop ${index + 1}`}
+                      onChange={(event) => updateRouteStop(index, "stopName", event.target.value)}
+                    />
+                    <input
+                      aria-label={`Arrival time for stop ${index + 1}`}
+                      value={stop.arrivalTime}
+                      placeholder="8:10AM"
+                      onChange={(event) => updateRouteStop(index, "arrivalTime", event.target.value)}
+                    />
+                    <button
+                      className="pm-button danger"
+                      type="button"
+                      onClick={() => setRouteForm((current) => ({
+                        ...current,
+                        stops: current.stops.filter((_, stopIndex) => stopIndex !== index),
+                      }))}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+                <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                  <button
+                    className="pm-button secondary"
+                    type="button"
+                    disabled={routeForm.stops.length >= 100}
+                    onClick={() => setRouteForm((current) => ({
+                      ...current,
+                      stops: [...current.stops, { stopName: "", stopId: "", arrivalTime: "" }],
+                    }))}
+                  >
+                    Add stop
+                  </button>
+                  <button className="pm-button" disabled={saving || !routeForm.stops.length}>
+                    {saving ? "Saving…" : "Save routes"}
+                  </button>
+                  <button className="pm-button secondary" type="button" onClick={() => setRouteForm(null)}>
+                    Cancel
+                  </button>
                 </div>
               </form>
             ) : (
@@ -474,7 +633,7 @@ export default function PlanMappingScreen({ navigation }) {
                 <div className="pm-available" style={{ background: "#eff6ff", borderStyle: "solid" }}>
                   <strong>How a cluster works</strong>
                   <div style={{ color: "#475569", fontSize: 12, lineHeight: 1.6 }}>
-                    The root bus provides both the live location and the active route stops/timings. Mapped buses keep their riders, but use that root service. Plan A always remains separate.
+                  The root supplies stops and timings. You can optionally assign an available bus for live location; mapped buses keep their rider assignments. Plan A always remains separate.
                   </div>
                 </div>
               </>
