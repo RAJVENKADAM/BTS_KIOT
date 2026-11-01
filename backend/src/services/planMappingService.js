@@ -126,20 +126,15 @@ function getPlanChangeNotifications(state, planName) {
       effectiveState?.status === "active" &&
       effectiveState.plans.includes(normalizedPlan);
 
-    if (
-      hasEffectiveRoute &&
-      (effectiveBusId !== assignedBusId ||
-        assignedBus?.status === "inactive")
-    ) {
+    if (hasEffectiveRoute) {
       const displayBus =
         effectiveBus?.preview_number ?? effectiveBus?.bus_no ?? effectiveBusId;
       return [{
         user_id: user._id,
         type: "plan_changed",
         message:
-          `Your route plan has changed to ${normalizedPlan}. Use Bus ${displayBus}. ` +
-          "In Home, you can see this bus's location. Tap View stops to see the route, " +
-          "find a nearby stop, and wait there at the listed time.",
+          `Your route has changed for today. Use Bus ${displayBus}. ` +
+          "In the Home page, view the stops and wait at a nearby stop at the listed time.",
         old_bus_no: assignedBus?.bus_no ?? user.bus_no ?? null,
         new_bus_no: effectiveBus?.bus_no ?? null,
         old_preview: assignedBus?.preview_number ?? null,
@@ -157,8 +152,8 @@ function getPlanChangeNotifications(state, planName) {
       user_id: user._id,
       type: "plan_changed",
       message: assignedBus
-        ? `Your assigned bus ${assignedDisplay} has no ${normalizedPlan} route or mapped replacement, so it is inactive today. Contact the Super Admin for assistance.`
-        : `Your assigned bus ${assignedDisplay} is no longer available and has no ${normalizedPlan} service, so it is inactive today. Contact the Super Admin for assistance.`,
+        ? `Your assigned bus ${assignedDisplay} has no route or mapped replacement today, so it is inactive. Contact the Super Admin for assistance.`
+        : `Your assigned bus ${assignedDisplay} is no longer available and has no service today, so it is inactive. Contact the Super Admin for assistance.`,
       old_bus_no: assignedBus?.bus_no ?? user.bus_no ?? null,
       new_bus_no: null,
       old_preview: assignedBus?.preview_number ?? null,

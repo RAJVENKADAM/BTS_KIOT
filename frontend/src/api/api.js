@@ -4,8 +4,9 @@
  */
 import { fetchJson } from "../utils/errorHandler";
 
-//export const API_BASE_URL = "https://bts-kiot.onrender.com";
-export const API_BASE_URL = "http://10.227.91.77:5000";
+export const API_BASE_URL = (
+  process.env.EXPO_PUBLIC_API_BASE_URL || "https://bts-kiot.onrender.com"
+).replace(/\/+$/, "");
 
 export const healthCheck = async () => {
   try {

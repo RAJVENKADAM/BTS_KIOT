@@ -842,7 +842,7 @@ async function setGlobalActivePlan(req, res) {
           type: notification.type,
           message: notification.message,
           newPreview: notification.new_preview,
-          isBusActive: true,
+          isBusActive: notification.is_bus_active,
         });
       });
     }

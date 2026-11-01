@@ -111,7 +111,7 @@ test("reports assigned buses without an effective route before a plan change", (
   );
 });
 
-test("plan changes notify only riders whose bus changes or becomes inactive", () => {
+test("global plan changes notify all riders without exposing plan names", () => {
   const state = {
     buses: [
       { _id: "direct", bus_no: "BUS-DIRECT", preview_number: "1", status: "active" },
@@ -140,15 +140,38 @@ test("plan changes notify only riders whose bus changes or becomes inactive", ()
   const notifications = getPlanChangeNotifications(state, "PLAN B");
 
   assert.deepEqual(notifications.map(({ user_id, is_bus_active }) => [user_id, is_bus_active]), [
+    ["user-direct", true],
     ["user-member", true],
     ["user-inactive", false],
     ["user-deleted", false],
   ]);
-  assert.match(notifications[0].message, /Use Bus 3/);
-  assert.match(notifications[0].message, /View stops/);
-  assert.equal(notifications[0].new_preview, "3");
-  assert.match(notifications[1].message, /inactive today/);
-  assert.match(notifications[2].message, /no longer available/);
+  assert.match(notifications[1].message, /Use Bus 3/);
+  assert.match(notifications[1].message, /view the stops/i);
+  assert.doesNotMatch(notifications[0].message, /PLAN B/i);
+  assert.equal(notifications[1].new_preview, "3");
+  assert.match(notifications[2].message, /inactive/);
+  assert.doesNotMatch(notifications[2].message, /PLAN B/i);
+  assert.match(notifications[3].message, /no longer available/);
+
+  const normalPlanNotifications = getPlanChangeNotifications(state, "PLAN A");
+  assert.equal(normalPlanNotifications.length, 4);
+  assert.deepEqual(
+    normalPlanNotifications.map(({ user_id, is_bus_active }) => [
+      user_id,
+      is_bus_active,
+    ]),
+    [
+      ["user-direct", false],
+      ["user-member", true],
+      ["user-inactive", true],
+      ["user-deleted", false],
+    ],
+  );
+  assert.ok(
+    normalPlanNotifications.every(
+      ({ message }) => !/PLAN A/i.test(message) && /today/i.test(message),
+    ),
+  );
 });
 
 test("cluster edits notify riders when service changes but never block for uncovered riders", () => {
