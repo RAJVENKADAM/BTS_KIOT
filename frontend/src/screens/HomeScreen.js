@@ -4,7 +4,7 @@
  * Architecture & Data Flow:
  * ─────────────────────────
  * 1. UI renders an OpenStreetMap (Leaflet via WebView) as fullscreen background.
- * 2. Top bar overlay provides bus search and Profile/Notifications navigation.
+ * 2. Top bar overlay provides Profile/Notifications navigation.
  * 3. @gorhom/bottom-sheet houses status info: bus card with distance-to-college,
  *    online/offline status, error/loading states.
  *
@@ -12,7 +12,7 @@
  * ─────────────────
  * - AuthContext provides { token, user } for API auth.
  * - BusContext provides { error, refreshBuses, getSocket } for bus list + socket.
- * - Local state tracks search query, busData (latest GPS), location status,
+ * - Local state tracks busData (latest GPS), location status,
  *    marker movement state, and display logic.
  *
  * Socket Integration:
@@ -21,12 +21,11 @@
  * - Listens for "bus-update" events to refresh live bus status in real time.
  * - Live bus updates are socket-driven.
  *
- * Search & Marker Rules:
- * ───────────────────────
- * - Assigned buses auto-load from the user profile; users may search buses.
- * - "Not found" clears all previous markers.
+ * Marker Rules:
+ * ──────────────
+ * - Assigned buses auto-load from the user profile.
  * - Marker only shows when shouldShowBusMarker evaluates to true — never falls
- *    back to stale lastGoodLocation for a failed search.
+ *   back to stale lastGoodLocation for a failed lookup.
  *
  * Bus Status Detection:
  * ──────────────────────
@@ -47,7 +46,6 @@ import OSMMap from "../components/Map/OSMMap";
 import {
   View,
   Text,
-  TextInput,
   StyleSheet,
   StatusBar,
   Platform,
@@ -126,24 +124,22 @@ const HomeScreen = () => {
   const [showPlanInSheet, setShowPlanInSheet] = useState(false);
   const [planViewMode, setPlanViewMode] = useState(null); // 'activePlan' | 'stopsForBus' | null
 
-  // Compute where the search bar actually ends, so the sheet never expands behind it
+  // Keep the expanded sheet below the profile and notification controls.
   const { height: SCREEN_HEIGHT } = Dimensions.get("window");
   const TOP_BAR_TOP = Platform.OS === "ios" ? 60 : 50;
-  const TOP_BAR_HEIGHT = 45;
-  const SAFE_GAP_BELOW_SEARCH = 12;
-  const SEARCH_BAR_BOTTOM =
-    TOP_BAR_TOP + TOP_BAR_HEIGHT + SAFE_GAP_BELOW_SEARCH;
+  const TOP_BAR_HEIGHT = 32;
+  const SAFE_GAP_BELOW_TOP_BAR = 12;
+  const TOP_BAR_BOTTOM = TOP_BAR_TOP + TOP_BAR_HEIGHT + SAFE_GAP_BELOW_TOP_BAR;
 
-  // Refined snap points to ensure modal expands safely up to right below the search bar without overlapping it
   const snapPoints = useMemo(() => {
-    const maxAvailableHeight = SCREEN_HEIGHT - SEARCH_BAR_BOTTOM;
+    const maxAvailableHeight = SCREEN_HEIGHT - TOP_BAR_BOTTOM;
     const maxPercent = Math.floor((maxAvailableHeight / SCREEN_HEIGHT) * 100);
 
     if (showPlanInSheet) {
-      return ["50%", `${Math.min(maxPercent, 68)}%`];
+      return ["50%", `${Math.min(maxPercent, 80)}%`];
     }
     return ["25%", "45%"];
-  }, [showPlanInSheet]);
+  }, [showPlanInSheet, SCREEN_HEIGHT, TOP_BAR_BOTTOM]);
 
   const closeAllOverlayPanels = useCallback(() => {
     setShowPlanInSheet(false);
@@ -930,11 +926,6 @@ const HomeScreen = () => {
         )}
         {(alteration?.isAltered || alteration?.isReplacement) && (
           <View style={styles.inactivePlanBanner}>
-            <Ionicons
-              name="information-circle-outline"
-              size={17}
-              color="#92400E"
-            />
             <Text style={styles.inactivePlanText}>{alteration.message}</Text>
           </View>
         )}
@@ -1035,34 +1026,6 @@ const HomeScreen = () => {
       </View>
 
       <View style={styles.topBar}>
-        <View style={styles.searchContainer}>
-          <Ionicons name="search" size={18} color={COLORS.textBody} />
-
-          <TextInput
-            placeholder={"Search"}
-            value={searchQuery}
-            onChangeText={setSearchQuery}
-            onSubmitEditing={handleSearch}
-            style={styles.searchInput}
-            placeholderTextColor={COLORS.textBody}
-          />
-
-          <View style={styles.clearSlot}>
-            {searchQuery ? (
-              <TouchableOpacity
-                onPress={handleClearSearch}
-                style={styles.clearButton}
-              >
-                <Ionicons
-                  name="close-circle"
-                  size={18}
-                  color={COLORS.textBody}
-                />
-              </TouchableOpacity>
-            ) : null}
-          </View>
-        </View>
-
         <View style={styles.rightIcons}>
           <TouchableOpacity
             style={styles.notificationButton}
@@ -1311,7 +1274,7 @@ const styles = StyleSheet.create({
     right: 15,
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
+    justifyContent: "flex-end",
     zIndex: 10,
   },
   rightIcons: {
@@ -1404,25 +1367,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "800",
   },
-  searchContainer: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "rgba(255, 255, 255, 0.93)",
-    borderRadius: 50,
-    paddingHorizontal: 12,
-    height: 45,
-    ...SHADOWS.soft,
-  },
-
-  searchInput: {
-    flex: 1,
-    marginLeft: 8,
-    marginRight: 8, // IMPORTANT
-    fontSize: 14,
-    color: COLORS.textHeader,
-  },
-
   errorText: {
     color: "#e74c3c",
   },
@@ -1471,10 +1415,6 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     marginBottom: 8,
   },
-  clearButton: {
-    padding: 4,
-  },
-
   sheetHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
