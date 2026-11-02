@@ -149,7 +149,7 @@ test("global plan changes notify all riders without exposing plan names", () => 
   ]);
   assert.equal(
     notifications[0].message,
-    "For today's service, use Bus 1. Follow Bus 1's stops and timings; open Home and tap View Stops to see the route.",
+    "For today's service, use Bus 1. The bus is the same, but its route and stops may have changed; open Home and tap View Stops to check.",
   );
   assert.equal(
     notifications[1].message,
@@ -181,8 +181,36 @@ test("global plan changes notify all riders without exposing plan names", () => 
   assert.ok(normalPlanNotifications.every(({ message }) => !/PLAN A/i.test(message)));
   assert.equal(
     normalPlanNotifications[1].message,
-    "For today's service, use Bus 2. Follow Bus 2's stops and timings; open Home and tap View Stops to see the route.",
+    "For today's service, use Bus 2. The bus is the same, but its route and stops may have changed; open Home and tap View Stops to check.",
   );
+});
+
+test("cluster route-only changes warn riders to recheck stops when their bus stays the same", () => {
+  const state = {
+    buses: [
+      { _id: "root", bus_no: "BUS-ROOT", preview_number: "3" },
+    ],
+    busesById: {
+      root: { plans: ["PLAN B"], status: "active" },
+    },
+    busIdsByUser: ["root"],
+    clusters: [],
+    users: [{ _id: "root-rider", bus_no: "BUS-ROOT" }],
+  };
+  const notifications = getClusterChangeNotifications(
+    state,
+    {
+      plan_name: "PLAN B",
+      root_bus_id: "root",
+      member_bus_ids: [],
+    },
+    "PLAN B",
+    true,
+  );
+
+  assert.equal(notifications.length, 1);
+  assert.match(notifications[0].message, /The bus is the same, but its route and stops may have changed/);
+  assert.match(notifications[0].message, /View Stops to check/);
 });
 
 test("cluster edits notify riders when service changes but never block for uncovered riders", () => {

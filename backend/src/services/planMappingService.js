@@ -12,9 +12,16 @@ function normalizeIdentifier(value) {
   return String(value ?? "").trim().toUpperCase();
 }
 
-function getServiceChangeMessage(busDisplay, routeDisplay) {
+function getServiceChangeMessage(
+  busDisplay,
+  routeDisplay,
+  routeMayHaveChanged = false,
+) {
   const bus = busDisplay || "your assigned bus";
   const route = routeDisplay || bus;
+  if (routeMayHaveChanged) {
+    return `For today's service, use Bus ${bus}. The bus is the same, but its route and stops may have changed; open Home and tap View Stops to check.`;
+  }
   return `For today's service, use Bus ${bus}. Follow Bus ${route}'s stops and timings; open Home and tap View Stops to see the route.`;
 }
 
@@ -163,6 +170,7 @@ function getClusterChangeNotifications(
           message: getServiceChangeMessage(
             busChanged ? locationPreview : getAssignedBusDisplay(user, assignedBus),
             routeChanged ? routePreview : getAssignedBusDisplay(user, assignedBus),
+            routeChanged && !busChanged,
           ),
           old_bus_no: rootBus?.bus_no ?? user.bus_no ?? null,
           new_bus_no: locationBus?.bus_no ?? null,
@@ -214,6 +222,7 @@ function getPlanChangeNotifications(state, planName) {
         message: getServiceChangeMessage(
           locationChanged ? locationDisplay : assignedDisplay,
           stopsChanged ? routeDisplay : assignedDisplay,
+          !locationChanged,
         ),
         old_bus_no: assignedBus?.bus_no ?? user.bus_no ?? null,
         new_bus_no: effectiveLocationBus?.bus_no ?? null,
@@ -307,7 +316,11 @@ function getPlanMappingChangeNotifications(
       return [{
         user_id: user._id,
         type: "plan_changed",
-        message: getServiceChangeMessage(displayBus, routeBusDisplay),
+        message: getServiceChangeMessage(
+          displayBus,
+          routeBusDisplay,
+          previousLocationBusId === nextLocationBusId,
+        ),
         old_bus_no: previousLocationBus?.bus_no ?? user.bus_no ?? null,
         new_bus_no: nextBus?.bus_no ?? null,
         old_preview: previousLocationBus?.preview_number ?? null,
