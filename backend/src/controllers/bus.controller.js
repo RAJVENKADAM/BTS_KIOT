@@ -187,7 +187,6 @@ function buildAlterationDetails(sourceBus, effectiveBus) {
   return {
     isAltered: true,
     alterationType: sourceBus.alteration_type || "alter",
-    originalPreview: sourceBus.preview_number ?? null,
     message: isCombined
       ? `For today's service, use Bus ${newPreview}. Follow the selected combined route's stops and timings shown under View Stops on Home.`
       : `For today's service, use Bus ${newPreview}. Continue following Bus ${oldPreview}'s original stops and timings; open Home and tap View Stops to see them.`,
@@ -1758,6 +1757,7 @@ async function getBusRoutes(req, res) {
     const assignment = await resolvePlanMappingAssignment(bus, activePlan);
     const mappedBus = assignment.routeBus;
     const locationBus = assignment.locationBus;
+    const effectiveLocationBus = await resolveEffectiveBus(locationBus);
     const routes = isSuperadmin
       ? await getEffectiveRoutesForAllPlans(bus)
       : await getRoutesForBus(mappedBus);
@@ -1800,7 +1800,7 @@ async function getBusRoutes(req, res) {
       success: true,
       busNo: isSuperadmin ? bus.bus_no : String(bus.preview_number ?? bus.bus_no),
       previewNumber: bus.preview_number,
-      effectivePreviewNumber: locationBus.preview_number,
+      effectivePreviewNumber: effectiveLocationBus.preview_number,
       routeBusPreviewNumber,
       isReplacementRoute,
       routeSelectionLabel,
@@ -1911,13 +1911,10 @@ async function getLiveLocation(req, res) {
     // This lets users track a bus via its short preview number (e.g. "4")
     // while still preferring exact bus_no matches to avoid ambiguity.
     let bus = await Bus.findOne({ bus_no: normalizedBusNo });
-    let matchedByIdentifier = false;
-
     if (!bus) {
       bus = await Bus.findOne({
         preview_number: { $in: [busNo, String(busNo)] },
       });
-      matchedByIdentifier = true;
     }
 
     if (!bus) {
@@ -1941,7 +1938,7 @@ async function getLiveLocation(req, res) {
         ? bus
         : mappedBus;
     const effectiveBus = assignment.hasTemporaryLocationBus
-      ? assignment.locationBus
+      ? await resolveEffectiveBus(assignment.locationBus)
       : await resolveEffectiveBus(locationBus);
     const incomingChanges = await getIncomingBusChanges(bus);
     const alteration = assignment.hasTemporaryLocationBus
@@ -2007,8 +2004,8 @@ async function getLiveLocation(req, res) {
     // Choose the bus identifier to return to the client: previewNumber for regular users
     // and bus_no for superadmin.
     const clientBusIdentifier = isSuperadmin
-      ? (matchedByIdentifier ? String(bus.preview_number ?? bus.bus_no) : bus.bus_no)
-      : String(bus.preview_number ?? bus.bus_no);
+      ? effectiveBus.bus_no
+      : String(effectiveBus.preview_number ?? effectiveBus.bus_no);
 
     const responseData = {
       // A database bus is a successful lookup even when GPS has no record yet.
@@ -2088,7 +2085,7 @@ async function trackByPreview(req, res) {
         ? bus
         : mappedBus;
     const effectiveBus = assignment.hasTemporaryLocationBus
-      ? assignment.locationBus
+      ? await resolveEffectiveBus(assignment.locationBus)
       : await resolveEffectiveBus(locationBus);
     const incomingChanges = await getIncomingBusChanges(bus);
     const alteration = assignment.hasTemporaryLocationBus
@@ -2136,8 +2133,10 @@ async function trackByPreview(req, res) {
     const isSuperadmin = req.user && String(req.user.role || '').toLowerCase() === 'superadmin';
     res.status(200).json({
       success: true,
-      busNo: isSuperadmin ? bus.bus_no : String(bus.preview_number ?? bus.bus_no),
-      ...(isSuperadmin ? { bus_no: bus.bus_no } : {}),
+      busNo: isSuperadmin
+        ? effectiveBus.bus_no
+        : String(effectiveBus.preview_number ?? effectiveBus.bus_no),
+      ...(isSuperadmin ? { bus_no: effectiveBus.bus_no } : {}),
       previewNumber: effectiveBus.preview_number,
       effectivePreviewNumber: effectiveBus.preview_number,
       ...(isSuperadmin ? { effectiveBusNo: effectiveBus.bus_no } : {}),
