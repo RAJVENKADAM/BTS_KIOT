@@ -83,18 +83,17 @@ async function inspectCollection(db, info) {
   return result;
 }
 
-async function main() {
+async function runAtlasReadonlyAudit() {
   let mongoConfig;
   try {
     mongoConfig = require("../src/config/mongodb");
   } catch (error) {
-    console.log(JSON.stringify({
+    return {
       status: "FAILED",
       stage: "CONFIGURATION",
       error: getSafeError(error),
-    }));
-    process.exitCode = 1;
-    return;
+      collections: [],
+    };
   }
 
   const client = new MongoClient(mongoConfig.MONGODB_URI, CONNECTION_OPTIONS);
@@ -137,15 +136,23 @@ async function main() {
     }
   }
 
-  console.log(JSON.stringify(report, null, 2));
-  if (report.status !== "SUCCEEDED") process.exitCode = 1;
+  return report;
 }
 
-main().catch((error) => {
-  console.log(JSON.stringify({
-    status: "FAILED",
-    stage: "UNEXPECTED",
-    error: getSafeError(error),
-  }));
-  process.exitCode = 1;
-});
+module.exports = { runAtlasReadonlyAudit };
+
+if (require.main === module) {
+  runAtlasReadonlyAudit()
+    .then((report) => {
+      console.log(JSON.stringify(report, null, 2));
+      if (report.status !== "SUCCEEDED") process.exitCode = 1;
+    })
+    .catch((error) => {
+      console.log(JSON.stringify({
+        status: "FAILED",
+        stage: "UNEXPECTED",
+        error: getSafeError(error),
+      }));
+      process.exitCode = 1;
+    });
+}
