@@ -2,6 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const { uploadExcelUsers } = require('../controllers/organize.controller');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth');
+const { reserveImportCapacity } = require('../middleware/importAdmission');
 
 const router = express.Router();
 
@@ -25,6 +26,6 @@ const upload = multer({
 });
 
 // Superadmin only routes
-router.post('/upload-excel-users', authenticateToken, authorizeRoles('superadmin'), upload.single('file'), uploadExcelUsers);
+router.post('/upload-excel-users', authenticateToken, authorizeRoles('superadmin'), reserveImportCapacity, upload.single('file'), uploadExcelUsers);
 
 module.exports = router;

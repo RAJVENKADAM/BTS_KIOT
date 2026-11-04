@@ -3,7 +3,7 @@
  * Handles single bus marker display with a circular online/offline indicator,
  * college marker, and real-time coordinate updates via postMessage.
  */
-import React, { useRef, useEffect, useCallback } from "react";
+import React, { useRef, useEffect, useCallback, useMemo } from "react";
 import { WebView } from "react-native-webview";
 const { ROUTE_REFRESH_DISTANCE_METERS } = require("../../utils/gpsLocationPolicy.cjs");
 
@@ -43,7 +43,11 @@ export default function OSMMap({
       busData.latitude != null &&
       busData.longitude != null &&
       Number.isFinite(Number(busData.latitude)) &&
-      Number.isFinite(Number(busData.longitude));
+      Number.isFinite(Number(busData.longitude)) &&
+      Number(busData.latitude) >= -90 &&
+      Number(busData.latitude) <= 90 &&
+      Number(busData.longitude) >= -180 &&
+      Number(busData.longitude) <= 180;
     if (!hasPrimaryLocation) {
       payload = { type: "CLEAR_MARKERS" };
       sendPayload(payload, "CLEAR_MARKERS");
@@ -86,7 +90,7 @@ export default function OSMMap({
     }
   }, []);
 
-  const html = `
+  const html = useMemo(() => `
 <!DOCTYPE html>
 <html>
 <head>
@@ -355,7 +359,7 @@ export default function OSMMap({
               lastRequestedRoute = null;
               lastRouteAnchor = null;
               if (!error || error.name !== 'AbortError') {
-                console.warn('Could not load live road-route alternatives:', error && error.message);
+                console.warn('Could not load live road-route alternatives.');
               }
             }
           })
@@ -563,12 +567,13 @@ function upsertBusMarker(key, lat, lng, offline, status) {
   </script>
 </body>
 </html>
-`;
+`, []);
+  const mapSource = useMemo(() => ({ html, baseUrl: "" }), [html]);
 
   return (
     <WebView
       ref={webRef}
-      source={{ html, baseUrl: "" }}
+      source={mapSource}
       style={{ flex: 1, width: "100%", height: "100%" }}
       javaScriptEnabled
       domStorageEnabled

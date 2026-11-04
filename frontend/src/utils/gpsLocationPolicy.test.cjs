@@ -6,7 +6,9 @@ const {
   SOCKET_RECOVERY_BASE_DELAY_MS,
   SOCKET_RECOVERY_MAX_DELAY_MS,
   distanceMeters,
+  getGpsFreshnessDelay,
   getSocketRecoveryDelay,
+  hasValidGpsCoordinates,
   isGpsStale,
   isIncomingLocationOlder,
   isLocationForSelection,
@@ -124,4 +126,48 @@ test("socket snapshot retries use bounded exponential backoff with jitter", () =
   assert.equal(getSocketRecoveryDelay(1, 1), 10_000);
   assert.equal(getSocketRecoveryDelay(20, 1), 60_000);
   assert.equal(getSocketRecoveryDelay(-1, 0.5), 3_750);
+});
+
+test("GPS coordinates must be finite and geographically valid", () => {
+  assert.equal(hasValidGpsCoordinates({ latitude: 0, longitude: 0 }), true);
+  assert.equal(
+    hasValidGpsCoordinates({ latitude: "91", longitude: 78 }),
+    false,
+  );
+  assert.equal(
+    hasValidGpsCoordinates({ latitude: 11, longitude: "181" }),
+    false,
+  );
+  assert.equal(
+    hasValidGpsCoordinates({ latitude: "NaN", longitude: 78 }),
+    false,
+  );
+  assert.equal(
+    hasValidGpsCoordinates({ latitude: null, longitude: 78 }),
+    false,
+  );
+});
+
+test("GPS freshness timer expires at the configured offline threshold", () => {
+  const now = Date.parse("2026-11-04T00:03:00Z");
+  assert.equal(
+    getGpsFreshnessDelay(
+      {
+        lastSuccessfulGpsUpdate: "2026-11-04T00:00:30Z",
+        gpsOfflineThresholdMs: 180_000,
+      },
+      now,
+    ),
+    30_001,
+  );
+  assert.equal(
+    getGpsFreshnessDelay(
+      {
+        lastSuccessfulGpsUpdate: "2026-11-04T00:00:00Z",
+        gpsOfflineThresholdMs: 180_000,
+      },
+      now,
+    ),
+    1,
+  );
 });

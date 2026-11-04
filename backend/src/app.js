@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const http = require("http");
+const { randomUUID } = require("node:crypto");
 const socketIo = require("socket.io");
 const { setIO } = require("./socket");
 require("dotenv").config();
@@ -25,6 +26,10 @@ const { rateLimit, ipKeyGenerator } = require("express-rate-limit");
 const morgan = require("morgan");
 const jwt = require("jsonwebtoken");
 const { createSocketAuthentication } = require("./socket/authenticateSocket");
+const { createDatabaseReadinessWaiter } = require("./utils/dbReadinessWaiter");
+const { logSafeError } = require("./utils/safeErrorLog");
+const gpsSyncWorker = require("./workers/gpsSyncWorker");
+const { buildReadiness } = require("./utils/readiness");
 
 const app = express();
 
@@ -49,7 +54,17 @@ const corsOptions = {
   credentials: true,
 };
 
-app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
+app.use((req, res, next) => {
+  req.requestId = randomUUID();
+  res.set("X-Request-Id", req.requestId);
+  next();
+});
+morgan.token("request-id", (req) => req.requestId);
+app.use(
+  morgan(
+    ":request-id :method :status :response-time ms",
+  ),
+);
 app.use(cors(corsOptions));
 
 app.use("/api", (_req, res, next) => {
@@ -107,9 +122,11 @@ registerTrackSocketHandlers();
 // Start GPS worker only after MongoDB is ready
 try {
   const { startDbDependentServices } = require('./services/startServices');
-  startDbDependentServices().catch((e) => console.error('startDbDependentServices failed:', e.message));
+  startDbDependentServices().catch((error) =>
+    logSafeError('Starting DB-dependent services failed', error),
+  );
 } catch (e) {
-  console.error('Failed to initialize startServices:', e.message);
+  logSafeError('Initializing DB-dependent services failed', e);
 }
 
 // Notification service has been removed.
@@ -118,29 +135,18 @@ try {
 /* ---------------- BODY PARSING ---------------- */
 const spreadsheetImportJsonParser = express.json({
   limit: "25mb",
-  verify: (req, res, buf) => {
-    req.rawBody = buf;
-  },
   strict: false,
 });
 
-app.use(
-  ["/api/superadmin/import-users", "/api/bus/import-routes"],
-  spreadsheetImportJsonParser,
-);
-
-app.use(
-  express.json({
-    limit: "5mb",
-    verify: (req, res, buf) => {
-      req.rawBody = buf;
-    },
-    // Silently ignore empty bodies (null bytes, empty strings) to prevent
-    // JSON parse errors on endpoints like logout that don't send a body
-    // but still include Content-Type: application/json header.
-    strict: false,
-  })
-);
+app.use("/api/bus/import-routes", spreadsheetImportJsonParser);
+const defaultJsonParser = express.json({
+  limit: "5mb",
+  strict: false,
+});
+app.use((req, res, next) => {
+  if (req.path === "/api/superadmin/import-users") return next();
+  return defaultJsonParser(req, res, next);
+});
 app.use(express.urlencoded({
   extended: true,
   limit: "5mb",
@@ -150,20 +156,9 @@ app.use(express.urlencoded({
 /* ---------------- ROUTES ---------------- */
 
 const mongoose = require('mongoose');
-
-function waitForDb(maxWaitMs = 10000) {
-  return new Promise((resolve) => {
-    if (mongoose.connection.readyState === 1) return resolve(true);
-
-    const start = Date.now();
-    const check = () => {
-      if (mongoose.connection.readyState === 1) return resolve(true);
-      if (Date.now() - start > maxWaitMs) return resolve(false);
-      setTimeout(check, 250);
-    };
-    setTimeout(check, 250);
-  });
-}
+const waitForDb = createDatabaseReadinessWaiter({
+  getReadyState: () => mongoose.connection.readyState,
+});
 
 app.use(async (req, res, next) => {
   const isApiRequest = req.path && req.path.startsWith('/api');
@@ -196,6 +191,18 @@ app.get("/health", (req, res) => {
   });
 });
 
+app.get("/ready", (req, res) => {
+  const mongoose = require("mongoose");
+  const gpsWorker = gpsSyncWorker.getStatus();
+  const lastGpsCycle = gpsWorker.lastCycle;
+  const readiness = buildReadiness({
+    databaseReadyState: mongoose.connection.readyState,
+    gpsWorker,
+    socketClients: io.engine.clientsCount,
+  });
+  return res.status(readiness.httpStatus).json(readiness.payload);
+});
+
 app.use("*", (req, res) => {
   res.status(404).json({ error: "Route not found" });
 });
@@ -209,11 +216,7 @@ app.use((err, req, res, next) => {
     error: statusCode === 500 ? "Internal server error" : err.message || "Request failed",
   };
 
-  if (process.env.NODE_ENV !== "production" && err.stack) {
-    payload.stack = err.stack;
-  }
-
-  console.error("API Error:", err);
+  logSafeError(`API request failed with status ${statusCode}`, err, req.requestId);
   res.status(statusCode).json(payload);
 });
 

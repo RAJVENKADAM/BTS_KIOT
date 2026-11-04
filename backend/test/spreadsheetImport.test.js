@@ -35,6 +35,24 @@ test("parses users using the existing mobile Excel column order", () => {
   }]);
 });
 
+test("parses more than 10,000 user rows without an application row ceiling", () => {
+  const rows = [
+    ["Name", "Email", "Bus", "Role", "Mobile", "Year"],
+    ...Array.from({ length: 10005 }, (_, index) => [
+      `Student ${index}`,
+      `student${index}@example.test`,
+      12,
+      "student",
+      "9876543210",
+      2004,
+    ]),
+  ];
+
+  const parsed = parseUserWorkbook(createWorkbook(rows));
+  assert.equal(parsed.length, 10005);
+  assert.equal(parsed[10004].email, "student10004@example.test");
+});
+
 test("normalizes numeric bus numbers with leading zeros without changing alphanumeric IDs", () => {
   assert.equal(normalizeBusNumber("01"), "1");
   assert.equal(normalizeBusNumber("02"), "2");

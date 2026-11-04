@@ -1,15 +1,37 @@
 const { waitForDbReady } = require('../config/startup');
+const { logSafeError } = require('../utils/safeErrorLog');
 
 // Singleton guards to prevent duplicate initialization
 const singleton = {
   started: false,
   starting: false,
+  stopping: false,
+  retryTimer: null,
+  startupPromise: null,
 };
 
-async function startDbDependentServices() {
-  if (singleton.started || singleton.starting) return;
-  singleton.starting = true;
+const STARTUP_RETRY_DELAY_MS = 30_000;
 
+function logStartupEvent(event, details = {}) {
+  try {
+    console.log(JSON.stringify({ event, ...details }));
+  } catch {
+    // Startup logging must not prevent service initialization.
+  }
+}
+
+function scheduleStartupRetry() {
+  if (singleton.stopping || singleton.retryTimer) return;
+  singleton.retryTimer = setTimeout(() => {
+    singleton.retryTimer = null;
+    startDbDependentServices().catch((error) =>
+      logSafeError('Retrying DB-dependent service startup failed', error),
+    );
+  }, STARTUP_RETRY_DELAY_MS);
+  singleton.retryTimer.unref?.();
+}
+
+async function performStartup() {
   let gpsSyncWorker;
   try {
     const ok = await waitForDbReady({
@@ -19,21 +41,25 @@ async function startDbDependentServices() {
     });
 
     if (!ok) {
-      console.error('❌ MongoDB not ready after retries. Tracking will NOT start.');
+      logStartupEvent('DB_NOT_READY_AFTER_RETRIES', {
+        retryInMs: STARTUP_RETRY_DELAY_MS,
+      });
+      scheduleStartupRetry();
       return;
     }
+    if (singleton.stopping) return;
 
-    console.log('✅ MongoDB connected. Starting GPS sync scheduler...');
+    logStartupEvent('MONGODB_CONNECTED_STARTING_GPS_WORKER');
 
-    // Check GPS credentials exist (log yes/no only, never actual values)
     const hasToken = !!process.env.GPS_TOKEN;
     const hasEmail = !!process.env.GPS_EMAIL;
-    console.log('🔐 GPS credentials configured:', hasToken && hasEmail);
+    logStartupEvent('GPS_CREDENTIALS_CONFIGURED', {
+      configured: hasToken && hasEmail,
+    });
     if (!hasToken || !hasEmail) {
-      console.error('❌ GPS credentials missing. GPS sync will fail (check Render env vars).');
+      logStartupEvent('GPS_CREDENTIALS_MISSING');
     }
 
-    // Start GPS worker only after the database is ready.
     try {
       gpsSyncWorker = require('../workers/gpsSyncWorker');
       gpsSyncWorker.start();
@@ -42,20 +68,52 @@ async function startDbDependentServices() {
         try {
           await gpsSyncWorker.stop();
         } catch (cleanupError) {
-          console.error('Failed to clean up gpsSyncWorker after startup failure:', cleanupError.message);
+          logSafeError('Cleaning up GPS worker after startup failure failed', cleanupError);
         }
       }
-      console.error('Error starting gpsSyncWorker:', error.message);
+      logSafeError('Starting gpsSyncWorker failed', error);
+      scheduleStartupRetry();
       return;
     }
 
     singleton.started = true;
-    console.log('✅ gpsSyncWorker started successfully');
+    logStartupEvent('GPS_WORKER_STARTED');
   } finally {
     singleton.starting = false;
   }
 }
 
+async function startDbDependentServices() {
+  if (singleton.started || singleton.starting || singleton.stopping) return;
+  if (singleton.retryTimer) {
+    clearTimeout(singleton.retryTimer);
+    singleton.retryTimer = null;
+  }
+  singleton.starting = true;
+  const startupPromise = performStartup();
+  singleton.startupPromise = startupPromise;
+  try {
+    await startupPromise;
+  } catch (error) {
+    scheduleStartupRetry();
+    throw error;
+  } finally {
+    if (singleton.startupPromise === startupPromise) {
+      singleton.startupPromise = null;
+    }
+  }
+}
+
+async function stopDbDependentServices() {
+  singleton.stopping = true;
+  if (singleton.retryTimer) {
+    clearTimeout(singleton.retryTimer);
+    singleton.retryTimer = null;
+  }
+  await singleton.startupPromise;
+}
+
 module.exports = {
   startDbDependentServices,
+  stopDbDependentServices,
 };

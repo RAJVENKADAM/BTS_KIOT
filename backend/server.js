@@ -23,6 +23,11 @@ const httpServer = server.listen(PORT, HOST, () => {
 async function shutdown(signal) {
   console.log(`Received ${signal}; shutting down gracefully.`);
   try {
+    await require('./src/services/startServices').stopDbDependentServices();
+  } catch (error) {
+    console.error('Failed to stop DB-dependent service retries:', error.message);
+  }
+  try {
     const gpsSyncWorker = require('./src/workers/gpsSyncWorker');
     await gpsSyncWorker.stop();
   } catch (error) {

@@ -17,7 +17,7 @@
  *
  * Socket Integration:
  * ───────────────────
- * - Joins/leaves socket room "bus_{busNo}" when selectedBusNo changes.
+ * - Joins/leaves authorized preview rooms while Home is focused.
  * - Listens for "bus-update" events to refresh live bus status in real time.
  * - Live bus updates are socket-driven.
  *
@@ -54,7 +54,7 @@ import {
   ActivityIndicator,
   Dimensions, // ADD THIS
 } from "react-native";
-import { useNavigation } from "@react-navigation/native";
+import { useIsFocused, useNavigation } from "@react-navigation/native";
 import { Ionicons } from "@expo/vector-icons";
 import { useBus } from "../context/BusContext";
 import busApi from "../api/busApi";
@@ -65,11 +65,15 @@ import { getErrorMessage } from "../utils/errorHandler";
 import { getDisplayBusNumber } from "../utils/busDisplay";
 import notificationApi from "../api/notificationApi";
 const {
+  getGpsFreshnessDelay,
   getSocketRecoveryDelay,
+  hasValidGpsCoordinates,
   isGpsStale,
   isIncomingLocationOlder,
   isLocationForSelection,
 } = require("../utils/gpsLocationPolicy.cjs");
+const { getPreviewRoomIds } = require("../utils/socketConnectionPolicy.cjs");
+const { subscribeSocketEvent } = require("../utils/socketSubscription.cjs");
 
 const KIOT_LAT = 11.554528;
 const KIOT_LNG = 78.019759;
@@ -91,6 +95,7 @@ const calculateDistance = (lat1, lng1, lat2, lng2) => {
 const HomeScreen = () => {
   const { token, user, updateUserData } = useAuth();
   const navigation = useNavigation();
+  const isFocused = useIsFocused();
   const { error, refreshBuses, getSocket } = useBus();
   const socket = getSocket ? getSocket() : null;
 
@@ -111,8 +116,36 @@ const HomeScreen = () => {
   busDataRef.current = busData;
   const selectedPreviewNumberRef = useRef(selectedPreviewNumber);
   selectedPreviewNumberRef.current = selectedPreviewNumber;
+  const hasBeenFocusedRef = useRef(false);
   const latestGpsTimestampRef = useRef(NaN);
   const reconnectRequestRef = useRef(0);
+
+  useEffect(() => {
+    if (!busData || locationStatus !== "live") return undefined;
+    let timer;
+    const updateFreshness = () => {
+      const currentLocation = busDataRef.current;
+      if (!currentLocation) return;
+      const delay = getGpsFreshnessDelay(currentLocation);
+      if (delay > 0) {
+        timer = setTimeout(updateFreshness, delay);
+        return;
+      }
+      if (!isGpsStale(currentLocation)) return;
+      setLocationStatus("offline");
+      setIsOffline(true);
+      setMarkerStatus("offline");
+      setTrackingError("Bus is offline or no live GPS is available right now.");
+      setBusData((current) =>
+        current ? { ...current, _isOffline: true, _markerStatus: "offline" } : current,
+      );
+      setLastGoodLocation((current) =>
+        current ? { ...current, _isOffline: true, _markerStatus: "offline" } : current,
+      );
+    };
+    timer = setTimeout(updateFreshness, getGpsFreshnessDelay(busData));
+    return () => clearTimeout(timer);
+  }, [busData, locationStatus]);
 
   // Routes and panel states consolidated inside Bottom Sheet
   const [routesData, setRoutesData] = useState(null);
@@ -230,14 +263,7 @@ const HomeScreen = () => {
           latestGpsTimestampRef.current = responseTimestamp;
         }
 
-        const hasValidCoords =
-          data &&
-          data.latitude != null &&
-          data.longitude != null &&
-          Number.isFinite(Number(data.latitude)) &&
-          Number.isFinite(Number(data.longitude)) &&
-          data.latitude !== "NaN" &&
-          data.longitude !== "NaN";
+        const hasValidCoords = hasValidGpsCoordinates(data);
 
         setIsBusFound(true);
         setRoutesData((prev) => prev);
@@ -330,24 +356,40 @@ const HomeScreen = () => {
   }, [user?.id, user?._id, user?.bus_no, token]);
 
   useEffect(() => {
+    if (isFocused && hasBeenFocusedRef.current && socket?.connected) {
+      const selectedIdentifier =
+        selectedPreviewNumberRef.current || selectedBusNoRef.current;
+      if (selectedIdentifier) {
+        socket.emit("request-bus-location", selectedIdentifier);
+      }
+    }
+    if (isFocused) hasBeenFocusedRef.current = true;
+  }, [isFocused, socket]);
+
+  useEffect(() => {
     if (!socket || (!selectedBusNo && !selectedPreviewNumber)) return;
-    // Join preview-based room (prefer previewNumber for privacy)
-    const roomIds = [
-      selectedPreviewNumber || selectedBusNo,
-      busData?.effectivePreviewNumber,
-    ].filter(Boolean);
-    [...new Set(roomIds.map(String))].forEach((roomId) => {
+    if (!isFocused) return undefined;
+    const roomIds = getPreviewRoomIds(selectedPreviewNumber, busData);
+    roomIds.forEach((roomId) => {
       socket.emit("join-bus", roomId);
     });
     return () => {
-      [...new Set(roomIds.map(String))].forEach((roomId) => {
+      roomIds.forEach((roomId) => {
         socket.emit("leave-bus", roomId);
       });
     };
-  }, [socket, selectedBusNo, selectedPreviewNumber, busData?.effectivePreviewNumber]);
+  }, [
+    socket,
+    isFocused,
+    selectedBusNo,
+    selectedPreviewNumber,
+    busData?.previewNumber,
+    busData?.preview_number,
+    busData?.effectivePreviewNumber,
+  ]);
 
   useEffect(() => {
-    if (!socket) return undefined;
+    if (!socket || !isFocused) return undefined;
     let hasConnected = !!socket.connected;
     let recoveryAttempt = 0;
     let recoveryTimer = null;
@@ -396,13 +438,22 @@ const HomeScreen = () => {
             selectedPreviewNumberRef.current ||
             busDataRef.current?.previewNumber,
         };
-        busDataRef.current = nextBusData;
-        setBusData(nextBusData);
-        setLastGoodLocation(nextBusData);
         const inactive =
           nextBusData.isBusActiveInCurrentPlan === false ||
           !!nextBusData.notActiveMessage;
-        const live = !inactive && !isGpsStale(nextBusData);
+        const live =
+          !inactive &&
+          hasValidGpsCoordinates(nextBusData) &&
+          !isGpsStale(nextBusData);
+        nextBusData._isOffline = !live;
+        nextBusData._markerStatus = inactive
+          ? "inactive"
+          : live
+            ? "moving"
+            : "offline";
+        busDataRef.current = nextBusData;
+        setBusData(nextBusData);
+        setLastGoodLocation(nextBusData);
         setLocationStatus(live ? "live" : "offline");
         setIsOffline(!live);
         setMarkerStatus(inactive ? "inactive" : live ? "moving" : "offline");
@@ -451,26 +502,24 @@ const HomeScreen = () => {
       const currentPreview = selectedPreviewNumberRef.current;
       const currentBusData = busDataRef.current;
       if (!currentBusNo && !currentPreview) return;
-      const roomIds = new Set(
-        [
-          currentPreview || currentBusNo,
-          currentBusData?.effectivePreviewNumber,
-        ]
-          .filter(Boolean)
-          .map(String),
+      getPreviewRoomIds(currentPreview, currentBusData).forEach((roomId) =>
+        socket.emit("join-bus", roomId),
       );
-      roomIds.forEach((roomId) => socket.emit("join-bus", roomId));
       scheduleRecovery();
     };
 
-    socket.on("connect", handleConnect);
+    const unsubscribeConnect = subscribeSocketEvent(
+      socket,
+      "connect",
+      handleConnect,
+    );
     return () => {
       disposed = true;
       if (recoveryTimer) clearTimeout(recoveryTimer);
       reconnectRequestRef.current += 1;
-      socket.off("connect", handleConnect);
+      unsubscribeConnect();
     };
-  }, [socket, token]);
+  }, [socket, token, isFocused]);
 
   useEffect(() => {
     if (!socket || !user?.id) return;
@@ -490,7 +539,10 @@ const HomeScreen = () => {
             const inactive =
               nextBus?.isBusActiveInCurrentPlan === false ||
               Boolean(nextBus?.notActiveMessage);
-            const offline = inactive || isGpsStale(nextBus);
+            const offline =
+              inactive ||
+              !hasValidGpsCoordinates(nextBus) ||
+              isGpsStale(nextBus);
             setBusData(nextBus);
             setLastGoodLocation(nextBus);
             setRoutesData(nextRoutes);
@@ -586,7 +638,8 @@ const HomeScreen = () => {
             busApi.getBusRoutes(token, busNoToRefresh),
           ])
             .then(([nextBus, nextRoutes]) => {
-              const isOffline = isGpsStale(nextBus);
+              const isOffline =
+                !hasValidGpsCoordinates(nextBus) || isGpsStale(nextBus);
               setBusData({
                 ...nextBus,
                 _isOffline: isOffline,
@@ -605,8 +658,7 @@ const HomeScreen = () => {
         }
       }
     };
-    socket.on("notification", handleNotification);
-    return () => socket.off("notification", handleNotification);
+    return subscribeSocketEvent(socket, "notification", handleNotification);
   }, [
     socket,
     user,
@@ -636,8 +688,12 @@ const HomeScreen = () => {
               : null,
           );
           setMarkerStatus(inactive ? "inactive" : "moving");
-          setIsOffline(inactive || isGpsStale(nextBusData));
-          setLocationStatus(inactive || isGpsStale(nextBusData) ? "offline" : "live");
+          const offline =
+            inactive ||
+            !hasValidGpsCoordinates(nextBusData) ||
+            isGpsStale(nextBusData);
+          setIsOffline(offline);
+          setLocationStatus(offline ? "offline" : "live");
         })
         .catch((error) => {
           console.error("Failed to refresh assigned bus:", error);
@@ -659,8 +715,7 @@ const HomeScreen = () => {
         .then(setRoutesData)
         .catch((error) => console.error("Failed to refresh bus stops:", error));
     };
-    socket.on("bus-update", handleBusUpdate);
-    return () => socket.off("bus-update", handleBusUpdate);
+    return subscribeSocketEvent(socket, "bus-update", handleBusUpdate);
   }, [socket, token, selectedBusNo, selectedPreviewNumber, user?.bus_no]);
 
   useEffect(() => {
@@ -694,7 +749,7 @@ const HomeScreen = () => {
   }, [selectedBusNo, token]);
 
   useEffect(() => {
-    if (!socket) return;
+    if (!socket || !isFocused) return;
     const handleLocationUpdate = (data) => {
       if (!data || data.error) return;
       const selected = selectedBusNoRef.current;
@@ -714,14 +769,19 @@ const HomeScreen = () => {
         latestGpsTimestampRef.current = timestamp;
       }
 
+      const hasIncomingCoordinates = hasValidGpsCoordinates(data);
       const nextBusData = {
         ...currentBusData,
         ...data,
         busNo: data.busNo ?? data.bus_no ?? selected,
         bus_no: data.bus_no ?? selected,
         previewNumber: data.previewNumber ?? currentPreview ?? undefined,
-        latitude: data.latitude ?? currentBusData?.latitude,
-        longitude: data.longitude ?? currentBusData?.longitude,
+        latitude: hasIncomingCoordinates
+          ? data.latitude
+          : currentBusData?.latitude ?? null,
+        longitude: hasIncomingCoordinates
+          ? data.longitude
+          : currentBusData?.longitude ?? null,
         speed: data.speed ?? currentBusData?.speed ?? 0,
         source: data.source || currentBusData?.source || "gps",
         isBusActiveInCurrentPlan:
@@ -731,18 +791,30 @@ const HomeScreen = () => {
           data.notActiveMessage ?? currentBusData?.notActiveMessage ?? null,
         alteration: data.alteration ?? currentBusData?.alteration ?? null,
       };
-      busDataRef.current = nextBusData;
       const inactive =
         nextBusData.isBusActiveInCurrentPlan === false ||
         !!nextBusData.notActiveMessage;
-      const live = !inactive && !isGpsStale(nextBusData);
+      const live =
+        !inactive &&
+        hasIncomingCoordinates &&
+        !isGpsStale(nextBusData);
+      nextBusData._isOffline = !live;
+      nextBusData._markerStatus = inactive
+        ? "inactive"
+        : live
+          ? "moving"
+          : "offline";
+      busDataRef.current = nextBusData;
 
       const visibleLocationChanged = [
         "latitude",
         "longitude",
+        "lastSuccessfulGpsUpdate",
         "speed",
         "status",
         "is_online",
+        "_isOffline",
+        "_markerStatus",
         "source",
         "gpsOfflineThresholdMs",
         "isBusActiveInCurrentPlan",
@@ -765,9 +837,8 @@ const HomeScreen = () => {
       setNoBusFound(false);
       setIsBusFound(true);
     };
-    socket.on("locationUpdate", handleLocationUpdate);
-    return () => socket.off("locationUpdate", handleLocationUpdate);
-  }, [socket]);
+    return subscribeSocketEvent(socket, "locationUpdate", handleLocationUpdate);
+  }, [socket, isFocused]);
 
   useEffect(() => {
     refreshBuses();
@@ -874,11 +945,7 @@ const HomeScreen = () => {
           return;
         }
 
-        const hasPreviewCoords =
-          data.latitude != null &&
-          data.longitude != null &&
-          Number.isFinite(Number(data.latitude)) &&
-          Number.isFinite(Number(data.longitude));
+        const hasPreviewCoords = hasValidGpsCoordinates(data);
 
         if (isGpsStale(data) || !hasPreviewCoords) {
           setBusData({ ...data, previewNumber: query, busNo: nextBusNo });
@@ -959,15 +1026,7 @@ const HomeScreen = () => {
           return;
         }
 
-        if (
-          data &&
-          data.latitude != null &&
-          data.longitude != null &&
-          Number.isFinite(Number(data.latitude)) &&
-          Number.isFinite(Number(data.longitude)) &&
-          data.latitude !== "NaN" &&
-          data.longitude !== "NaN"
-        ) {
+        if (hasValidGpsCoordinates(data)) {
           if (isGpsStale(data)) {
             setBusData({ ...data, source: data.source || "gps" });
             setLastGoodLocation({ ...data, source: data.source || "gps" });

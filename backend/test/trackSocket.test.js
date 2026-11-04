@@ -77,6 +77,10 @@ test("connection adds the authenticated user room and invalid preview inputs are
   await socket.events["join-bus"]("");
   await socket.events["join-bus"](null);
   await socket.events["join-bus"]("  ");
+  await socket.events["join-bus"]("x".repeat(65));
+  await socket.events["join-bus"]("4\n");
+  await socket.events["request-bus-location"]("x".repeat(65));
+  await socket.events["request-bus-location"]("BUS-\u0000");
 
   assert.ok(socket.rooms.has("user_student-one"));
   assert.equal(socket.rooms.has("user_another-student"), false);

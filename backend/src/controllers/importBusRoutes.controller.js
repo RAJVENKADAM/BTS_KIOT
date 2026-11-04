@@ -10,6 +10,7 @@ const { normalizeArrivalTime } = require("../utils/planMapping");
 const normalizeStopNameKey = require("../utils/normalizeStopName");
 const getRouteUpdateImpactBuses = require("../utils/routeUpdateImpact");
 const normalizeBusNumber = require("../utils/normalizeBusNumber");
+const { logSafeError } = require("../utils/safeErrorLog");
 
 function isNonEmptyString(v) {
   return typeof v === 'string' && v.trim().length > 0;
@@ -382,11 +383,11 @@ async function importBusRoutes(req, res) {
 
     return res.status(200).json({ success: true, summary });
   } catch (error) {
-    console.error('importBusRoutes error:', error);
+    logSafeError('importBusRoutes failed', error);
     return res.status(500).json({
       success: false,
       summary: { totalRows: 0, insertedRows: 0, updatedRows: 0, unchangedRows: 0, failedRows: 1 },
-      error: error.message,
+      error: 'Route import failed. Please try again.',
     });
   }
 }

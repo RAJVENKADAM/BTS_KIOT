@@ -1,10 +1,10 @@
 /**
  * trackSocket.js — Socket.IO handlers for live bus room events.
- * Clients join `bus_<BUSNO>` rooms to receive real-time bus updates
- * (e.g. current plan changes).
+ * Clients join validated `preview_<number>` rooms for live locations.
  */
 const { getIO } = require("../socket");
 const normalizeBusNumber = require("../utils/normalizeBusNumber");
+const { logSafeError } = require("../utils/safeErrorLog");
 
 // Models are required lazily to avoid importing mongoose before the DB is ready.
 const getBus = () => require("../models/Bus");
@@ -13,8 +13,16 @@ const getBusLiveLocation = () => require("../models/BusLiveLocation");
 function normalizeSocketIdentifier(value) {
   if (typeof value !== "string" && typeof value !== "number") return null;
   if (typeof value === "number" && !Number.isFinite(value)) return null;
-  const identifier = String(value).trim();
-  return identifier || null;
+  const rawIdentifier = String(value);
+  if (/[\u0000-\u001f\u007f]/.test(rawIdentifier)) return null;
+  const identifier = rawIdentifier.trim();
+  if (
+    !identifier ||
+    identifier.length > 64
+  ) {
+    return null;
+  }
+  return identifier;
 }
 
 function registerTrackSocketHandlers({
@@ -198,7 +206,7 @@ function registerTrackSocketHandlers({
 
         socket.emit("locationUpdate", payload);
       } catch (err) {
-        console.error("request-bus-location error:", err.message);
+        logSafeError("request-bus-location failed", err);
         if (!disconnected && socket.connected !== false) {
           socket.emit("locationUpdate", { error: "Location is unavailable" });
         }

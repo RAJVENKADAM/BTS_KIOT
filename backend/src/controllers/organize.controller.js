@@ -1,35 +1,80 @@
 const ExcelUserService = require("../services/excelUserService");
 
 async function uploadExcelUsers(req, res) {
+  req.setTimeout?.(0);
+  res.setTimeout?.(0);
   try {
     if (!req.file || !req.file.buffer) {
       return res.status(400).json({ error: "No file uploaded" });
     }
 
-    console.log("Excel file received:", {
-      name: req.file.originalname,
-      size: req.file.size,
-    });
-
     // Process Excel file
     const users = await ExcelUserService.processExcelBuffer(req.file.buffer);
     const results = await ExcelUserService.processUsers(users, req.user.id);
-    const emailResults = await ExcelUserService.sendNotifications(results.emailsToNotify);
+    const emailResults = Number.isInteger(results.emailsSent)
+      ? []
+      : await ExcelUserService.sendNotifications(results.emailsToNotify);
+    const emailsSent = Number.isInteger(results.emailsSent)
+      ? results.emailsSent
+      : emailResults.filter((item) => item.status === "sent").length;
+    const emailsFailed = Number.isInteger(results.emailsFailed)
+      ? results.emailsFailed
+      : emailResults.filter((item) => item.status === "failed").length;
+
+    if (results.summary?.validRows === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "No valid workbook rows were available to import.",
+        summary: results.summary,
+      });
+    }
+
+    if (
+      results.summary?.completed === false &&
+      results.created.length + results.updated.length === 0
+    ) {
+      return res.status(500).json({
+        success: false,
+        error: "Excel import could not save any users.",
+        summary: results.summary,
+      });
+    }
 
     res.status(200).json({
-      message: "Excel users processed successfully",
+      message: results.summary?.partial
+        ? "Excel users were processed partially."
+        : "Excel users processed successfully",
+      success: true,
+      summary: results.summary,
       results: {
         created: results.created.length,
         updated: results.updated.length,
         skipped: results.skipped.length,
-        emailsSent: emailResults.filter(e => e.status === "sent").length,
-        emailsFailed: emailResults.filter(e => e.status === "failed").length,
+        emailsSent,
+        emailsFailed,
       },
-      details: results,
+      details: {
+        ...results,
+        emailsToNotify: results.emailsToNotify.map(
+          ({ permanentPassword, ...notification }) => notification,
+        ),
+      },
     });
   } catch (error) {
-    console.error("Excel upload error:", error);
-    res.status(500).json({ error: error.message });
+    if (error?.statusCode === 400 && error.summary) {
+      return res.status(400).json({
+        success: false,
+        error: "Some workbook rows failed validation. No users were changed.",
+        summary: error.summary,
+      });
+    }
+    console.error("Excel user upload failed:", {
+      name: error?.name || "Error",
+      code: error?.code || null,
+    });
+    res.status(500).json({ error: "Excel user upload failed. Please try again." });
+  } finally {
+    if (req.file) req.file.buffer = null;
   }
 }
 

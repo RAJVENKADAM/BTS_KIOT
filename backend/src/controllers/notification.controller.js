@@ -1,17 +1,21 @@
 const Notification = require('../models/Notification');
 const mongoose = require('mongoose');
+const { logSafeError } = require('../utils/safeErrorLog');
 
 async function getNotifications(req, res) {
   try {
-    const notifications = await Notification.find({ user_id: req.user.id })
-      .sort({ createdAt: -1 })
-      .limit(50)
-      .lean();
-
-    const unreadCount = await Notification.countDocuments({
-      user_id: req.user.id,
-      read_at: null,
-    });
+    const userId = req.user.id;
+    const [notifications, unreadCount] = await Promise.all([
+      Notification.find({ user_id: userId })
+        .select('_id type message old_preview new_preview is_bus_active read_at createdAt')
+        .sort({ createdAt: -1 })
+        .limit(50)
+        .lean(),
+      Notification.countDocuments({
+        user_id: userId,
+        read_at: null,
+      }),
+    ]);
 
     res.json({
       success: true,
@@ -28,7 +32,7 @@ async function getNotifications(req, res) {
       unreadCount,
     });
   } catch (error) {
-    console.error('getNotifications error:', error);
+    logSafeError('getNotifications failed', error);
     res.status(500).json({ success: false, error: 'Failed to load notifications.' });
   }
 }
@@ -41,7 +45,7 @@ async function getUnreadCount(req, res) {
     });
     res.json({ success: true, unreadCount });
   } catch (error) {
-    console.error('getUnreadCount error:', error);
+    logSafeError('getUnreadCount failed', error);
     res.status(500).json({ success: false, error: 'Failed to load unread notifications.' });
   }
 }
@@ -54,7 +58,7 @@ async function markNotificationsRead(req, res) {
     );
     res.json({ success: true });
   } catch (error) {
-    console.error('markNotificationsRead error:', error);
+    logSafeError('markNotificationsRead failed', error);
     res.status(500).json({ success: false, error: 'Failed to update notifications.' });
   }
 }
@@ -73,7 +77,7 @@ async function markNotificationRead(req, res) {
     }
     res.json({ success: true });
   } catch (error) {
-    console.error('markNotificationRead error:', error);
+    logSafeError('markNotificationRead failed', error);
     res.status(500).json({ success: false, error: 'Failed to update notification.' });
   }
 }
@@ -93,7 +97,7 @@ async function deleteNotification(req, res) {
     }
     res.json({ success: true });
   } catch (error) {
-    console.error('deleteNotification error:', error);
+    logSafeError('deleteNotification failed', error);
     res.status(500).json({ success: false, error: 'Failed to delete notification.' });
   }
 }
@@ -103,7 +107,7 @@ async function deleteAllNotifications(req, res) {
     await Notification.deleteMany({ user_id: req.user.id });
     res.json({ success: true });
   } catch (error) {
-    console.error('deleteAllNotifications error:', error);
+    logSafeError('deleteAllNotifications failed', error);
     res.status(500).json({ success: false, error: 'Failed to delete messages.' });
   }
 }

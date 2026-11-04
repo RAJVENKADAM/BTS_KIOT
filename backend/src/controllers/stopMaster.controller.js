@@ -4,6 +4,7 @@ const { getIO } = require("../socket");
 const normalizeStopName = require("../utils/normalizeStopName");
 const uniqueStopCoordinateRows = require("../utils/uniqueStopCoordinateRows");
 const buildStopCoordinateOperations = require("../utils/buildStopCoordinateOperations");
+const { logSafeError } = require("../utils/safeErrorLog");
 
 function validCoordinates(latitude, longitude) {
   return (
@@ -33,7 +34,7 @@ async function getCoordinateSheet(req, res) {
       })),
     });
   } catch (error) {
-    console.error("getCoordinateSheet error:", error);
+    logSafeError("getCoordinateSheet failed", error);
     return res.status(500).json({
       success: false,
       error: "Failed to download the Stop Master coordinate sheet.",
@@ -217,7 +218,7 @@ async function importCoordinates(req, res) {
     };
     return res.json({ success: true, summary, rowResults });
   } catch (error) {
-    console.error("importCoordinates error:", error);
+    logSafeError("importCoordinates failed", error);
     return res.status(500).json({
       success: false,
       error: "Failed to import stop coordinates.",

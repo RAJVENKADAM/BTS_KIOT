@@ -1,5 +1,14 @@
 const mongoose = require('mongoose');
 const { MONGODB_URI } = require('./mongodb');
+const { logSafeError } = require('../utils/safeErrorLog');
+
+function logStartupEvent(event, details = {}) {
+  try {
+    console.log(JSON.stringify({ event, ...details }));
+  } catch {
+    // Startup logging must not interrupt database readiness checks.
+  }
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -18,7 +27,7 @@ async function testMongoConnection() {
     }
     return false;
   } catch (error) {
-    console.error('MongoDB connection check failed:', error.message);
+    logSafeError('MongoDB connection check failed', error);
     return false;
   }
 }
@@ -36,7 +45,11 @@ async function waitForDbReady({
     const ok = await testMongoConnection();
     if (ok) return true;
 
-    console.log(`MongoDB connection attempt ${attempt}/${maxAttempts} - retrying in ${delayMs}ms`);
+    logStartupEvent('MONGODB_CONNECTION_RETRY', {
+      attempt,
+      maxAttempts,
+      retryInMs: delayMs,
+    });
     await sleep(delayMs);
     delayMs = Math.min(maxDelayMs, delayMs * 2);
   }
@@ -47,4 +60,3 @@ async function waitForDbReady({
 module.exports = {
   waitForDbReady,
 };
-

@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { logSafeError } = require('../utils/safeErrorLog');
 
 /**
  * Build MongoDB URI with database name.
@@ -38,7 +39,7 @@ const connectDB = async () => {
     isConnected = true;
     console.log('✅ MongoDB connected successfully');
   } catch (error) {
-    console.error('❌ MongoDB connection failed:', error.message);
+    logSafeError('MongoDB connection failed', error);
     process.exit(1);
   }
 };
@@ -49,7 +50,7 @@ const disconnectDB = async () => {
     isConnected = false;
     console.log('MongoDB disconnected');
   } catch (error) {
-    console.error('Error disconnecting MongoDB:', error);
+    logSafeError('MongoDB disconnect failed', error);
   }
 };
 

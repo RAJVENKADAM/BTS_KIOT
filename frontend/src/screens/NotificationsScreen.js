@@ -15,6 +15,7 @@ import notificationApi from "../api/notificationApi";
 import { COLORS } from "../theme";
 import { useBus } from "../context/BusContext";
 import { getErrorMessage } from "../utils/errorHandler";
+const { subscribeSocketEvent } = require("../utils/socketSubscription.cjs");
 
 const DATE_TIME_ZONE = "Asia/Kolkata";
 
@@ -193,8 +194,7 @@ export default function NotificationsScreen() {
         return [liveItem, ...items];
       });
     };
-    socket.on("notification", handleNotification);
-    return () => socket.off("notification", handleNotification);
+    return subscribeSocketEvent(socket, "notification", handleNotification);
   }, [getSocket]);
 
   const renderItem = ({ item }) => {

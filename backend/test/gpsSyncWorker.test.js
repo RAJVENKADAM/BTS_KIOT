@@ -80,6 +80,42 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+test("worker status exposes lifecycle and sanitized latest cycle metrics", async () => {
+  const { worker } = createWorker();
+  assert.deepEqual(worker.getStatus(), {
+    started: false,
+    stopping: false,
+    syncIntervalMs: GPS_SYNC_INTERVAL_MS,
+    activeCycleId: null,
+    skippedTimerTicks: 0,
+    lastCycle: null,
+  });
+
+  test("worker lifecycle continues when console logging throws", async () => {
+    const originalLog = console.log;
+    const { worker } = createWorker();
+    console.log = () => {
+      throw new Error("simulated logger failure");
+    };
+    try {
+      worker.start();
+      await worker.inFlightCycle;
+      assert.equal(worker.started, true);
+      assert.equal(worker.getStatus().lastCycle.status, "COMPLETED");
+      await worker.stop();
+    } finally {
+      console.log = originalLog;
+    }
+  });
+
+  await worker.runCycle();
+  const status = worker.getStatus();
+  assert.equal(status.started, false);
+  assert.equal(status.lastCycle.status, "COMPLETED");
+  assert.equal(status.lastCycle.activeBusCount, 0);
+  assert.equal("latitude" in status.lastCycle, false);
+});
+
 test("uses one fixed 35-second provider request per active cycle and preserves immediate startup polling", async () => {
   let intervalCallback;
   let intervalDelay;

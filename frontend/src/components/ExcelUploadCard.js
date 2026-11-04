@@ -64,6 +64,18 @@ export default function ExcelUploadCard({
             <MutedText style={styles.date}>
               {formatDate(upload.uploaded_at)}
             </MutedText>
+            {upload.import_status === 'processing' && (
+              <MutedText>Import is still processing.</MutedText>
+            )}
+            {upload.import_status === 'partial' && (
+              <MutedText>
+                Partial import: {upload.import_summary?.failedRows ?? 0} rows failed
+                of {upload.import_summary?.totalRows ?? 0}.
+              </MutedText>
+            )}
+            {upload.import_status === 'failed' && (
+              <MutedText>Import failed before users were saved.</MutedText>
+            )}
           </View>
         </View>
       </View>

@@ -2,6 +2,43 @@ const DEFAULT_GPS_OFFLINE_THRESHOLD_MS = 3 * 60 * 1000;
 const ROUTE_REFRESH_DISTANCE_METERS = 100;
 const SOCKET_RECOVERY_BASE_DELAY_MS = 5_000;
 const SOCKET_RECOVERY_MAX_DELAY_MS = 60_000;
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
+function hasValidGpsCoordinates(data) {
+  if (
+    data?.latitude == null ||
+    data?.longitude == null ||
+    data.latitude === "" ||
+    data.longitude === ""
+  ) {
+    return false;
+  }
+  const latitude = Number(data.latitude);
+  const longitude = Number(data.longitude);
+  return (
+    Number.isFinite(latitude) &&
+    Number.isFinite(longitude) &&
+    latitude >= -90 &&
+    latitude <= 90 &&
+    longitude >= -180 &&
+    longitude <= 180
+  );
+}
+
+function getGpsFreshnessDelay(data, now = Date.now()) {
+  const timestamp = Date.parse(data?.lastSuccessfulGpsUpdate);
+  if (!Number.isFinite(timestamp)) return 0;
+
+  const configuredThreshold = Number(data?.gpsOfflineThresholdMs);
+  const threshold =
+    Number.isFinite(configuredThreshold) && configuredThreshold > 0
+      ? configuredThreshold
+      : DEFAULT_GPS_OFFLINE_THRESHOLD_MS;
+  return Math.min(
+    MAX_TIMEOUT_MS,
+    Math.max(0, timestamp + threshold - now + 1),
+  );
+}
 
 function distanceMeters(pointA, pointB) {
   const radians = (degrees) => (degrees * Math.PI) / 180;
@@ -111,7 +148,9 @@ module.exports = {
   SOCKET_RECOVERY_BASE_DELAY_MS,
   SOCKET_RECOVERY_MAX_DELAY_MS,
   distanceMeters,
+  getGpsFreshnessDelay,
   getSocketRecoveryDelay,
+  hasValidGpsCoordinates,
   isGpsStale,
   isIncomingLocationOlder,
   isLocationForSelection,

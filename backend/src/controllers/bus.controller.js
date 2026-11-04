@@ -9,7 +9,7 @@ const Notification = require("../models/Notification");
 const PlanMapping = require("../models/PlanMapping");
 const BusChange = require("../models/BusChange");
 const normalizeBusNumber = require("../utils/normalizeBusNumber");
-const { getIO } = require("../socket");
+const { getIO, emitBusAssignmentNotification } = require("../socket");
 const {
   getPlanChangeNotifications,
   loadPlanState,
@@ -31,6 +31,7 @@ const {
   getEffectiveBusId,
   normalizeArrivalTime,
 } = require("../utils/planMapping");
+const { logSafeError } = require("../utils/safeErrorLog");
 
 const GLOBAL_ACTIVE_PLAN_KEY = "global_active_plan";
 const DEFAULT_PLAN_NAMES = ["PLAN A", "PLAN B", "PLAN C", "PLAN D"];
@@ -369,8 +370,8 @@ async function uploadBusRoutes(req, res) {
       routesCount: 0,
     });
   } catch (error) {
-    console.error("UPLOAD ERROR:", error);
-    res.status(500).json({ error: error.message });
+    logSafeError("Bus upload failed", error);
+    res.status(500).json({ error: "Internal server error." });
   }
 }
 
@@ -428,8 +429,8 @@ async function updateBusNumber(req, res) {
       previewNumber,
     });
   } catch (error) {
-    console.error("UPDATE ERROR:", error);
-    res.status(500).json({ error: error.message });
+    logSafeError("Bus update failed", error);
+    res.status(500).json({ error: "Internal server error." });
   }
 }
 
@@ -571,8 +572,8 @@ async function getAllBuses(req, res) {
       count: safeBuses.length,
     });
   } catch (error) {
-    console.error("GET ALL BUSES ERROR:", error);
-    res.status(500).json({ error: error.message });
+    logSafeError("Get all buses failed", error);
+    res.status(500).json({ error: "Internal server error." });
   }
 }
 
@@ -680,8 +681,8 @@ async function getBusesForPlan(req, res) {
       count: safeResponse.length,
     });
   } catch (error) {
-    console.error("GET BUSES FOR PLAN ERROR:", error);
-    res.status(500).json({ success: false, error: error.message });
+    logSafeError("Get buses for plan failed", error);
+    res.status(500).json({ success: false, error: "Internal server error." });
   }
 }
 
@@ -701,10 +702,21 @@ async function deleteBus(req, res) {
       });
     }
 
-    await User.updateMany(
-      { bus_no: new RegExp(`^${escapeRegExp(bus.bus_no)}$`, "i") },
+    const assignedUserFilter = {
+      bus_no: new RegExp(`^${escapeRegExp(bus.bus_no)}$`, "i"),
+    };
+    const assignedUsers = await User.find(assignedUserFilter)
+      .select("_id")
+      .lean();
+    const assignmentResult = await User.updateMany(
+      assignedUserFilter,
       { $set: { bus_no: null } },
     );
+    if (assignmentResult.modifiedCount) {
+      assignedUsers.forEach((user) =>
+        emitBusAssignmentNotification(user._id, null),
+      );
+    }
     await PlanMapping.updateMany(
       { member_bus_ids: bus._id },
       { $pull: { member_bus_ids: bus._id } },
@@ -734,8 +746,8 @@ async function deleteBus(req, res) {
       message: "Bus and its database records deleted successfully",
     });
   } catch (error) {
-    console.error("Delete bus error:", error);
-    res.status(500).json({ error: error.message });
+    logSafeError("Delete bus failed", error);
+    res.status(500).json({ error: "Internal server error." });
   }
 }
 
@@ -758,8 +770,8 @@ async function activateBus(req, res) {
 
     res.json({ message: "Bus activated" });
   } catch (error) {
-    console.error("activateBus error:", error);
-    res.status(500).json({ error: error.message });
+    logSafeError("Activate bus failed", error);
+    res.status(500).json({ error: "Internal server error." });
   }
 }
 
@@ -782,8 +794,8 @@ async function deactivateBus(req, res) {
 
     res.json({ message: "Bus deactivated" });
   } catch (error) {
-    console.error("deactivateBus error:", error);
-    res.status(500).json({ error: error.message });
+    logSafeError("Deactivate bus failed", error);
+    res.status(500).json({ error: "Internal server error." });
   }
 }
 
@@ -794,7 +806,8 @@ async function validatePreviewNumber(req, res) {
     const exists = await Bus.findOne({ preview_number: previewNumber });
     res.json({ valid: !exists });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    logSafeError("Validate preview number failed", error);
+    res.status(500).json({ error: "Internal server error." });
   }
 }
 
@@ -817,7 +830,8 @@ async function updatePreviewNumber(req, res) {
 
     res.json({ message: "Preview updated successfully" });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    logSafeError("Update preview number failed", error);
+    res.status(500).json({ error: "Internal server error." });
   }
 }
 
@@ -830,8 +844,8 @@ async function updatePlan(req, res) {
         "Individual bus plans are no longer supported. Use the global active plan instead.",
     });
   } catch (error) {
-    console.error("Update plan error:", error);
-    res.status(500).json({ error: error.message });
+    logSafeError("Update bus plan failed", error);
+    res.status(500).json({ error: "Internal server error." });
   }
 }
 
@@ -846,8 +860,8 @@ async function getGlobalActivePlan(req, res) {
       ...(isSuperadmin ? { activePlan, planNames: DEFAULT_PLAN_NAMES } : {}),
     });
   } catch (error) {
-    console.error("getGlobalActivePlan error:", error);
-    res.status(500).json({ success: false, error: error.message });
+    logSafeError("Get global active plan failed", error);
+    res.status(500).json({ success: false, error: "Internal server error." });
   }
 }
 
@@ -908,8 +922,8 @@ async function setGlobalActivePlan(req, res) {
       planNames: DEFAULT_PLAN_NAMES,
     });
   } catch (error) {
-    console.error("setGlobalActivePlan error:", error);
-    res.status(500).json({ success: false, error: error.message });
+    logSafeError("Set global active plan failed", error);
+    res.status(500).json({ success: false, error: "Internal server error." });
   }
 }
 
@@ -1070,7 +1084,7 @@ async function getTemporaryBusChanges(req, res) {
 
     return res.json({ success: true, changes });
   } catch (error) {
-    console.error("getTemporaryBusChanges error:", error);
+    logSafeError("Get temporary bus changes failed", error);
     return res.status(500).json({
       success: false,
       error: "Could not load temporary bus changes.",
@@ -1219,7 +1233,7 @@ async function rollbackTemporaryBusChange(req, res) {
       notifiedStudents: change.assignmentSnapshots.length,
     });
   } catch (error) {
-    console.error("rollbackTemporaryBusChange error:", error);
+    logSafeError("Rollback temporary bus change failed", error);
     return res.status(500).json({
       success: false,
       error: "Could not roll back this temporary bus change.",
@@ -1632,13 +1646,13 @@ async function changeBus(req, res, alterationType) {
       temporaryChangeId: String(change._id),
     });
   } catch (error) {
-    console.error(`${alterationType} bus error:`, error);
+    logSafeError(`${alterationType} bus failed`, error);
     if (change && change.status !== "rolled_back") {
       change.status = "active";
       try {
         await change.save();
       } catch (recordError) {
-        console.error("Could not mark partial bus change for rollback:", recordError);
+        logSafeError("Could not mark partial bus change for rollback", recordError);
       }
     }
     res.status(500).json({
@@ -1725,7 +1739,7 @@ async function restoreAlteredBus(req, res) {
       notifiedStudents: users.length,
     });
   } catch (error) {
-    console.error("restoreAlteredBus error:", error);
+    logSafeError("Restore altered bus failed", error);
     return res
       .status(500)
       .json({ success: false, error: "Failed to restore combined bus." });
@@ -1813,8 +1827,8 @@ async function getBusRoutes(req, res) {
       hasStops: (plansMap[activePlanKey] || []).length > 0,
     });
   } catch (error) {
-    console.error("getBusRoutes error:", error);
-    res.status(500).json({ success: false, error: error.message });
+    logSafeError("Get bus routes failed", error);
+    res.status(500).json({ success: false, error: "Internal server error." });
   }
 }
 
@@ -1878,8 +1892,8 @@ async function updateBusDetails(req, res) {
       },
     });
   } catch (error) {
-    console.error("updateBusDetails error:", error);
-    res.status(500).json({ success: false, error: error.message });
+    logSafeError("Update bus details failed", error);
+    res.status(500).json({ success: false, error: "Internal server error." });
   }
 }
 
@@ -1899,7 +1913,8 @@ async function getPlans(req, res) {
       stops: effectiveRoutes.length,
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    logSafeError("Get bus live location failed", error);
+    res.status(500).json({ error: "Internal server error." });
   }
 }
 
@@ -2071,10 +2086,10 @@ async function getLiveLocation(req, res) {
       });
     }
   } catch (error) {
-    console.error("getLiveLocation error:", error);
+    logSafeError("Get bus live location failed", error);
     res.status(500).json({
       success: false,
-      message: error.message,
+      message: "Internal server error.",
     });
   }
 }
@@ -2191,8 +2206,8 @@ async function trackByPreview(req, res) {
       alteration,
     });
   } catch (error) {
-    console.error("trackByPreview error:", error);
-    res.status(500).json({ error: error.message });
+    logSafeError("Track bus by preview failed", error);
+    res.status(500).json({ error: "Internal server error." });
   }
 }
 

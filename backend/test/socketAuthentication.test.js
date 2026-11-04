@@ -15,7 +15,25 @@ function authenticate(token, overrides = {}) {
       ...overrides,
     },
   };
-  const middleware = createSocketAuthentication(jwt, () => SECRET);
+  const user = overrides.currentUser ?? {
+    role: "student",
+    is_active: true,
+    deleted_by_user: false,
+  };
+  const UserModel = {
+    findById() {
+      return {
+        select() {
+          return this;
+        },
+        lean: async () => {
+          if (overrides.databaseError) throw new Error("private database detail");
+          return user;
+        },
+      };
+    },
+  };
+  const middleware = createSocketAuthentication(jwt, () => SECRET, UserModel);
   return new Promise((resolve) => {
     middleware(socket, (error) => resolve({ error, socket }));
   });
@@ -23,7 +41,7 @@ function authenticate(token, overrides = {}) {
 
 test("socket authentication accepts valid JWT identity and normalizes its id", async () => {
   const token = jwt.sign(
-    { id: 123, role: "student" },
+    { id: 123, role: "superadmin" },
     SECRET,
     { expiresIn: "1h" },
   );
@@ -57,4 +75,19 @@ test("socket authentication accepts the bearer header and rejects missing identi
 
   const missingToken = await authenticate(null);
   assert.equal(missingToken.error.message, "Authentication required");
+});
+
+test("socket authentication rejects inactive accounts and hides database failures", async () => {
+  const token = jwt.sign({ id: "student-1", role: "student" }, SECRET);
+  const inactive = await authenticate(token, {
+    currentUser: { role: "student", is_active: false, deleted_by_user: false },
+  });
+  assert.equal(inactive.error.message, "Invalid or expired token");
+
+  const databaseFailure = await authenticate(token, { databaseError: true });
+  assert.equal(databaseFailure.error.message, "Authentication service unavailable");
+  assert.equal(
+    databaseFailure.error.message.includes("private database detail"),
+    false,
+  );
 });

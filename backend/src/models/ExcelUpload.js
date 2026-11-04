@@ -18,6 +18,15 @@ const excelUploadSchema = new mongoose.Schema(
     is_active: {
       type: Boolean,
       default: true
+    },
+    import_status: {
+      type: String,
+      enum: ['processing', 'completed', 'partial', 'failed'],
+      default: 'completed'
+    },
+    import_summary: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null
     }
   },
   { timestamps: true }

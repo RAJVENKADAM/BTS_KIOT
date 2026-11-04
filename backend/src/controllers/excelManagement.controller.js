@@ -4,6 +4,8 @@ const User = require('../models/User');
 const Bus = require('../models/Bus');
 const normalizeBusNumber = require('../utils/normalizeBusNumber');
 const { parsePagination } = require('../utils/pagination');
+const { disconnectUserSockets } = require('../socket');
+const { logSafeError } = require('../utils/safeErrorLog');
 
 // Get all Excel uploads for current user
 async function getAllExcelUploads(req, res) {
@@ -20,7 +22,7 @@ async function getAllExcelUploads(req, res) {
 
     const uploads = await ExcelUpload.find({ uploaded_by: userId })
       .sort({ createdAt: -1 })
-      .select('_id file_name custom_name uploaded_by createdAt updatedAt is_active')
+      .select('_id file_name custom_name uploaded_by createdAt updatedAt is_active import_status import_summary')
       .lean();
 
     // Ensure frontend receives a stable `id` field and uses `custom_name` correctly.
@@ -39,10 +41,10 @@ async function getAllExcelUploads(req, res) {
       data: normalized
     });
   } catch (error) {
-    console.error('Get Excel uploads error:', error);
+    logSafeError('Get Excel uploads failed', error);
     res.status(500).json({
       success: false,
-      error: error.message
+      error: 'Failed to load Excel uploads.'
     });
   }
 }
@@ -65,10 +67,10 @@ async function getExcelUpload(req, res) {
       data: upload
     });
   } catch (error) {
-    console.error('Get Excel upload error:', error);
+    logSafeError('Get Excel upload failed', error);
     res.status(500).json({
       success: false,
-      error: error.message
+      error: 'Failed to load Excel upload.'
     });
   }
 }
@@ -85,12 +87,6 @@ async function reuploadExcel(req, res) {
         error: 'No file uploaded'
       });
     }
-
-    console.log('Re-uploading Excel file:', {
-      id,
-      name: req.file.originalname,
-      size: req.file.size
-    });
 
     // Update Excel upload record
     const upload = await ExcelUpload.findByIdAndUpdate(
@@ -115,10 +111,10 @@ async function reuploadExcel(req, res) {
       data: upload
     });
   } catch (error) {
-    console.error('Re-upload Excel error:', error);
+    logSafeError('Re-upload Excel failed', error);
     res.status(500).json({
       success: false,
-      error: error.message
+      error: 'Failed to update Excel upload.'
     });
   }
 }
@@ -150,10 +146,16 @@ async function deleteExcelUpload(req, res) {
     // Changed from User.deleteMany() to User.updateMany() to avoid permanent data loss.
     // This sets is_active=false, deleted_by_user=true so users cannot log in,
     // but their account records and history are preserved.
+    const linkedUsers = await User.find({ excel_upload_id: id })
+      .select('_id')
+      .lean();
     const updateResult = await User.updateMany(
       { excel_upload_id: id },
       { $set: { is_active: false, deleted_by_user: true } }
     );
+    if (linkedUsers.length) {
+      disconnectUserSockets(linkedUsers.map((user) => String(user._id)));
+    }
 
     // Delete the upload record
     await ExcelUpload.findByIdAndDelete(id);
@@ -164,10 +166,10 @@ async function deleteExcelUpload(req, res) {
       deactivatedUsers: updateResult.modifiedCount || 0
     });
   } catch (error) {
-    console.error('Delete Excel upload error:', error);
+    logSafeError('Delete Excel upload failed', error);
     res.status(500).json({
       success: false,
-      error: error.message
+      error: 'Failed to delete Excel upload.'
     });
   }
 }
@@ -243,10 +245,10 @@ async function getUsersByExcelUpload(req, res) {
       },
     });
   } catch (error) {
-    console.error('Get users by Excel upload error:', error);
+    logSafeError('Get users by Excel upload failed', error);
     res.status(500).json({
       success: false,
-      error: error.message
+      error: 'Failed to load users for Excel upload.'
     });
   }
 }

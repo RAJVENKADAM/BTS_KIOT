@@ -1,6 +1,9 @@
 const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
 const User = require('../models/User');
 const Bus = require('../models/Bus');
+const { extractBearerToken } = require('../middleware/auth');
+const { disconnectUserSockets } = require('../socket');
 const {
   reserveLoginAttempt,
   releaseLoginAttempt,
@@ -152,7 +155,10 @@ const login = async (req, res) => {
         retryAfter: error.retryAfter || 2,
       });
     }
-    console.error('Login error:', error);
+    console.error('Login error:', {
+      name: error?.name || 'Error',
+      code: error?.code || null
+    });
     res.status(500).json({
       error: 'Internal server error',
       code: 'INTERNAL_SERVER_ERROR',
@@ -164,7 +170,7 @@ const getProfile = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    const user = await User.findById(userId).select('-password_hash');
+    const user = await User.findById(userId).select('-password_hash').lean();
 
     if (!user) {
       return res.status(404).json({
@@ -189,7 +195,10 @@ const getProfile = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Get profile error:', error);
+    console.error('Get profile error:', {
+      name: error?.name || 'Error',
+      code: error?.code || null
+    });
     res.status(500).json({
       error: 'Internal server error'
     });
@@ -223,12 +232,16 @@ const deleteUserAccount = async (req, res) => {
       });
     }
 
+    disconnectUserSockets(userId);
     res.status(200).json({
       message: 'Account deleted successfully. You will be logged out.'
     });
 
   } catch (error) {
-    console.error('Delete user account error:', error);
+    console.error('Delete user account error:', {
+      name: error?.name || 'Error',
+      code: error?.code || null
+    });
     res.status(500).json({
       error: 'Internal server error'
     });
@@ -240,7 +253,9 @@ const verifyToken = async (req, res) => {
     // If we reach here, token is valid (middleware passed)
     // But we MUST also check if the user account is still active
     // This catches deactivated users who still have valid tokens
-    const user = await User.findById(req.user.id).select('is_active deleted_by_user');
+    const user = await User.findById(req.user.id)
+      .select('is_active deleted_by_user role')
+      .lean();
 
     if (!user || !user.is_active || user.deleted_by_user) {
       return res.status(403).json({
@@ -255,7 +270,10 @@ const verifyToken = async (req, res) => {
       user: req.user
     });
   } catch (error) {
-    console.error('verifyToken error:', error);
+    console.error('verifyToken error:', {
+      name: error?.name || 'Error',
+      code: error?.code || null
+    });
     res.status(500).json({
       valid: false,
       error: 'Internal server error'
@@ -274,11 +292,17 @@ const verifyToken = async (req, res) => {
  */
 const verifyTokenPublic = async (req, res) => {
   try {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
+    const token = extractBearerToken(req.headers?.authorization);
 
     if (!token) {
       return res.status(200).json({ valid: false });
+    }
+
+    if (!process.env.JWT_SECRET) {
+      return res.status(500).json({
+        valid: false,
+        error: 'Authentication service unavailable'
+      });
     }
 
     let payload;
@@ -294,9 +318,14 @@ const verifyTokenPublic = async (req, res) => {
     if (normalized && normalized.id != null) {
       normalized.id = String(normalized.id);
     }
+    if (!mongoose.isValidObjectId(normalized.id)) {
+      return res.status(200).json({ valid: false });
+    }
 
     // Check that the account is still active
-    const user = await User.findById(normalized.id).select('is_active deleted_by_user');
+    const user = await User.findById(normalized.id)
+      .select('is_active deleted_by_user role')
+      .lean();
 
     if (!user || !user.is_active || user.deleted_by_user) {
       return res.status(200).json({
@@ -306,12 +335,16 @@ const verifyTokenPublic = async (req, res) => {
       });
     }
 
+    normalized.role = user.role;
     res.status(200).json({
       valid: true,
       user: normalized
     });
   } catch (error) {
-    console.error('verifyTokenPublic error:', error);
+    console.error('verifyTokenPublic error:', {
+      name: error?.name || 'Error',
+      code: error?.code || null
+    });
     res.status(500).json({
       valid: false,
       error: 'Internal server error'

@@ -15,3 +15,20 @@ test("preserves sessions for rate limits, server errors, and malformed success",
   }
   assert.equal(shouldClearAuthSession(200, {}), false);
 });
+
+test("clears a verified superadmin session from the mobile application", () => {
+  assert.equal(
+    shouldClearAuthSession(200, {
+      valid: true,
+      user: { role: "superadmin" },
+    }),
+    true,
+  );
+  assert.equal(
+    shouldClearAuthSession(200, {
+      valid: true,
+      user: { role: "primary_admin" },
+    }),
+    false,
+  );
+});

@@ -1,6 +1,6 @@
 /**
  * AuthContext — Global authentication state management.
- * Provides login, logout, token persistence via AsyncStorage,
+ * Provides login, logout, secure token persistence,
  * and exposes user, token, loading, isAuthenticated to the app tree.
  */
 import React, {
@@ -10,11 +10,33 @@ import React, {
   useEffect,
   useRef,
 } from "react";
+import { Platform } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
 import { API_BASE_URL } from "../api/api";
 import { fetchJson, getErrorMessage } from "../utils/errorHandler";
 const { shouldClearAuthSession } = require("../auth/sessionPolicy.cjs");
+const authStorage = require("../auth/authStorage.cjs");
+const { restoreCachedSession } = require("../auth/sessionRestore.cjs");
+const { createStorageMutationQueue } = require("../auth/storageMutationQueue.cjs");
+
+const fetchWithTimeout = (url, options, timeoutMs) => {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  return fetch(url, { ...options, signal: controller.signal })
+    .catch((error) => {
+      if (!timedOut) throw error;
+      const timeoutError = new Error("Request timed out");
+      timeoutError.isNetwork = true;
+      timeoutError.isTimeout = true;
+      throw timeoutError;
+    })
+    .finally(() => clearTimeout(timeoutId));
+};
 
 const AuthContext = createContext();
 
@@ -38,57 +60,41 @@ export const AuthProvider = ({ children }) => {
   const verifyTimeoutRef = useRef(null);
   const sessionGenerationRef = useRef(0);
   const loginPromiseRef = useRef(null);
-  const storageMutationRef = useRef(Promise.resolve());
+  const storageMutationQueueRef = useRef(null);
+  if (!storageMutationQueueRef.current) {
+    storageMutationQueueRef.current = createStorageMutationQueue();
+  }
 
-  const mutateAuthStorage = (operation) => {
-    const result = storageMutationRef.current.then(operation, operation);
-    storageMutationRef.current = result.catch(() => {});
-    return result;
-  };
-
-  const readToken = async () => {
-    try {
-      const secureToken = await SecureStore.getItemAsync("btms_token");
-      if (secureToken) return secureToken;
-    } catch (error) {
-      console.warn("Secure token storage unavailable:", error?.message);
-    }
-    // One-time migration for sessions created by older builds.
-    return AsyncStorage.getItem("token");
-  };
+  const readToken = () =>
+    authStorage.readToken({
+      secureStore: SecureStore,
+      asyncStorage: AsyncStorage,
+      allowInsecureFallback: Platform.OS === "web",
+    });
 
   const persistAuth = (value, userData) =>
-    mutateAuthStorage(async () => {
-      await AsyncStorage.setItem("user", JSON.stringify(userData));
-      try {
-        await SecureStore.setItemAsync("btms_token", value, {
-          keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
-        });
-        await AsyncStorage.removeItem("token");
-      } catch (error) {
-        console.warn(
-          "Secure token storage unavailable; using compatibility storage:",
-          error?.message,
-        );
-        await AsyncStorage.setItem("token", value);
-      }
+    storageMutationQueueRef.current(async () => {
+      await authStorage.persistAuth({
+        secureStore: SecureStore,
+        asyncStorage: AsyncStorage,
+        token: value,
+        user: userData,
+        allowInsecureFallback: Platform.OS === "web",
+      });
     });
 
   const persistUserData = (userData) =>
-    mutateAuthStorage(() =>
+    storageMutationQueueRef.current(() =>
       AsyncStorage.setItem("user", JSON.stringify(userData)),
     );
 
   const clearAuthStorage = () =>
-    mutateAuthStorage(async () => {
-      const results = await Promise.allSettled([
-        SecureStore.deleteItemAsync("btms_token"),
-        AsyncStorage.multiRemove(["token", "user"]),
-      ]);
-      if (results.some((result) => result.status === "rejected")) {
-        throw new Error("Unable to clear all stored authentication data");
-      }
-    });
+    storageMutationQueueRef.current(() =>
+      authStorage.clearAuthStorage({
+        secureStore: SecureStore,
+        asyncStorage: AsyncStorage,
+      }),
+    );
 
   // LOAD AUTH DATA
   useEffect(() => {
@@ -109,17 +115,26 @@ export const AuthProvider = ({ children }) => {
       return;
     }
 
-    const generation = sessionGenerationRef.current;
     let verificationInFlight = false;
     const verifySession = async () => {
       if (verificationInFlight) return;
       verificationInFlight = true;
+      const generation = sessionGenerationRef.current;
       try {
-        const response = await fetch(`${API_BASE_URL}/api/auth/verify`, {
+        const response = await fetchWithTimeout(`${API_BASE_URL}/api/auth/verify`, {
           headers: { Authorization: `Bearer ${token}` },
-        });
+        }, 10000);
 
         const data = await response.json().catch(() => ({}));
+        if (
+          data?.valid === true &&
+          typeof data.user?.role === "string" &&
+          generation === sessionGenerationRef.current
+        ) {
+          setUser((currentUser) =>
+            currentUser ? { ...currentUser, role: data.user.role } : currentUser,
+          );
+        }
         if (shouldClearAuthSession(response.status, data)) {
           console.log(
             "Session invalid — account deactivated or token expired. Logging out.",
@@ -162,47 +177,29 @@ export const AuthProvider = ({ children }) => {
     try {
       const storedToken = await readToken();
       const storedUser = await AsyncStorage.getItem("user");
-
-      if (storedToken && storedUser) {
-        let sessionInvalid = false;
-        try {
-          const parsedUser = JSON.parse(storedUser);
-          if (
-            typeof parsedUser?.role === "string" &&
-            parsedUser.role.toLowerCase() === "superadmin"
-          ) {
-            sessionInvalid = true;
-            await clearAuthStorage();
-            return;
-          }
-
-          // Verify token with backend before restoring session
-          const verifyRes = await fetch(`${API_BASE_URL}/api/auth/verify`, {
-            headers: { Authorization: `Bearer ${storedToken}` },
-          });
-
-          const verifyData = await verifyRes.json().catch(() => ({}));
-          if (shouldClearAuthSession(verifyRes.status, verifyData)) {
-            sessionInvalid = true;
-            await clearAuthStorage();
-            return;
-          }
-
-          setToken(storedToken);
-          setUser(parsedUser);
-        } catch (verifyError) {
-          if (sessionInvalid) return;
-          // Network error on startup verify — restore cached session anyway,
-          // periodic check will handle it if account gets deactivated later
-          console.log(
-            "Token verify failed on startup (network), restoring cached session",
+      const session = await restoreCachedSession({
+        token: storedToken,
+        storedUser,
+        verify: async (value) => {
+          const response = await fetchWithTimeout(
+            `${API_BASE_URL}/api/auth/verify`,
+            { headers: { Authorization: `Bearer ${value}` } },
+            10000,
           );
-          setToken(storedToken);
-          setUser(JSON.parse(storedUser));
-        }
+          return {
+            status: response.status,
+            data: await response.json().catch(() => ({})),
+          };
+        },
+        clear: clearAuthStorage,
+        shouldClear: shouldClearAuthSession,
+      });
+      if (session) {
+        setToken(session.token);
+        setUser(session.user);
       }
     } catch (error) {
-      console.log("Load auth error:", error);
+      console.warn("Unable to restore authentication session:", error?.message);
     } finally {
       setLoading(false);
     }
@@ -300,13 +297,17 @@ export const AuthProvider = ({ children }) => {
     try {
       if (token) {
         try {
-          void fetch(`${API_BASE_URL}/api/auth/logout`, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${token}`,
-              "Content-Type": "application/json",
+          void fetchWithTimeout(
+            `${API_BASE_URL}/api/auth/logout`,
+            {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${token}`,
+                "Content-Type": "application/json",
+              },
             },
-          }).catch((apiError) =>
+            10000,
+          ).catch((apiError) =>
             console.warn("Server logout request failed:", apiError?.message),
           );
         } catch (apiError) {
@@ -320,8 +321,7 @@ export const AuthProvider = ({ children }) => {
       setUser(null);
     } catch (error) {
       console.error("Unable to clear auth storage during logout:", error);
-      setToken(null);
-      setUser(null);
+      throw error;
     } finally {
       isLoggingOut.current = false;
     }
@@ -345,13 +345,17 @@ export const AuthProvider = ({ children }) => {
   // DELETE ACCOUNT
   const deleteAccount = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/auth/account`, {
-        method: "DELETE",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
+      const response = await fetchWithTimeout(
+        `${API_BASE_URL}/api/auth/account`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
         },
-      });
+        15000,
+      );
 
       const rawText = await response.text();
 

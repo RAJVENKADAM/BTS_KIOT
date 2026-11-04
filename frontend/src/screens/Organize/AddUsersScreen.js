@@ -21,11 +21,7 @@ import UserCard from "../../components/UserCard";
 import Card from "../../components/UI/Card";
 import * as DocumentPicker from "expo-document-picker";
 
-import {
-  readExcelFile,
-  convertUserExcelToJson,
-} from "../../utils/excelImport";
-import { importUsersExcelJson } from "../../api/importApi";
+import { uploadUsersExcelWorkbook } from "../../api/importApi";
 
 import { COLORS, SPACING, RADIUS, SHADOWS } from "../../theme";
 import { Header, Body, MutedText } from "../../components/UI/Typography";
@@ -37,7 +33,12 @@ function formatImportRowErrors(rowResults) {
   if (!failures.length) return "";
   const details = failures
     .slice(0, 6)
-    .map((row) => `Excel row ${(Number(row.index) || 0) + 2}: ${row.reason}`);
+    .map((row) => {
+      const excelRow = Number.isInteger(row.rowNumber)
+        ? row.rowNumber
+        : (Number(row.index) || 0) + 2;
+      return `Excel row ${excelRow}: ${row.reason}`;
+    });
   if (failures.length > details.length) {
     details.push(`...and ${failures.length - details.length} more.`);
   }
@@ -138,29 +139,12 @@ export default function AddUsersScreen() {
   const handleFileUpload = async (file, customName) => {
     if (!token || !file?.uri) return;
 
-    console.log("DocumentPicker asset:", file);
-
     setUploading(true);
 
     try {
-      const readResult = await readExcelFile(file);
-      const rows = convertUserExcelToJson(readResult);
-      if (!rows.length) {
-        throw new Error(
-          "No user rows found. The first row must contain column headings, followed by user data.",
-        );
-      }
-
-      const response = await importUsersExcelJson({
+      const response = await uploadUsersExcelWorkbook({
         token,
-        users: rows.map((r) => ({
-          name: r.name,
-          email: r.email,
-          busno: r.busno ?? r.bus_no,
-          role: r.role,
-          mobile_no: r.mobile_no,
-          date_of_year: r.date_of_year,
-        })),
+        file,
         excelCustomName: customName,
       });
 
@@ -168,15 +152,22 @@ export default function AddUsersScreen() {
         const summary = response.summary || {};
         const rowErrors = formatImportRowErrors(summary.rowResults);
         Alert.alert(
-          summary.failedRows
+          summary.partial
+            ? "Import partially completed"
+            : summary.failedRows
             ? "Import completed with errors"
             : "Import complete",
           [
-            `Total rows: ${summary.totalRows ?? rows.length}`,
+            `Total rows: ${summary.totalRows ?? 0}`,
+            `Valid rows: ${summary.validRows ?? 0}`,
             `Inserted: ${summary.insertedRows ?? 0}`,
             `Updated: ${summary.updatedRows ?? 0}`,
             `Unchanged: ${summary.unchangedRows ?? 0}`,
+            `Duplicates: ${summary.duplicateRows ?? 0}`,
             `Failed: ${summary.failedRows ?? 0}`,
+            summary.outcomeUnknown
+              ? "Database outcome is uncertain; check the upload status before retrying."
+              : "",
             rowErrors,
           ]
             .filter(Boolean)
@@ -187,10 +178,25 @@ export default function AddUsersScreen() {
       // Keep existing UI behavior; legacy Excel management list will stay as-is.
       await loadExcelUploads();
     } catch (e) {
+      const summary = e?.summary;
       const rowErrors = formatImportRowErrors(
-        e?.summary?.rowResults || e?.rowResults,
+        summary?.rowResults || e?.rowResults,
       );
       const message = [
+        ...(summary
+          ? [
+              `Total rows: ${summary.totalRows ?? 0}`,
+              `Valid rows: ${summary.validRows ?? 0}`,
+              `Inserted: ${summary.insertedRows ?? 0}`,
+              `Updated: ${summary.updatedRows ?? 0}`,
+              `Unchanged: ${summary.unchangedRows ?? 0}`,
+              `Duplicates: ${summary.duplicateRows ?? 0}`,
+              `Failed: ${summary.failedRows ?? 0}`,
+              ...(summary.outcomeUnknown
+                ? ["Database outcome is uncertain; check the upload status before retrying."]
+                : []),
+            ]
+          : []),
         getErrorMessage(e, "The user import could not be completed."),
         rowErrors,
         e?.isTimeout
@@ -200,10 +206,12 @@ export default function AddUsersScreen() {
         .filter(Boolean)
         .join("\n\n");
       Alert.alert(
-        "Import failed",
+        summary?.partial ? "Import partially completed" : "Import failed",
         message,
       );
-      if (e?.isTimeout) await loadExcelUploads();
+      if (e?.isTimeout || summary?.partial || summary?.outcomeUnknown) {
+        await loadExcelUploads();
+      }
     } finally {
       setUploading(false);
     }

@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 const User = require('../src/models/User');
 const {
   runLimitedPasswordCheck,
+  runLimitedImportPasswordHash,
 } = require('../src/utils/authProtection');
 
 process.env.JWT_SECRET = 'test-secret-with-more-than-thirty-two-characters';
@@ -80,10 +81,20 @@ test('successful login returns the established token and user shape', async () =
   assert.equal(response.body.message, 'Login successful');
   assert.equal(response.body.user.email, email);
   assert.equal(response.body.user.role, 'student');
-  assert.equal(
-    jwt.verify(response.body.token, process.env.JWT_SECRET).id,
-    `id-${email}`,
-  );
+  const payload = jwt.verify(response.body.token, process.env.JWT_SECRET);
+  assert.equal(payload.id, `id-${email}`);
+  assert.equal(payload.exp - payload.iat, 24 * 60 * 60);
+});
+
+test('missing credentials are rejected and nonexistent users receive the generic 401', async () => {
+  const missing = await attemptLogin("", "");
+  assert.equal(missing.statusCode, 400);
+  assert.equal(missing.body.code, "INVALID_CREDENTIALS");
+
+  const nonexistent = await attemptLogin("not-registered@example.edu", "random-password");
+  assert.equal(nonexistent.statusCode, 401);
+  assert.equal(nonexistent.body.code, "INVALID_CREDENTIALS");
+  assert.equal(nonexistent.body.error, "Invalid credentials");
 });
 
 test('incorrect credentials return 401 and repeated attempts are throttled per account', async () => {
@@ -131,4 +142,54 @@ test('password-check saturation is bounded and returns a retryable 503', async (
 
   releaseChecks();
   await Promise.all(queuedChecks);
+});
+
+test('import password hashes are bounded and capacity is released after failures', async () => {
+  let releaseHashes;
+  const gate = new Promise((resolve) => {
+    releaseHashes = resolve;
+  });
+  let activeHashes = 0;
+  let maximumActiveHashes = 0;
+  const hashes = Array.from({ length: 6 }, (_, index) =>
+    runLimitedImportPasswordHash(async () => {
+      activeHashes += 1;
+      maximumActiveHashes = Math.max(maximumActiveHashes, activeHashes);
+      try {
+        await gate;
+        if (index === 0) throw new Error('simulated hash failure');
+      } finally {
+        activeHashes -= 1;
+      }
+    }),
+  );
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(maximumActiveHashes, 4);
+  releaseHashes();
+  const results = await Promise.allSettled(hashes);
+
+  assert.equal(results.filter((result) => result.status === 'rejected').length, 1);
+  assert.equal(activeHashes, 0);
+  assert.ok(maximumActiveHashes <= 4);
+});
+
+test('import password hash queue is bounded and rejects only excess concurrent work', async () => {
+  let releaseHashes;
+  const gate = new Promise((resolve) => {
+    releaseHashes = resolve;
+  });
+  const queuedHashes = Array.from({ length: 68 }, () =>
+    runLimitedImportPasswordHash(() => gate),
+  );
+
+  await assert.rejects(
+    runLimitedImportPasswordHash(() => gate),
+    (error) => error.status === 503 && error.code === 'AUTH_BUSY',
+  );
+
+  releaseHashes();
+  await Promise.all(queuedHashes);
+  const retried = await runLimitedImportPasswordHash(async () => 'hashed');
+  assert.equal(retried, 'hashed');
 });

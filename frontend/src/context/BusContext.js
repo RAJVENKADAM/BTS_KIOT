@@ -10,15 +10,23 @@ import React, {
   useEffect,
   useState,
   useCallback,
+  useRef,
 } from "react";
 import io from "socket.io-client";
+import { AppState } from "react-native";
 import { API_BASE_URL } from "../api/api";
 import { useAuth } from "./AuthContext";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { fetchJson, getErrorMessage } from "../utils/errorHandler";
-const { updateBusStatus } = require("./busLocationState.cjs");
 const {
+  getSocketActionForAppStateChange,
   isPermanentSocketAuthenticationError,
+  shouldConnectSocketForAppState,
+  SOCKET_RECONNECTION_ATTEMPTS,
+  SOCKET_RECONNECTION_DELAY_MS,
+  SOCKET_RECONNECTION_MAX_DELAY_MS,
+  SOCKET_RECONNECTION_RANDOMIZATION_FACTOR,
+  shouldReconnectAfterServerDisconnect,
 } = require("../utils/socketConnectionPolicy.cjs");
 
 const BusContext = createContext();
@@ -46,8 +54,6 @@ const busReducer = (state, action) => {
       return { ...state, buses: action.payload };
     case "SET_SELECTED_BUS":
       return { ...state, selectedBus: action.payload };
-    case "UPDATE_BUS_STATUS":
-      return updateBusStatus(state, action.payload);
     case "SET_SELECTED_PREVIEW":
       return { ...state, selectedPreviewNumber: action.payload };
     case "SET_LOCATION":
@@ -69,6 +75,7 @@ export const BusProvider = ({ children }) => {
   const [state, dispatch] = useReducer(busReducer, initialState);
   const { token, user } = useAuth();
   const requestGenerationRef = React.useRef(0);
+  const appStateRef = useRef(AppState.currentState || "active");
 
   const refreshBuses = useCallback(async () => {
     dispatch({ type: "SET_LOADING", payload: true });
@@ -105,47 +112,70 @@ export const BusProvider = ({ children }) => {
     if (!token) {
       AsyncStorage.multiRemove(["buses", "selectedBusPreviewNumber"]).catch(() => {});
       dispatch({ type: "RESET" });
-      // Disconnect socket if token is cleared
-      if (socket) {
-        socket.disconnect();
-        setSocket(null);
-      }
+      setSocket(null);
       return;
     }
 
+    setSocket(null);
+    let disposed = false;
+    let authenticationRejected = false;
     // Connect to the root namespace — backend socket.io serves only "/".
     // Backend uses `path: "/socket.io"` (no trailing slash).
     const newSocket = io(`${API_BASE_URL}`, {
       path: "/socket.io",
       transports: ["websocket"],
-
+      autoConnect: shouldConnectSocketForAppState(appStateRef.current),
       auth: { token },
       reconnection: true,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
+      reconnectionAttempts: SOCKET_RECONNECTION_ATTEMPTS,
+      reconnectionDelay: SOCKET_RECONNECTION_DELAY_MS,
+      reconnectionDelayMax: SOCKET_RECONNECTION_MAX_DELAY_MS,
+      randomizationFactor: SOCKET_RECONNECTION_RANDOMIZATION_FACTOR,
     });
 
     newSocket.on("connect", () => {
-      if (requestGenerationRef.current === 0 || !token) return;
-      console.log("BusContext socket connected:", newSocket.id);
+      if (disposed || requestGenerationRef.current === 0 || !token) return;
       setSocket(newSocket);
     });
 
-    newSocket.on("locationUpdate", (data) => {
-      dispatch({ type: "UPDATE_BUS_STATUS", payload: data });
-    });
-
     newSocket.on("connect_error", (error) => {
-      console.log("BusContext socket connect error:", error.message);
       if (isPermanentSocketAuthenticationError(error)) {
+        authenticationRejected = true;
         newSocket.io.reconnection(false);
       }
     });
 
-    newSocket.on("bus-update", (data) => {
-      console.log("BusContext bus-update:", data);
-      dispatch({ type: "UPDATE_BUS_STATUS", payload: data });
+    newSocket.on("disconnect", (reason) => {
+      if (
+        !disposed &&
+        !authenticationRejected &&
+        shouldConnectSocketForAppState(appStateRef.current) &&
+        shouldReconnectAfterServerDisconnect(reason) &&
+        token
+      ) {
+        newSocket.connect();
+      }
+    });
 
+    const appStateSubscription = AppState.addEventListener(
+      "change",
+      (nextAppState) => {
+        const action = getSocketActionForAppStateChange({
+          previousAppState: appStateRef.current,
+          nextAppState,
+          socketConnected: newSocket.connected,
+          authenticationRejected,
+        });
+        appStateRef.current = nextAppState;
+        if (action === "disconnect") newSocket.disconnect();
+        if (action === "connect") {
+          newSocket.io.reconnection(true);
+          newSocket.connect();
+        }
+      },
+    );
+
+    newSocket.on("bus-update", (data) => {
       if (data.actionType === "PLAN_CHANGED") {
         refreshBuses();
       }
@@ -153,12 +183,14 @@ export const BusProvider = ({ children }) => {
 
     // Cleanup: disconnect socket when token changes or component unmounts
     return () => {
+      disposed = true;
+      appStateSubscription.remove();
       newSocket.removeAllListeners();
       newSocket.disconnect();
     };
   }, [token, refreshBuses]);
 
-  const getSocket = () => socket;
+  const getSocket = useCallback(() => socket, [socket]);
 
   const loadBuses = async () => {
     dispatch({ type: "SET_LOADING", payload: true });

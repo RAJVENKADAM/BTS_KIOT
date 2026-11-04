@@ -21,23 +21,39 @@ function firstWorksheet(buffer) {
   return workbook.Sheets[firstSheet];
 }
 
+function createUserWorkbookRows(buffer) {
+  const worksheet = firstWorksheet(buffer);
+  const reference = worksheet["!ref"];
+  if (!reference) return function* emptyUserWorkbookRows() {};
+
+  const { s, e } = XLSX.utils.decode_range(reference);
+  const lastColumn = Math.min(e.c, s.c + USER_COLUMNS.length - 1);
+  return function* userWorkbookRows() {
+    for (let rowIndex = s.r + 1; rowIndex <= e.r; rowIndex += 1) {
+      const row = [];
+      let hasValue = false;
+      for (let columnIndex = s.c; columnIndex <= lastColumn; columnIndex += 1) {
+        const cell = worksheet[
+          XLSX.utils.encode_cell({ r: rowIndex, c: columnIndex })
+        ];
+        const value = cell?.v ?? "";
+        row.push(value);
+        if (String(value).trim()) hasValue = true;
+      }
+      if (!hasValue) continue;
+
+      yield {
+        ...Object.fromEntries(
+          USER_COLUMNS.map((column, index) => [column, row[index] ?? ""]),
+        ),
+        _sourceRowNumber: rowIndex + 1,
+      };
+    }
+  };
+}
+
 function parseUserWorkbook(buffer) {
-  const rows = XLSX.utils.sheet_to_json(firstWorksheet(buffer), {
-    header: 1,
-    range: 1,
-    defval: "",
-    blankrows: false,
-  });
-  return rows
-    .filter((row) =>
-      Array.isArray(row) &&
-      row.some((value) => String(value ?? "").trim() !== ""),
-    )
-    .map((row) =>
-      Object.fromEntries(
-        USER_COLUMNS.map((column, index) => [column, row[index] ?? ""]),
-      ),
-    );
+  return Array.from(createUserWorkbookRows(buffer)(), ({ _sourceRowNumber, ...row }) => row);
 }
 
 function formatArrivalTime(value) {
@@ -118,4 +134,8 @@ function parseBusRoutesWorkbook(buffer) {
   return routesByPlan;
 }
 
-module.exports = { parseUserWorkbook, parseBusRoutesWorkbook };
+module.exports = {
+  parseUserWorkbook,
+  createUserWorkbookRows,
+  parseBusRoutesWorkbook,
+};

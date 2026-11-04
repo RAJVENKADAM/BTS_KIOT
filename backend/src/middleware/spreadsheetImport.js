@@ -1,7 +1,7 @@
 const multer = require("multer");
 const {
   parseBusRoutesWorkbook,
-  parseUserWorkbook,
+  createUserWorkbookRows,
 } = require("../utils/spreadsheetImport");
 
 const upload = multer({
@@ -53,20 +53,16 @@ function parseUserWorkbookUpload(request, response, next) {
   }
 
   try {
-    const users = parseUserWorkbook(request.file.buffer);
-    if (!users.length) {
-      response.status(400).json({
-        success: false,
-        error: "No user rows found. Add column headings followed by user data.",
-      });
-      return;
-    }
+    const rowIterator = createUserWorkbookRows(request.file.buffer);
+    request.file.buffer = null;
+    const users = { [Symbol.iterator]: rowIterator };
     request.body = { ...request.body, users, excelCustomName };
     next();
-  } catch (error) {
+  } catch {
+    if (request.file) request.file.buffer = null;
     response.status(400).json({
       success: false,
-      error: error.message || "Could not read the user workbook.",
+      error: "Could not read the Excel workbook. Check the file format and try again.",
     });
   }
 }

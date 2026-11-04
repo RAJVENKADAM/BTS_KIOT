@@ -7,6 +7,7 @@ const PlanMapping = require("../src/models/PlanMapping");
 const User = require("../src/models/User");
 const BusChange = require("../src/models/BusChange");
 const { deleteBus } = require("../src/controllers/bus.controller");
+const { setIO } = require("../src/socket");
 
 function createResponse() {
   return {
@@ -28,6 +29,7 @@ test("permanently deletes a bus and cleans up its dependent records", async () =
     changeFindOne: BusChange.findOne,
     busUpdateMany: Bus.updateMany,
     busDeleteOne: Bus.deleteOne,
+    userFind: User.find,
     userUpdateMany: User.updateMany,
     mappingUpdateMany: PlanMapping.updateMany,
     mappingDeleteMany: PlanMapping.deleteMany,
@@ -36,6 +38,7 @@ test("permanently deletes a bus and cleans up its dependent records", async () =
   };
   const bus = { _id: "bus-id", bus_no: "BUS-12" };
   const calls = [];
+  const notifications = [];
 
   Bus.findOne = async (filter) => {
     calls.push(["bus.findOne", filter]);
@@ -47,13 +50,34 @@ test("permanently deletes a bus and cleans up its dependent records", async () =
       return null;
     },
   });
-  User.updateMany = async (...args) => calls.push(["user.updateMany", ...args]);
+  User.find = (...args) => {
+    calls.push(["user.find", ...args]);
+    return {
+      select() {
+        return this;
+      },
+      lean: async () => [{ _id: "student-1" }, { _id: "student-2" }],
+    };
+  };
+  User.updateMany = async (...args) => {
+    calls.push(["user.updateMany", ...args]);
+    return { modifiedCount: 2 };
+  };
   PlanMapping.updateMany = async (...args) => calls.push(["mapping.updateMany", ...args]);
   PlanMapping.deleteMany = async (...args) => calls.push(["mapping.deleteMany", ...args]);
   Bus.updateMany = async (...args) => calls.push(["bus.updateMany", ...args]);
   BusRoute.deleteMany = async (...args) => calls.push(["route.deleteMany", ...args]);
   BusLiveLocation.deleteMany = async (...args) => calls.push(["location.deleteMany", ...args]);
   Bus.deleteOne = async (...args) => calls.push(["bus.deleteOne", ...args]);
+  setIO({
+    to(room) {
+      return {
+        emit(event, payload) {
+          notifications.push({ room, event, payload });
+        },
+      };
+    },
+  });
 
   try {
     const response = createResponse();
@@ -64,6 +88,7 @@ test("permanently deletes a bus and cleans up its dependent records", async () =
     assert.deepEqual(calls.map(([name]) => name), [
       "bus.findOne",
       "busChange.findOne",
+      "user.find",
       "user.updateMany",
       "mapping.updateMany",
       "mapping.deleteMany",
@@ -73,18 +98,30 @@ test("permanently deletes a bus and cleans up its dependent records", async () =
       "bus.deleteOne",
     ]);
     assert.equal(calls[2][1].bus_no.test("bus-12"), true);
-    assert.deepEqual(calls[2][2], { $set: { bus_no: null } });
-    assert.deepEqual(calls[3][1], { member_bus_ids: bus._id });
-    assert.deepEqual(calls[3][2], { $pull: { member_bus_ids: bus._id } });
-    assert.deepEqual(calls[4][1], { root_bus_id: bus._id });
-    assert.deepEqual(calls[6][1], { bus_id: bus._id });
+    assert.equal(calls[3][1].bus_no.test("bus-12"), true);
+    assert.deepEqual(calls[3][2], { $set: { bus_no: null } });
+    assert.deepEqual(calls[4][1], { member_bus_ids: bus._id });
+    assert.deepEqual(calls[4][2], { $pull: { member_bus_ids: bus._id } });
+    assert.deepEqual(calls[5][1], { root_bus_id: bus._id });
     assert.deepEqual(calls[7][1], { bus_id: bus._id });
-    assert.deepEqual(calls[8][1], { _id: bus._id });
+    assert.deepEqual(calls[8][1], { bus_id: bus._id });
+    assert.deepEqual(calls[9][1], { _id: bus._id });
+    assert.deepEqual(notifications, ["student-1", "student-2"].map((id) => ({
+      room: `user_${id}`,
+      event: "notification",
+      payload: {
+        type: "bus_unassigned",
+        message: "Your bus assignment was removed.",
+        assignmentBusNo: null,
+      },
+    })));
   } finally {
+    setIO(null);
     Bus.findOne = originals.busFindOne;
     BusChange.findOne = originals.changeFindOne;
     Bus.updateMany = originals.busUpdateMany;
     Bus.deleteOne = originals.busDeleteOne;
+    User.find = originals.userFind;
     User.updateMany = originals.userUpdateMany;
     PlanMapping.updateMany = originals.mappingUpdateMany;
     PlanMapping.deleteMany = originals.mappingDeleteMany;

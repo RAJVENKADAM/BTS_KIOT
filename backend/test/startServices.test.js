@@ -111,3 +111,64 @@ test("synchronous worker startup failure is cleaned up and can be retried", asyn
     if (cachedServicesModule) require.cache[servicesPath] = cachedServicesModule;
   }
 });
+
+test("database readiness failure schedules an automatic startup retry", async () => {
+  const servicesPath = require.resolve("../src/services/startServices");
+  const cachedServicesModule = require.cache[servicesPath];
+  const originalLoad = Module._load;
+  const originalLog = console.log;
+  const originalError = console.error;
+  const originalSetTimeout = global.setTimeout;
+  const originalClearTimeout = global.clearTimeout;
+  const readinessResolvers = [];
+  let retryCallback;
+  let workerStarts = 0;
+
+  Module._load = function (request, parent, isMain) {
+    if (parent?.filename === servicesPath && request === "../config/startup") {
+      return {
+        waitForDbReady: () =>
+          new Promise((resolve) => readinessResolvers.push(resolve)),
+      };
+    }
+    if (parent?.filename === servicesPath && request === "../workers/gpsSyncWorker") {
+      return { start: () => workerStarts++ };
+    }
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  global.setTimeout = (callback) => {
+    retryCallback = callback;
+    return { unref() {} };
+  };
+  global.clearTimeout = () => {};
+  delete require.cache[servicesPath];
+  console.log = () => {};
+  console.error = () => {};
+
+  try {
+    const { startDbDependentServices, stopDbDependentServices } =
+      require(servicesPath);
+
+    const initialStart = startDbDependentServices();
+    await new Promise((resolve) => setImmediate(resolve));
+    readinessResolvers.shift()(false);
+    await initialStart;
+    assert.equal(typeof retryCallback, "function");
+
+    retryCallback();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(readinessResolvers.length, 1);
+    readinessResolvers.shift()(true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(workerStarts, 1);
+    await stopDbDependentServices();
+  } finally {
+    Module._load = originalLoad;
+    global.setTimeout = originalSetTimeout;
+    global.clearTimeout = originalClearTimeout;
+    console.log = originalLog;
+    console.error = originalError;
+    delete require.cache[servicesPath];
+    if (cachedServicesModule) require.cache[servicesPath] = cachedServicesModule;
+  }
+});

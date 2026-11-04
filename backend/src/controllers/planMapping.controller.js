@@ -18,6 +18,7 @@ const {
   validateCluster,
 } = require("../utils/planMapping");
 const resolvePlanMappingStops = require("../utils/resolvePlanMappingStops");
+const { logSafeError } = require("../utils/safeErrorLog");
 
 const GLOBAL_ACTIVE_PLAN_KEY = "global_active_plan";
 
@@ -192,7 +193,7 @@ async function getPlanMappingData(req, res) {
       clusters: clusterData,
     });
   } catch (error) {
-    console.error("getPlanMappingData error:", error);
+    logSafeError("getPlanMappingData failed", error);
     res.status(500).json({
       success: false,
       error: "Could not load plan mapping data.",
@@ -419,7 +420,7 @@ async function savePlanMapping(req, res) {
         try {
           await Notification.insertMany(notifications);
         } catch (error) {
-          console.error("savePlanMapping notification persistence error:", error);
+          logSafeError("savePlanMapping notification persistence failed", error);
           const io = getIO();
           if (io) io.emit("bus-update", { actionType: "PLAN_MAPPING_CHANGED" });
           return res.status(500).json({
@@ -455,7 +456,7 @@ async function savePlanMapping(req, res) {
         try {
           await Notification.insertMany(notifications);
         } catch (error) {
-          console.error("savePlanMapping notification persistence error:", error);
+          logSafeError("savePlanMapping notification persistence failed", error);
           const io = getIO();
           if (io) io.emit("bus-update", { actionType: "PLAN_MAPPING_CHANGED" });
           return res.status(500).json({
@@ -481,7 +482,7 @@ async function savePlanMapping(req, res) {
     if (io) io.emit("bus-update", { actionType: "PLAN_MAPPING_CHANGED" });
     res.json({ success: true, clusterId: String(savedId) });
   } catch (error) {
-    console.error("savePlanMapping error:", error);
+    logSafeError("savePlanMapping failed", error);
     res.status(500).json({
       success: false,
       error: "Could not save this plan mapping.",
@@ -623,7 +624,7 @@ async function updatePlanMappingRoutes(req, res) {
       try {
         await Notification.insertMany(notifications);
       } catch (error) {
-        console.error("updatePlanMappingRoutes notification persistence error:", error);
+        logSafeError("updatePlanMappingRoutes notification persistence failed", error);
         const io = getIO();
         if (io) io.emit("bus-update", { actionType: "PLAN_MAPPING_CHANGED" });
         return res.status(500).json({
@@ -658,7 +659,7 @@ async function updatePlanMappingRoutes(req, res) {
       notifiedUsers: notifications.length,
     });
   } catch (error) {
-    console.error("updatePlanMappingRoutes error:", error);
+    logSafeError("updatePlanMappingRoutes failed", error);
     res.status(500).json({
       success: false,
       error: "Could not update the root bus route.",
@@ -692,7 +693,7 @@ async function deletePlanMapping(req, res) {
         try {
           await Notification.insertMany(notifications);
         } catch (error) {
-          console.error("deletePlanMapping notification persistence error:", error);
+          logSafeError("deletePlanMapping notification persistence failed", error);
           return res.status(500).json({
             success: false,
             mappingDeleted: true,
@@ -716,7 +717,7 @@ async function deletePlanMapping(req, res) {
     if (io) io.emit("bus-update", { actionType: "PLAN_MAPPING_CHANGED" });
     res.json({ success: true });
   } catch (error) {
-    console.error("deletePlanMapping error:", error);
+    logSafeError("deletePlanMapping failed", error);
     res.status(500).json({
       success: false,
       error: "Could not delete this plan mapping.",

@@ -1,7 +1,12 @@
 const mongoose = require('mongoose');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
+const {
+  disconnectUserSockets,
+  emitBusAssignmentNotification,
+} = require('../socket');
 const { escapeRegExp, parsePagination } = require('../utils/pagination');
+const { logSafeError } = require('../utils/safeErrorLog');
 
 const VALID_ROLES = ['student', 'primary_admin', 'superadmin'];
 
@@ -82,8 +87,8 @@ async function getUsers(req, res) {
       },
     });
   } catch (error) {
-    console.error('getUsers error:', error);
-    return res.status(500).json({ success: false, error: error.message });
+    logSafeError('getUsers failed', error);
+    return res.status(500).json({ success: false, error: 'Internal server error.' });
   }
 }
 
@@ -107,6 +112,7 @@ async function deleteUsers(req, res, rawIds) {
     }
 
     const result = await User.deleteMany({ _id: { $in: ids } });
+    if (result.deletedCount) disconnectUserSockets(ids);
     await Notification.deleteMany({ user_id: { $in: ids } });
     return res.status(200).json({
       success: true,
@@ -114,8 +120,8 @@ async function deleteUsers(req, res, rawIds) {
       message: `${result.deletedCount} user account(s) permanently deleted.`,
     });
   } catch (error) {
-    console.error('deleteUsers error:', error);
-    return res.status(500).json({ success: false, error: error.message });
+    logSafeError('deleteUsers failed', error);
+    return res.status(500).json({ success: false, error: 'Internal server error.' });
   }
 }
 
@@ -147,19 +153,25 @@ async function updateUsersRole(req, res) {
       return res.status(409).json({ success: false, error: accessError });
     }
 
-    await User.updateMany(
+    const changedUserIds = users
+      .filter((user) => user.role !== role)
+      .map((user) => String(user._id));
+    const result = await User.updateMany(
       { _id: { $in: ids } },
       { $set: { role } },
       { runValidators: true },
     );
+    if (result.modifiedCount && changedUserIds.length) {
+      disconnectUserSockets(changedUserIds);
+    }
     return res.status(200).json({
       success: true,
       updatedCount: ids.length,
       message: `Role updated for ${ids.length} user account(s).`,
     });
   } catch (error) {
-    console.error('updateUsersRole error:', error);
-    return res.status(500).json({ success: false, error: error.message });
+    logSafeError('updateUsersRole failed', error);
+    return res.status(500).json({ success: false, error: 'Internal server error.' });
   }
 }
 
@@ -169,16 +181,21 @@ async function updateUser(req, res) {
     const { name, role, bus_no } = req.body || {};
 
     const update = {};
+    let roleChanged = false;
+    let currentUser = null;
     if (name !== undefined) update.name = String(name).trim();
-    if (role !== undefined) {
-      if (!VALID_ROLES.includes(role)) {
-        return res.status(400).json({ success: false, error: 'Select a supported role.' });
-      }
-
-      const currentUser = await User.findById(id).select('_id role is_active').lean();
+    if (role !== undefined && !VALID_ROLES.includes(role)) {
+      return res.status(400).json({ success: false, error: 'Select a supported role.' });
+    }
+    if (role !== undefined || bus_no !== undefined) {
+      currentUser = await User.findById(id)
+        .select('_id role is_active bus_no')
+        .lean();
       if (!currentUser) {
         return res.status(404).json({ success: false, error: 'User not found' });
       }
+    }
+    if (role !== undefined) {
       if (String(currentUser._id) === String(req.user?.id || '')) {
         return res.status(409).json({
           success: false,
@@ -201,6 +218,7 @@ async function updateUser(req, res) {
           });
         }
       }
+      roleChanged = role !== currentUser.role;
       update.role = role;
     }
     if (bus_no !== undefined) update.bus_no = bus_no ? String(bus_no).trim() : null;
@@ -218,6 +236,17 @@ async function updateUser(req, res) {
       return res.status(404).json({ success: false, error: 'User not found' });
     }
 
+    const normalizeAssignment = (value) =>
+      String(value ?? '').trim().toUpperCase();
+    if (
+      bus_no !== undefined &&
+      normalizeAssignment(currentUser?.bus_no) !==
+        normalizeAssignment(updated.bus_no)
+    ) {
+      emitBusAssignmentNotification(updated._id, updated.bus_no);
+    }
+    if (roleChanged) disconnectUserSockets(id);
+
     return res.status(200).json({
       success: true,
       user: {
@@ -229,8 +258,8 @@ async function updateUser(req, res) {
       },
     });
   } catch (error) {
-    console.error('updateUser error:', error);
-    return res.status(500).json({ success: false, error: error.message });
+    logSafeError('updateUser failed', error);
+    return res.status(500).json({ success: false, error: 'Internal server error.' });
   }
 }
 

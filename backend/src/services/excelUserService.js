@@ -1,179 +1,431 @@
 const xlsx = require('xlsx');
 const User = require('../models/User');
 const normalizeBusNumber = require('../utils/normalizeBusNumber');
+const { runLimitedImportPasswordHash } = require('../utils/authProtection');
 const { sendEmail } = require('../services/emailService');
+const {
+  disconnectUserSockets,
+  emitBusAssignmentNotification,
+} = require('../socket');
+
+const IMPORT_BATCH_SIZE = 100;
+const REQUIRED_COLUMNS = [
+  'name',
+  'email',
+  'busno',
+  'role',
+  'mobile_no',
+  'date_of_year',
+];
+
+function createValidationError(summary) {
+  const error = new Error('Some workbook rows failed validation.');
+  error.statusCode = 400;
+  error.summary = summary;
+  return error;
+}
+
+function normalizeRoleValue(role) {
+  const roles = ['student', 'primary_admin', 'superadmin'];
+  const normalizedRole = (role || '').toLowerCase().trim();
+  if (normalizedRole === 'user') return 'student';
+  return roles.includes(normalizedRole) ? normalizedRole : 'student';
+}
+
+function isValidEmailValue(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email || '');
+}
+
+function normalizeWorkbookRow(row, rowNumber) {
+  const email = row.email?.toString().toLowerCase().trim();
+  const user = {
+    name: row.name?.toString().trim(),
+    email,
+    bus_no: (row.busno ?? row.bus_no)?.toString().trim()
+      ? normalizeBusNumber(row.busno ?? row.bus_no)
+      : null,
+    role: normalizeRoleValue(row.role?.toString().trim()),
+    phone: (row.mobile_no ?? row.phone)?.toString().trim(),
+    dob: (row.date_of_year ?? row.dob)?.toString().trim(),
+    rowNumber,
+  };
+
+  if (!isValidEmailValue(user.email)) {
+    return { error: 'Invalid email' };
+  }
+  if (!user.name || user.name.length < 2) {
+    return { error: 'Invalid name' };
+  }
+  if (!user.role) return { error: 'Invalid role' };
+  return { value: user };
+}
+
+function workbookRows(worksheet) {
+  const reference = worksheet['!ref'];
+  if (!reference) return function* emptyRows() {};
+  const { s, e } = xlsx.utils.decode_range(reference);
+  const header = [];
+  for (let column = s.c; column <= e.c; column += 1) {
+    const cell = worksheet[xlsx.utils.encode_cell({ r: s.r, c: column })];
+    header.push(cell?.v == null ? '' : String(cell.v).trim());
+  }
+
+  const missing = REQUIRED_COLUMNS.filter((column) => !header.includes(column));
+  if (missing.length) {
+    throw new Error('Workbook is missing required columns.');
+  }
+
+  return function* rows() {
+    for (let rowIndex = s.r + 1; rowIndex <= e.r; rowIndex += 1) {
+      const row = {};
+      let hasValue = false;
+      for (let column = s.c; column <= e.c; column += 1) {
+        const cell = worksheet[xlsx.utils.encode_cell({ r: rowIndex, c: column })];
+        const value = cell?.v ?? '';
+        const name = header[column - s.c];
+        if (name) row[name] = value;
+        if (String(value).trim()) hasValue = true;
+      }
+      if (hasValue) {
+        row._sourceRowNumber = rowIndex + 1;
+        yield row;
+      }
+    }
+  };
+}
 
 class ExcelUserService {
   async processExcelBuffer(buffer) {
+    if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+      throw new Error('The Excel workbook is empty.');
+    }
     try {
       const workbook = xlsx.read(buffer, { type: 'buffer' });
       const sheetName = workbook.SheetNames[0];
-      const worksheet = workbook.Sheets[sheetName];
-      const jsonData = xlsx.utils.sheet_to_json(worksheet);
-
-      return this.validateAndNormalizeData(jsonData);
+      if (!sheetName) throw new Error('The Excel workbook has no worksheets.');
+      const iterateRows = workbookRows(workbook.Sheets[sheetName]);
+      return { [Symbol.iterator]: iterateRows };
     } catch (error) {
       throw new Error(`Error processing Excel: ${error.message}`);
     }
   }
 
   validateAndNormalizeData(jsonData) {
-    try {
-      const requiredColumns = ['name', 'email', 'busno', 'role', 'mobile_no', 'date_of_year'];
-      const headers = Object.keys(jsonData[0] || {});
-
-      for (const col of requiredColumns) {
-        if (!headers.includes(col)) {
-          throw new Error(`Missing required column: ${col}`);
-        }
+    const seenEmails = new Set();
+    const errors = [];
+    const normalizedData = [];
+    for (const [index, row] of jsonData.entries()) {
+      const rowNumber = row?._sourceRowNumber || index + 2;
+      const normalized = normalizeWorkbookRow(row, rowNumber);
+      if (!normalized.value) {
+        errors.push({ index, rowNumber, status: 'failed', reason: normalized.error });
+        continue;
       }
-
-      const normalizedData = jsonData.map(row => ({
-        name: row.name?.toString().trim(),
-        email: row.email?.toString().toLowerCase().trim(),
-        bus_no: row.busno?.toString().trim()
-          ? normalizeBusNumber(row.busno)
-          : null,
-        role: this.normalizeRole(row.role?.toString().trim()),
-        phone: row.mobile_no?.toString().trim(),
-        dob: row.date_of_year?.toString().trim()
-      }));
-
-      for (const user of normalizedData) {
-        if (!this.isValidEmail(user.email)) {
-          throw new Error(`Invalid email: ${user.email}`);
-        }
-        if (!user.name || user.name.length < 2) {
-          throw new Error(`Invalid name: ${user.name}`);
-        }
-        if (!user.role) {
-          throw new Error(`Invalid role: ${user.role}`);
-        }
+      if (seenEmails.has(normalized.value.email)) {
+        errors.push({
+          index,
+          rowNumber,
+          status: 'failed',
+          reason: 'Duplicate email in this workbook',
+        });
+        continue;
       }
-
-      const emailCounts = {};
-      for (const user of normalizedData) {
-        emailCounts[user.email] = (emailCounts[user.email] || 0) + 1;
-      }
-      const duplicates = Object.keys(emailCounts).filter(email => emailCounts[email] > 1);
-      if (duplicates.length > 0) {
-        throw new Error(`Duplicate emails in Excel: ${duplicates.join(', ')}`);
-      }
-
-      return normalizedData;
-    } catch (error) {
-      throw new Error(`Error validating Excel: ${error.message}`);
+      seenEmails.add(normalized.value.email);
+      normalizedData.push(normalized.value);
     }
+    if (errors.length) {
+      throw createValidationError({
+        totalRows: jsonData.length,
+        validRows: normalizedData.length,
+        created: 0,
+        updated: 0,
+        failedRows: errors.length,
+        completed: true,
+        partial: false,
+        rowResults: errors,
+      });
+    }
+    return normalizedData;
   }
 
   normalizeRole(role) {
-    const roles = ['student', 'primary_admin', 'superadmin'];
-    const normalizedRole = (role || '').toLowerCase().trim();
-    if (normalizedRole === 'user') return 'student';
-    return roles.includes(normalizedRole) ? normalizedRole : 'student';
+    return normalizeRoleValue(role);
   }
 
   isValidEmail(email) {
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    return emailRegex.test(email);
+    return isValidEmailValue(email);
   }
 
   async processUsers(users, uploadedByUserId) {
-    try {
-      const results = {
-        created: [],
-        updated: [],
-        skipped: [],
-        emailsToNotify: []
-      };
+    const summary = {
+      totalRows: 0,
+      validRows: 0,
+      created: 0,
+      updated: 0,
+      skippedRows: 0,
+      duplicateRows: 0,
+      failedRows: 0,
+      completed: false,
+      partial: false,
+      rowResults: [],
+    };
+    const results = {
+      created: [],
+      updated: [],
+      skipped: [],
+      emailsToNotify: [],
+      emailsSent: 0,
+      emailsFailed: 0,
+      summary,
+    };
+    const rowsByEmail = new Set();
+    const processableEmails = new Set();
+    const validationFailures = [];
+    let index = 0;
 
-      // Get all existing active users
-      const existingUsers = await User.find({ is_active: true });
-      const existingEmails = existingUsers.map(user => user.email.toLowerCase());
+    for (const row of users) {
+      const rowNumber = Number.isInteger(row?._sourceRowNumber)
+        ? row._sourceRowNumber
+        : index + 2;
+      summary.totalRows += 1;
+      const normalized = normalizeWorkbookRow(row, rowNumber);
+      if (!normalized.value) {
+        validationFailures.push({
+          index,
+          rowNumber,
+          status: 'failed',
+          reason: normalized.error,
+        });
+      } else if (rowsByEmail.has(normalized.value.email)) {
+        summary.duplicateRows += 1;
+        validationFailures.push({
+          index,
+          rowNumber,
+          status: 'failed',
+          reason: 'Duplicate email in this workbook',
+        });
+      } else {
+        rowsByEmail.add(normalized.value.email);
+        processableEmails.add(normalized.value.email);
+        summary.validRows += 1;
+      }
+      index += 1;
+    }
 
-      // Process each user
-      for (const excelUser of users) {
-        const existingUser = existingUsers.find(user => user.email === excelUser.email);
+    summary.failedRows = validationFailures.length;
+    summary.rowResults = validationFailures;
+    if (!summary.totalRows) {
+      summary.completed = true;
+      return results;
+    }
 
-        if (existingUser) {
-          // Update existing user
-          await User.updateOne(
-            { email: excelUser.email },
-            { 
-              name: excelUser.name,
-              role: excelUser.role,
-              bus_no: excelUser.bus_no 
+    let batch = [];
+    let halted = false;
+    const processedEmails = new Set();
+    const processBatch = async () => {
+      if (!batch.length || halted) return;
+      const batchEmails = batch.map((item) => item.value.email);
+      let existingUsers;
+      try {
+        existingUsers = await User.find({
+          email: { $in: batchEmails },
+        })
+          .select('_id email name role bus_no is_active deleted_by_user')
+          .lean();
+      } catch {
+        for (const item of batch) {
+          summary.failedRows += 1;
+          summary.rowResults.push({
+            index: item.index,
+            rowNumber: item.rowNumber,
+            status: 'failed',
+            reason: 'Database lookup failed',
+          });
+        }
+        halted = true;
+        batch = [];
+        return;
+      }
+      const existingByEmail = new Map(
+        existingUsers.map((user) => [user.email.toLowerCase(), user]),
+      );
+      const notifications = [];
+
+      for (const item of batch) {
+        if (halted) {
+          summary.failedRows += 1;
+          summary.rowResults.push({
+            index: item.index,
+            rowNumber: item.rowNumber,
+            status: 'failed',
+            reason: 'Not processed after an earlier database failure',
+          });
+          continue;
+        }
+        const existing = existingByEmail.get(item.value.email);
+        try {
+          if (existing?.is_active === false || existing?.deleted_by_user) {
+            summary.skippedRows += 1;
+            summary.rowResults.push({
+              index: item.index,
+              rowNumber: item.rowNumber,
+              status: 'skipped',
+              reason: 'Matching account is inactive and was not changed',
+            });
+            results.skipped.push(item.value.email);
+            continue;
+          }
+
+          if (existing) {
+            const updateResult = await User.updateOne(
+              { email: item.value.email },
+              {
+                name: item.value.name,
+                role: item.value.role,
+                bus_no: item.value.bus_no,
+              },
+            );
+            if (updateResult.modifiedCount) {
+              const id = String(existing._id);
+              if (
+                String(existing.bus_no ?? '').trim().toUpperCase() !==
+                String(item.value.bus_no ?? '').trim().toUpperCase()
+              ) {
+                try {
+                  emitBusAssignmentNotification(id, item.value.bus_no);
+                } catch {
+                  console.error('Unable to deliver a committed bus assignment notification.');
+                }
+              }
+              if (existing.role !== item.value.role) {
+                try {
+                  disconnectUserSockets(id);
+                } catch {
+                  console.error('Unable to revoke a committed user session.');
+                }
+              }
             }
-          );
-
-          results.updated.push({
-            email: excelUser.email,
-            name: excelUser.name,
-            role: excelUser.role,
-            bus_no: excelUser.bus_no
-          });
-
+            results.updated.push({
+              email: item.value.email,
+              name: item.value.name,
+              role: item.value.role,
+              bus_no: item.value.bus_no,
+            });
+            summary.updated += 1;
+            notifications.push({
+              email: item.value.email,
+              name: item.value.name,
+              type: 'updated',
+            });
+          } else {
+            const permanentPassword = this.generatePermanentPassword(
+              item.value.phone,
+              item.value.dob,
+            );
+            await runLimitedImportPasswordHash(() =>
+              User.create({
+                name: item.value.name,
+                email: item.value.email,
+                password_hash: permanentPassword,
+                role: item.value.role,
+                bus_no: item.value.bus_no,
+                is_active: true,
+              }),
+            );
+            results.created.push({
+              email: item.value.email,
+              name: item.value.name,
+              role: item.value.role,
+              bus_no: item.value.bus_no,
+            });
+            summary.created += 1;
+            notifications.push({
+              email: item.value.email,
+              name: item.value.name,
+              permanentPassword,
+              type: 'new',
+            });
+          }
           results.emailsToNotify.push({
-            email: excelUser.email,
-            name: excelUser.name,
-            type: 'updated'
+            email: item.value.email,
+            name: item.value.name,
+            type: existing ? 'updated' : 'new',
           });
-        } else {
-          // Create new user
-          const permanentPassword = this.generatePermanentPassword(excelUser.phone, excelUser.dob);
-          
-          await User.create({
-            name: excelUser.name,
-            email: excelUser.email,
-            password_hash: permanentPassword,  // Will be hashed by pre-save middleware
-            role: excelUser.role,
-            bus_no: excelUser.bus_no,
-            is_active: true
+        } catch {
+          summary.failedRows += 1;
+          summary.rowResults.push({
+            index: item.index,
+            rowNumber: item.rowNumber,
+            status: 'failed',
+            reason: 'Database write failed',
           });
-
-          results.created.push({
-            email: excelUser.email,
-            name: excelUser.name,
-            role: excelUser.role,
-            bus_no: excelUser.bus_no
-          });
-
-          results.emailsToNotify.push({
-            email: excelUser.email,
-            name: excelUser.name,
-            permanentPassword: permanentPassword,
-            type: 'new'
-          });
+          halted = true;
         }
       }
 
-      // Deactivate users not in Excel
-      const excelEmails = users.map(user => user.email);
-      const usersToDeactivate = existingEmails.filter(email => !excelEmails.includes(email));
-
-      for (const email of usersToDeactivate) {
-        await User.updateOne(
-          { email },
-          { is_active: false }
-        );
-        results.skipped.push(email);
+      if (notifications.length) {
+        const delivery = await this.sendNotifications(notifications);
+        results.emailsSent += delivery.filter((item) => item.status === 'sent').length;
+        results.emailsFailed += delivery.filter((item) => item.status === 'failed').length;
       }
+      batch = [];
+    };
 
-      return results;
-    } catch (error) {
-      throw new Error(`Error processing users: ${error.message}`);
+    let processIndex = 0;
+    for (const row of users) {
+      const source = {
+        row,
+        index: processIndex,
+        rowNumber: Number.isInteger(row?._sourceRowNumber)
+          ? row._sourceRowNumber
+          : processIndex + 2,
+      };
+      processIndex += 1;
+      const sourceEmail = normalizeWorkbookRow(
+        source.row,
+        source.rowNumber,
+      ).value?.email;
+      if (!sourceEmail || !processableEmails.has(sourceEmail)) continue;
+      if (processedEmails.has(sourceEmail)) continue;
+      processedEmails.add(sourceEmail);
+      const normalized = normalizeWorkbookRow(
+        source.row,
+        source.rowNumber,
+      );
+      if (!halted) {
+        batch.push({
+          ...source,
+          value: normalized.value,
+        });
+        if (batch.length >= IMPORT_BATCH_SIZE) {
+          await processBatch();
+        }
+      } else {
+        summary.failedRows += 1;
+        summary.rowResults.push({
+          index: source.index,
+          rowNumber: source.rowNumber,
+          status: 'failed',
+          reason: 'Not processed after an earlier database failure',
+        });
+      }
     }
+    await processBatch();
+
+    summary.completed = !halted && summary.failedRows === validationFailures.length;
+    summary.partial =
+      summary.skippedRows > 0 ||
+      (summary.failedRows > 0 && summary.created + summary.updated > 0);
+    return results;
   }
 
   generatePermanentPassword(phone, dob) {
     const phoneDigits = phone.replace(/\D/g, '').substring(0, 4);
-    const birthYear = dob.toString();
-    return phoneDigits + birthYear;
+    return phoneDigits + dob.toString();
   }
 
   async sendNotifications(emailsToNotify) {
     const notifications = [];
-
     for (const userData of emailsToNotify) {
       try {
         if (userData.type === 'new') {
@@ -186,9 +438,9 @@ Your BTMS account has been created.
 Password: ${userData.permanentPassword}
 
 Best regards,
-BTMS Team`
+BTMS Team`,
           );
-        } else if (userData.type === 'updated') {
+        } else {
           await sendEmail(
             userData.email,
             'Your BTMS Account Updated',
@@ -197,16 +449,18 @@ BTMS Team`
 Your BTMS account has been updated.
 
 Best regards,
-BTMS Team`
+BTMS Team`,
           );
         }
         notifications.push({ email: userData.email, status: 'sent' });
       } catch (error) {
-        console.error(`Error sending email to ${userData.email}:`, error.message);
+        console.error('Excel user notification delivery failed:', {
+          name: error?.name || 'Error',
+          code: error?.code || null,
+        });
         notifications.push({ email: userData.email, status: 'failed' });
       }
     }
-
     return notifications;
   }
 }

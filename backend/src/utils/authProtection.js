@@ -6,13 +6,19 @@ const MAX_AUTH_OPERATIONS = 8;
 const MAX_QUEUED_AUTH_OPERATIONS = 16;
 const MAX_PASSWORD_CHECKS = 4;
 const MAX_QUEUED_PASSWORD_CHECKS = 64;
+const {
+  MAX_CONCURRENT_IMPORT_PASSWORD_HASHES,
+  MAX_QUEUED_IMPORT_PASSWORD_HASHES,
+} = require("./userImportLimits");
 
 const loginAttempts = new Map();
 let nextReservationId = 0;
 let activeAuthOperations = 0;
 let activePasswordChecks = 0;
+let activeImportPasswordHashes = 0;
 const authOperationQueue = [];
 const passwordCheckQueue = [];
+const importPasswordHashQueue = [];
 
 const createBusyError = () => {
   const error = new Error('Authentication service is busy');
@@ -132,10 +138,27 @@ const runLimitedPasswordCheck = (task) =>
     maxQueued: MAX_QUEUED_PASSWORD_CHECKS,
   });
 
+const runLimitedImportPasswordHash = (task) =>
+  runWithLimit(task, {
+    get active() {
+      return activeImportPasswordHashes;
+    },
+    increment: () => {
+      activeImportPasswordHashes += 1;
+    },
+    decrement: () => {
+      activeImportPasswordHashes -= 1;
+    },
+    queue: importPasswordHashQueue,
+    maxActive: MAX_CONCURRENT_IMPORT_PASSWORD_HASHES,
+    maxQueued: MAX_QUEUED_IMPORT_PASSWORD_HASHES,
+  });
+
 module.exports = {
   reserveLoginAttempt,
   releaseLoginAttempt,
   clearLoginAttempts,
   runLimitedAuthOperation,
   runLimitedPasswordCheck,
+  runLimitedImportPasswordHash,
 };

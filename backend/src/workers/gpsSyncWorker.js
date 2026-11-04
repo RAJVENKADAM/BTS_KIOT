@@ -133,6 +133,20 @@ class GpsSyncWorker {
     this.inFlightCycle = null;
     this.activeCycleId = null;
     this.skippedTimerTicks = 0;
+    this.lastCycleMetrics = null;
+  }
+
+  getStatus() {
+    return {
+      started: this.started,
+      stopping: this.stopping,
+      syncIntervalMs: this.syncIntervalMs,
+      activeCycleId: this.activeCycleId,
+      skippedTimerTicks: this.skippedTimerTicks,
+      lastCycle: this.lastCycleMetrics
+        ? { ...this.lastCycleMetrics }
+        : null,
+    };
   }
 
   start() {
@@ -140,9 +154,10 @@ class GpsSyncWorker {
     this.started = true;
     this.stopped = false;
 
-    console.log(
-      `GPS sync worker started: interval=${GPS_SYNC_INTERVAL_MS}ms, staleThreshold=${this.staleThresholdMs}ms`,
-    );
+    logGpsEvent("GPS_WORKER_STARTED", {
+      intervalMs: GPS_SYNC_INTERVAL_MS,
+      staleThresholdMs: this.staleThresholdMs,
+    });
 
     this.runCycle().catch((error) =>
       logGpsEvent("GPS_CYCLE_UNHANDLED_FAILURE", {
@@ -449,6 +464,7 @@ class GpsSyncWorker {
       metrics.completedAt = new Date().toISOString();
       metrics.durationMs = elapsedMs(cycleStarted);
       metrics.skippedTimerTicks = this.skippedTimerTicks;
+      this.lastCycleMetrics = { ...metrics };
       logGpsEvent("GPS_CYCLE_COMPLETED", metrics);
     }
   }
