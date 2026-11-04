@@ -32,7 +32,7 @@ function getAssignedBusDisplay(user, assignedBus) {
 async function loadPlanState() {
   const [buses, routes, clusters, users] = await Promise.all([
     Bus.find({})
-      .select("_id bus_no preview_number status altered_to_bus_id combined_routes")
+      .select("_id bus_no preview_number status altered_to_bus_id alteration_type combined_routes")
       .lean(),
     BusRoute.find({}).select("bus_id plan_name arrival_time").lean(),
     PlanMapping.find({})
@@ -57,6 +57,7 @@ async function loadPlanState() {
       busByIdentifier.set(normalizeIdentifier(bus.preview_number), id);
     }
   }
+  const busById = new Map(buses.map((bus) => [String(bus._id), bus]));
   for (const route of routes) {
     const id = String(route.bus_id);
     if (!plansByBusId.has(id)) plansByBusId.set(id, new Set());
@@ -76,8 +77,8 @@ async function loadPlanState() {
       {
         plans: [...plans],
         status:
-          buses.find((bus) => String(bus._id) === id)?.status === "inactive" &&
-          !buses.find((bus) => String(bus._id) === id)?.altered_to_bus_id
+          busById.get(id)?.status === "inactive" &&
+          !busById.get(id)?.altered_to_bus_id
             ? "inactive"
             : "active",
       },
@@ -87,7 +88,7 @@ async function loadPlanState() {
     busByIdentifier.get(normalizeIdentifier(user.bus_no)) || null,
   );
 
-  return { buses, busesById, busIdsByUser, clusters, users };
+  return { buses, busesById, busIdsByUser, clusters, users, routes };
 }
 
 function getCoverageErrors(state, planName, clusters = state.clusters) {

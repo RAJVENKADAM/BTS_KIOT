@@ -1,0 +1,266 @@
+I’ll trace the login path from the frontend through backend middleware, auth/OTP, database, and deployment settings, then compare the observed failure modes against the actual code. I’ll hold off on edits until I can explain which changes are justified and why.
+
+Ran terminal command: git status --short; Get-ChildItem -Force | Select-Object Name,Mode; Get-ChildItem -Recurse -File -Include '*vercel*','*render*','*railway*','*netlify*','Dockerfile*','docker-compose*','Procfile','*.yml','*.yaml' | Select-Object -ExpandProperty FullName
+
+Search for `login|sign.?in|otp|rate.?limit|express-rate-limit|Too many requests|429|JWT|j...`
+
+Find files matching `**/*`
+
+Search for `express|cors|helmet|trust proxy|rate|mongoose|MongoClient|createConnection|po...`
+
+Read 
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\frontend\\src\\context\\AuthContext.js"
+}
+
+Read 
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\frontend\\src\\screens\\LoginScreen.js"
+}
+
+Read 
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\frontend\\src\\utils\\errorHandler.js"
+}
+
+Read 
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\backend\\src\\routes\\auth.routes.js"
+}
+
+Read 
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\backend\\src\\controllers\\auth.controller.js"
+}
+
+Read 
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\backend\\src\\app.js"
+}
+
+Read 
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\backend\\server.js"
+}
+
+Read 
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\backend\\src\\config\\mongodb.js"
+}
+
+Read 
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\backend\\src\\services\\emailService.js"
+}
+
+The code already shows a strong candidate: the login route has its own per-client-IP limiter at 10 attempts per 15 minutes, while users behind the same campus/NAT address can share that IP. I’m checking the frontend’s request count and error parsing, startup/database behavior, and whether deployment files introduce another limiter before treating that as the confirmed root cause.
+
+Read , lines 175 to 265
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\frontend\\src\\context\\AuthContext.js",
+  "view_range": [
+    175,
+    265
+  ]
+}
+
+Read 
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\frontend\\src\\api\\api.js"
+}
+
+Read 
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\frontend\\package.json"
+}
+
+Read 
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\backend\\package.json"
+}
+
+Read 
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\backend\\src\\config\\startup.js"
+}
+
+Read 
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\backend\\src\\models\\User.js"
+}
+
+Read , lines 1 to 230
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\frontend\\App.js",
+  "view_range": [
+    1,
+    230
+  ]
+}
+
+Search for `connectDB|MONGODB_URI|DB_NAME|render|vercel|railway|fly\.io|heroku|express-ra...`
+
+Ran terminal command: git status --short; Get-ChildItem -Force | Where-Object { $_.Name -match 'render|vercel|railway|netlify|fly|Dockerfile|Procfile|nginx|\.env' } | Select-Object Name,Mode; Get-ChildItem -Force .github | Select-Object Name,Mode
+
+`Inspect repository state and deployment files` completed
+
+Read Terminal
+Completed with input: {
+  "shellId": "0",
+  "delay": 0
+}
+
+Read 
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\frontend\\src\\components\\UI\\Button.js"
+}
+
+Read , lines 1 to 175
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\frontend\\src\\context\\AuthContext.js",
+  "view_range": [
+    1,
+    175
+  ]
+}
+
+Read 
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\backend\\test\\auth-middleware.test.js"
+}
+
+Search for `loginLimiter|windowMs|limit:|standardHeaders|RateLimit|/api/auth/login|Too ma...`
+
+Ran terminal command: git status --short --untracked-files=no; Get-ChildItem -Force -File | Where-Object { $_.Name -match '^\.env|render|vercel|railway|netlify|fly|Dockerfile|Procfile|nginx' } | Select-Object Name
+
+Read , lines 1 to 180
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\backend\\README.md",
+  "view_range": [
+    1,
+    180
+  ]
+}
+
+Read , lines 190 to 250
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\frontend\\src\\utils\\errorHandler.js",
+  "view_range": [
+    190,
+    250
+  ]
+}
+
+The limiter, not the database or OTP path, explains the precise 10-versus-20 cutoff in the checked-in code. I’ve also found a separate frontend parsing behavior that can turn a non-JSON upstream error into “unexpected response”; I’m confirming those paths and the available deployment evidence so I can clearly separate what the repository proves from what would require live server logs.
+
+Read , lines 1 to 115
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\frontend\\src\\context\\BusContext.js",
+  "view_range": [
+    1,
+    115
+  ]
+}
+
+Search for `loginLimiter|windowMs|limit:|message:|router\.post\('/login'|const login =|/a...`
+
+Search for `EXPO_PUBLIC_API_BASE_URL|bts-kiot\.onrender\.com|onrender\.com|DATABASE_URL|M...`
+
+Search for `otp|one.time.password|verify.*email|sendEmail\(`
+
+Ran terminal command: git status --short; Get-ChildItem -Force -File | Select-Object -ExpandProperty Name; Get-ChildItem -Force backend -File | Select-Object -ExpandProperty Name
+
+Read , lines 115 to 240
+Completed with input: {
+  "path": "E:\\My Works\\College Products\\BTS\\frontend\\src\\context\\BusContext.js",
+  "view_range": [
+    115,
+    240
+  ]
+}
+
+Ran terminal command: $files = @('.env','backend\.env','frontend\.env'); foreach ($file in $files) { if (Test-Path $file) { Write-Output "[$file]"; Get-Content $file | ForEach-Object { if ($_ -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=') { $Matches[1] } } } }
+
+Search for `maxPoolSize|poolSize|maxConnecting|serverSelectionTimeoutMS|socketTimeoutMS`
+
+Search for `app\.use\("/api"|const apiLimiter|const loginLimiter|router\.post\('/login'|c...`
+
+## 1. Root cause
+
+The code contains an application-level login limit of **10 requests per client IP in a 15-minute window**. The limiter runs before the login handler, and its key is the request IP—not the user or email. So when classmates share a campus Wi-Fi/NAT address, the 11th login request from that address can be rejected, even if it is from a different legitimate user with correct credentials.
+
+That matches the reported threshold: **10 users can succeed; a larger same-IP group gets 429s.** The rejected requests do not reach password verification or the database.
+
+## 2. Evidence
+
+- The login limiter is configured for `10` requests per `15 minutes` and returns `{ error: 'Too many login attempts. Please try again later.' }`: `auth.routes.js`.
+- It is attached directly to `POST /login`, before `login`: `auth.routes.js`.
+- The server trusts one proxy hop, so Express determines the client IP from the proxied request: `server.js`.
+- There is also a broader API limit of 300 requests per IP per 15 minutes: `app.js`. Twenty login requests alone do not reach that limit; the route-specific limit of 10 is the relevant one.
+- The frontend targets `https://bts-kiot.onrender.com` by default: `api.js`.
+
+**Expected application-generated response:** HTTP **429** with the route limiter’s JSON error body. The frontend currently translates any 429 to “Too many requests. Please wait a moment and try again.” rather than displaying the backend’s more specific message: `errorHandler.js`.
+
+The repository proves this application-level 429 path. It does **not** include Render request logs or a captured failing response, so I cannot verify whether every reported 429 came from this middleware or identify an upstream response for a particular test.
+
+## 3. Request flow and where it fails
+
+**User → Frontend → API → Middleware → Authentication → Database/OTP → Response**
+
+1. The login screen calls `login` once: `LoginScreen.js` and `AuthContext.js`.
+2. The frontend sends `POST /api/auth/login` to the configured API: `AuthContext.js`.
+3. The global API limiter allows up to 300 requests/IP/15 minutes; the login-route limiter then allows up to 10/IP/15 minutes: `app.js` and `auth.routes.js`.
+4. **For request 11 and onward from the same IP in that window, the route limiter returns 429 here. The authentication handler is not called.**
+5. Requests that pass the limiter query the user, compare the password, sign a JWT, and look up an assigned bus preview: `auth.controller.js`.
+
+There is no OTP step in this login path. The email service is used by user-import code, not login: `excelUserService.js`. JWT creation is stateless for login; there is no shared session state involved.
+
+## 4. Why 10 work but 20+ fail
+
+The configured quota is **10 attempts per IP**, not 10 attempts per user. The limiter counts requests, including successful ones. A classroom’s shared public IP therefore reaches the quota after roughly 10 login submissions; the next users can be rejected until the window expires.
+
+This is a **rate-limit policy threshold**, not evidence that MongoDB can only serve 10 simultaneous users. The login route does have database and password-hashing work after the limiter—one user lookup, bcrypt comparison, JWT signing, and potentially a bus lookup: `auth.controller.js` and `User.js`. Those could affect latency under load, but they do not explain this deterministic 10-request cutoff.
+
+The Mongo connection code sets no small pool limit: `mongodb.js`. A database outage can produce a 503 from the readiness middleware, and login exceptions are logged while returned as generic 500s: `app.js` and `auth.controller.js`. Neither is the configured 429 path.
+
+## 5. Duplicate requests, retries, and other limits
+
+I found no automatic retry in the login flow. The login button sets loading during the request, and the shared button disables itself while loading: `LoginScreen.js` and `Button.js`. With no stored token, startup does not add a login request; bus startup loads cached data rather than calling the login endpoint.
+
+The backend limiter uses its default in-memory store. If the Render service runs multiple instances, counters are per instance rather than shared, so the effective limit can vary between instances. The repository has no checked-in Render deployment configuration to confirm its instance count or any platform-level limit.
+
+## 6. Why the frontend can show an “unexpected response”
+
+The frontend parses the response as JSON **before** checking whether it is an HTTP error. If the response is HTML or otherwise non-JSON, parsing throws `INVALID_RESPONSE`: `errorHandler.js` and `errorHandler.js`. The error handler prioritizes that code over the HTTP status, producing “The server returned an unexpected response”: `errorHandler.js`.
+
+The application’s own login limiter returns JSON, so its 429 should be displayed as the generic 429 message—not as an invalid response. An “unexpected response” may indicate a non-JSON response from a proxy/host or another malformed response, but the repository alone cannot identify its origin. A captured status, response body/content type, headers, and corresponding Render logs are needed to distinguish that case.
+
+## 7. Exact, production-safe fix to make
+
+I have **not changed any files**. Before making changes, these are the changes I recommend and why:
+
+1. **Replace the single 10-per-IP login rule with two limits.** Keep an IP-level burst limit sized for the real class login burst—for example, 60 requests per IP per 15 minutes, allowing 30 users plus retries—and add a separate failed-attempt limit keyed by normalized account email, such as 5 failed attempts per account per 15 minutes.  
+   **Why:** the existing rule treats all classmates behind NAT as one user. The IP limit still caps abuse from one source; the account limit preserves protection against repeated password guesses. The account limiter should count failures, use a generic response, and avoid revealing whether an email exists.
+
+2. **Use a shared rate-limit store if the service has multiple instances.**  
+   **Why:** the current in-memory counter is per process; a shared store makes the policy consistent across replicas. If deployment is a single instance, this is not required for the immediate fix.
+
+3. **Handle non-JSON error responses without discarding their HTTP status.**  
+   **Why:** when a response is non-JSON, preserve its status and map (for example) a 429 to a clear throttling message; reserve “unexpected response” for malformed successful responses. Keep upstream HTML/body details out of the user-facing message.
+
+The global 300/IP API limit need not be raised for this reported 20–30 login burst. OTP/email changes are not indicated by the login code. For a live incident, check the deployed service’s instance count and logs; the backend logs the underlying exception for login 500s, while the route-generated 429 short-circuits before that handler.
+
+## 8. Verification procedure
+
+Run this against **staging** first, using dedicated test accounts and one shared source IP. Capture each request’s status, response body, rate-limit headers, and server logs.
+
+| Test | Procedure | Expected result after the fix |
+|---|---|---|
+| 1 user | Submit one valid login. | One login request; HTTP 200; valid user and JWT response. |
+| 10 users | Submit valid logins concurrently from the same IP, using distinct accounts. | All 10 succeed; no 429 or 5xx responses. |
+| 20 users | Submit 20 distinct valid logins concurrently from the same IP. | All 20 succeed; no IP-limit 429s. |
+| 30+ users | Submit at least 30 distinct valid logins concurrently from the same IP. | All succeed within the configured burst limit; no 5xx responses. |
+| Security check | Submit more than the configured failed-attempt allowance for one test account, then try another account from the same IP. | The first account is temporarily throttled; the other account remains able to log in. |
+| Error handling | In staging, exercise a controlled non-JSON 429/error response. | The frontend shows the status-appropriate message, not “unexpected response.” |
+
+For comparison, with the current code, 11 or more requests from one IP within the 15-minute window are expected to hit the route limiter. I did not run load tests against the live service or make code changes.

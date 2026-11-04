@@ -7,7 +7,10 @@ const BusLiveLocation = require("../src/models/BusLiveLocation");
 const BusRoute = require("../src/models/BusRoute");
 const PlanMapping = require("../src/models/PlanMapping");
 const StopMaster = require("../src/models/StopMaster");
-const { getLiveLocation } = require("../src/controllers/bus.controller");
+const {
+  getLiveLocation,
+  trackByPreview,
+} = require("../src/controllers/bus.controller");
 
 function createResponse() {
   return {
@@ -35,6 +38,18 @@ function emptyQuery(result = []) {
   };
 }
 
+function valueQuery(result) {
+  return {
+    select() {
+      return this;
+    },
+    sort() {
+      return this;
+    },
+    lean: async () => (result?.lean ? result.lean() : result),
+  };
+}
+
 async function withModelMocks(mocks, run) {
   const originals = {
     appSettingFindOne: AppSetting.findOne,
@@ -48,12 +63,18 @@ async function withModelMocks(mocks, run) {
   };
 
   AppSetting.findOne = mocks.appSettingFindOne;
-  Bus.findOne = mocks.busFindOne;
+  Bus.findOne = (...args) => valueQuery(mocks.busFindOne(...args));
   Bus.find = mocks.busFind || (() => emptyQuery());
   Bus.findById = mocks.busFindById || (async () => null);
-  BusLiveLocation.findOne = mocks.liveLocationFindOne;
+  BusLiveLocation.findOne = (...args) =>
+    valueQuery(mocks.liveLocationFindOne(...args));
   BusRoute.find = mocks.busRouteFind || (() => emptyQuery());
-  PlanMapping.findOne = mocks.planMappingFindOne || (() => emptyQuery(null));
+  PlanMapping.findOne = (...args) =>
+    valueQuery(
+      mocks.planMappingFindOne
+        ? mocks.planMappingFindOne(...args)
+        : null,
+    );
   StopMaster.find = mocks.stopMasterFind || (() => emptyQuery());
 
   try {
@@ -98,7 +119,14 @@ test("returns the altered bus identity and GPS for an assigned bus", async () =>
     {
       appSettingFindOne: () => ({ lean: async () => null }),
       busFindOne: async () => sourceBus,
-      busFindById: async () => replacementBus,
+      busFind: (filter) =>
+        emptyQuery(
+          filter._id
+            ? filter._id.$in.includes(String(replacementId))
+              ? [replacementBus]
+              : []
+            : [],
+        ),
       liveLocationFindOne: async () => location,
     },
     async () => {
@@ -113,6 +141,7 @@ test("returns the altered bus identity and GPS for an assigned bus", async () =>
       assert.equal(response.payload.previewNumber, "21");
       assert.equal(response.payload.latitude, 11.5);
       assert.equal(response.payload.longitude, 78);
+      assert.equal(response.payload.gpsOfflineThresholdMs, 180_000);
       assert.equal(response.payload.alteration.originalPreview, undefined);
       assert.match(response.payload.alteration.message, /use Bus 21/);
       assert.equal("bus_no" in response.payload, false);
@@ -158,7 +187,14 @@ test("returns the mapped location bus identity after a global plan change", asyn
     {
       appSettingFindOne: () => ({ lean: async () => ({ value: "PLAN B" }) }),
       busFindOne: async () => assignedBus,
-      busFindById: async (id) => busesById.get(String(id)) || null,
+      busFind: (filter) =>
+        emptyQuery(
+          filter._id
+            ? filter._id.$in
+                .map((id) => busesById.get(String(id)))
+                .filter(Boolean)
+            : [],
+        ),
       liveLocationFindOne: async () => location,
       planMappingFindOne: () => ({
         lean: async () => ({
@@ -182,6 +218,70 @@ test("returns the mapped location bus identity after a global plan change", asyn
       assert.equal(response.payload.longitude, 78.1);
       assert.match(response.payload.alteration.message, /use Bus 31/);
       assert.match(response.payload.alteration.message, /Bus 21's stops/);
+    },
+  );
+});
+
+test("primary admins and superadmins retain their existing live-location access and privacy", async () => {
+  const bus = {
+    _id: new mongoose.Types.ObjectId(),
+    bus_no: "BUS-12",
+    preview_number: "12",
+    altered_to_bus_id: null,
+  };
+  await withModelMocks(
+    {
+      appSettingFindOne: () => ({ lean: async () => null }),
+      busFindOne: async () => bus,
+      liveLocationFindOne: async () => null,
+    },
+    async () => {
+      const primaryAdminResponse = createResponse();
+      await getLiveLocation(
+        { params: { busNo: "BUS-12" }, user: { role: "primary_admin" } },
+        primaryAdminResponse,
+      );
+      assert.equal(primaryAdminResponse.statusCode, 200);
+      assert.equal(primaryAdminResponse.payload.busNo, "12");
+      assert.equal("bus_no" in primaryAdminResponse.payload, false);
+
+      const superadminResponse = createResponse();
+      await getLiveLocation(
+        { params: { busNo: "BUS-12" }, user: { role: "superadmin" } },
+        superadminResponse,
+      );
+      assert.equal(superadminResponse.statusCode, 200);
+      assert.equal(superadminResponse.payload.busNo, "BUS-12");
+      assert.equal(superadminResponse.payload.bus_no, "BUS-12");
+    },
+  );
+});
+
+test("track-by-preview retains its public response shape and bus isolation", async () => {
+  const bus = {
+    _id: new mongoose.Types.ObjectId(),
+    bus_no: "BUS-12",
+    preview_number: "12",
+    altered_to_bus_id: null,
+  };
+  await withModelMocks(
+    {
+      appSettingFindOne: () => ({ lean: async () => null }),
+      busFindOne: async () => bus,
+      liveLocationFindOne: async () => null,
+    },
+    async () => {
+      const response = createResponse();
+      await trackByPreview(
+        { params: { previewNumber: "12" }, user: { role: "student" } },
+        response,
+      );
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.payload.previewNumber, "12");
+      assert.equal(response.payload.busNo, "12");
+      assert.equal("bus_no" in response.payload, false);
+      assert.equal(response.payload.status, "offline");
     },
   );
 });

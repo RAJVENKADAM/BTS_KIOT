@@ -17,7 +17,7 @@ const {
   normalizeArrivalTime,
   validateCluster,
 } = require("../utils/planMapping");
-const findVerifiedStop = require("../utils/findVerifiedStop");
+const resolvePlanMappingStops = require("../utils/resolvePlanMappingStops");
 
 const GLOBAL_ACTIVE_PLAN_KEY = "global_active_plan";
 
@@ -41,14 +41,13 @@ async function getPlanMappingData(req, res) {
         .lean(),
       BusRoute.find({}).select("bus_id plan_name stopId stop_name stop_order arrival_time").lean(),
       PlanMapping.find({})
-        .populate("root_bus_id", "_id bus_no preview_number status")
-        .populate("location_bus_id", "_id bus_no preview_number status")
-        .populate("member_bus_ids", "_id bus_no preview_number status")
+        .select("plan_name cluster_name root_bus_id location_bus_id member_bus_ids")
         .sort({ plan_name: 1, cluster_name: 1 })
         .lean(),
-      User.find({ role: "student", is_active: true })
-        .select("bus_no")
-        .lean(),
+      User.aggregate([
+        { $match: { role: "student", is_active: true } },
+        { $group: { _id: "$bus_no", count: { $sum: 1 } } },
+      ]),
       getCurrentPlan(),
     ]);
 
@@ -109,9 +108,16 @@ async function getPlanMappingData(req, res) {
         identifierToBusId.set(String(bus.preview_number).trim().toUpperCase(), String(bus._id));
       }
     }
-    for (const user of users) {
-      const id = identifierToBusId.get(String(user.bus_no || "").trim().toUpperCase());
-      if (id) userCountByBus.set(id, (userCountByBus.get(id) || 0) + 1);
+    for (const assignment of users) {
+      const id = identifierToBusId.get(
+        String(assignment._id || "").trim().toUpperCase(),
+      );
+      if (id) {
+        userCountByBus.set(
+          id,
+          (userCountByBus.get(id) || 0) + assignment.count,
+        );
+      }
     }
 
     const clusterState = clusters.map((cluster) => ({
@@ -124,8 +130,11 @@ async function getPlanMappingData(req, res) {
         String(member?._id || member),
       ),
     }));
-    const busIdsByUser = users.map((user) =>
-      identifierToBusId.get(String(user.bus_no || "").trim().toUpperCase()) || null,
+    const busIdsByUser = users.map(
+      (assignment) =>
+        identifierToBusId.get(
+          String(assignment._id || "").trim().toUpperCase(),
+        ) || null,
     );
     const inUseBusIds = getInUseLocationBusIds(
       busIdsByUser,
@@ -147,26 +156,33 @@ async function getPlanMappingData(req, res) {
           bus.status === "active" || bus.alteration_type === "alter",
       };
     });
+    const busOptionsById = new Map(
+      busOptions.map((bus) => [bus.id, bus]),
+    );
 
-    const clusterData = clusters.map((cluster) => ({
-      id: String(cluster._id),
-      planName: cluster.plan_name,
-      clusterName: cluster.cluster_name,
-      rootBus: cluster.root_bus_id
-        ? busOptions.find((bus) => bus.id === String(cluster.root_bus_id._id))
-        : null,
-      locationBus: cluster.location_bus_id
-        ? busOptions.find((bus) => bus.id === String(cluster.location_bus_id._id))
-        : null,
-      memberBuses: (cluster.member_bus_ids || [])
-        .map((member) =>
-          busOptions.find((bus) => bus.id === String(member._id)),
-        )
-        .filter(Boolean),
-      rootStops: (routesByBusAndPlan.get(
-        `${String(cluster.root_bus_id?._id)}:${cluster.plan_name}`,
-      ) || []).sort((a, b) => a.stopOrder - b.stopOrder),
-    }));
+    const clusterData = clusters.map((cluster) => {
+      const rootBusId = String(cluster.root_bus_id?._id || cluster.root_bus_id);
+      const locationBusId = cluster.location_bus_id
+        ? String(cluster.location_bus_id?._id || cluster.location_bus_id)
+        : null;
+      return {
+        id: String(cluster._id),
+        planName: cluster.plan_name,
+        clusterName: cluster.cluster_name,
+        rootBus: busOptionsById.get(rootBusId) || null,
+        locationBus: locationBusId
+          ? busOptionsById.get(locationBusId) || null
+          : null,
+        memberBuses: (cluster.member_bus_ids || [])
+          .map((member) =>
+            busOptionsById.get(String(member?._id || member)),
+          )
+          .filter(Boolean),
+        rootStops: (routesByBusAndPlan.get(
+          `${rootBusId}:${cluster.plan_name}`,
+        ) || []).sort((a, b) => a.stopOrder - b.stopOrder),
+      };
+    });
 
     res.json({
       success: true,
@@ -219,16 +235,15 @@ async function savePlanMapping(req, res) {
       });
     }
 
-    const [buses, routes, existingClusters, currentPlan, assignmentState] = await Promise.all([
-      Bus.find({})
-        .select("_id bus_no preview_number status alteration_type combined_routes")
-        .lean(),
-      BusRoute.find({}).select("bus_id plan_name").lean(),
-      PlanMapping.find({}).lean(),
+    const [currentPlan, assignmentState] = await Promise.all([
       getCurrentPlan(),
       loadPlanState(),
     ]);
+    const { buses, routes, clusters: existingClusters } = assignmentState;
     const busIds = new Set(buses.map((bus) => String(bus._id)));
+    const busesByIdMap = new Map(
+      buses.map((bus) => [String(bus._id), bus]),
+    );
     if (
       !busIds.has(String(rootBusId)) ||
       normalizedMembers.some((id) => !busIds.has(id)) ||
@@ -239,8 +254,11 @@ async function savePlanMapping(req, res) {
         error: "Every selected bus must exist.",
       });
     }
+    const existingClustersById = new Map(
+      existingClusters.map((cluster) => [String(cluster._id), cluster]),
+    );
     const editedCluster = clusterId
-      ? existingClusters.find((cluster) => String(cluster._id) === String(clusterId))
+      ? existingClustersById.get(String(clusterId))
       : null;
     if (clusterId && !editedCluster) {
       return res.status(404).json({ success: false, error: "Cluster not found." });
@@ -258,9 +276,7 @@ async function savePlanMapping(req, res) {
           error: "A mapped member bus cannot also be the temporary location bus.",
         });
       }
-      const locationBus = buses.find(
-        (bus) => String(bus._id) === locationBusId,
-      );
+      const locationBus = busesByIdMap.get(locationBusId);
       const currentLocationBusId = editedCluster?.location_bus_id
         ? String(editedCluster.location_bus_id)
         : null;
@@ -354,9 +370,7 @@ async function savePlanMapping(req, res) {
       currentPlan === planName ? assignmentState.clusters : [];
     const operations = otherClusters
       .filter((cluster) => {
-        const existing = existingClusters.find(
-          (item) => String(item._id) === String(cluster._id),
-        );
+        const existing = existingClustersById.get(String(cluster._id));
         const oldMembers = (existing?.member_bus_ids || []).map(String).sort();
         const nextMembers = (cluster.member_bus_ids || []).map(String).sort();
         return (
@@ -492,31 +506,27 @@ async function updatePlanMappingRoutes(req, res) {
       });
     }
 
-    const normalizedStops = [];
-    for (const [index, input] of stops.entries()) {
-      const stopName = String(input?.stopName || "").trim();
+    const stopNames = stops.map((input) =>
+      String(input?.stopName || "").trim(),
+    );
+    for (const [index, stopName] of stopNames.entries()) {
       if (!stopName) {
         return res.status(400).json({
           success: false,
           error: `Enter a stop name for route row ${index + 1}.`,
         });
       }
-      let stop;
-      let ambiguous = false;
-      if (input?.stopId) {
-        stop = await StopMaster.findOne({ stopId: String(input.stopId) }).lean();
-        if (stop && stop.name.trim().toLowerCase() !== stopName.toLowerCase()) {
-          stop = null;
-        }
-      } else {
-        ({ stop, ambiguous } = await findVerifiedStop({ name: stopName }));
-        if (!stop && !ambiguous) {
-          stop = await StopMaster.findOne({
-            status: "PENDING",
-            name: stopName,
-          }).lean();
-        }
-      }
+    }
+    const resolvedStops = await resolvePlanMappingStops(
+      stops.map((input, index) => ({
+        stopId: input?.stopId,
+        stopName: stopNames[index],
+      })),
+    );
+    const normalizedStops = [];
+    for (const [index, input] of stops.entries()) {
+      const stopName = stopNames[index];
+      const { stop, ambiguous } = resolvedStops[index];
       if (!stop) {
         return res.status(400).json({
           success: false,

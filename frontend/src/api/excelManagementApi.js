@@ -97,10 +97,10 @@ export const excelManagementApi = {
   },
 
   // Get users by Excel upload
-  getUsersByUpload: async (token, id) => {
+  getUsersByUpload: async (token, id, { page = 1, limit = 100 } = {}) => {
     try {
       const data = await fetchJson(
-        `${API_BASE_URL}/api/excel-management/${id}/users`,
+        `${API_BASE_URL}/api/excel-management/${id}/users?page=${page}&limit=${limit}`,
         {
           method: "GET",
           headers: {

@@ -16,6 +16,10 @@ import { API_BASE_URL } from "../api/api";
 import { useAuth } from "./AuthContext";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { fetchJson, getErrorMessage } from "../utils/errorHandler";
+const { updateBusStatus } = require("./busLocationState.cjs");
+const {
+  isPermanentSocketAuthenticationError,
+} = require("../utils/socketConnectionPolicy.cjs");
 
 const BusContext = createContext();
 
@@ -43,21 +47,7 @@ const busReducer = (state, action) => {
     case "SET_SELECTED_BUS":
       return { ...state, selectedBus: action.payload };
     case "UPDATE_BUS_STATUS":
-      return {
-        ...state,
-        buses: state.buses.map((bus) =>
-          // Match and update by previewNumber (privacy: internal bus_no is not exposed to clients)
-          bus.previewNumber && action.payload.previewNumber && (
-            String(bus.previewNumber) === String(action.payload.previewNumber)
-          )
-            ? { ...bus, ...action.payload }
-            : bus,
-        ),
-        selectedBus:
-          state.selectedBus && state.selectedBus.previewNumber && action.payload.previewNumber && String(state.selectedBus.previewNumber) === String(action.payload.previewNumber)
-                ? { ...state.selectedBus, ...action.payload }
-                : state.selectedBus,
-      };
+      return updateBusStatus(state, action.payload);
     case "SET_SELECTED_PREVIEW":
       return { ...state, selectedPreviewNumber: action.payload };
     case "SET_LOCATION":
@@ -133,7 +123,6 @@ export const BusProvider = ({ children }) => {
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
-      reconnectionAttempts: 5,
     });
 
     newSocket.on("connect", () => {
@@ -148,6 +137,9 @@ export const BusProvider = ({ children }) => {
 
     newSocket.on("connect_error", (error) => {
       console.log("BusContext socket connect error:", error.message);
+      if (isPermanentSocketAuthenticationError(error)) {
+        newSocket.io.reconnection(false);
+      }
     });
 
     newSocket.on("bus-update", (data) => {

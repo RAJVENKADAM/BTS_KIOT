@@ -10,14 +10,57 @@ const normalizeBusNumber = require("../utils/normalizeBusNumber");
 const getBus = () => require("../models/Bus");
 const getBusLiveLocation = () => require("../models/BusLiveLocation");
 
-function registerTrackSocketHandlers() {
-  const io = getIO();
+function normalizeSocketIdentifier(value) {
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  if (typeof value === "number" && !Number.isFinite(value)) return null;
+  const identifier = String(value).trim();
+  return identifier || null;
+}
+
+function registerTrackSocketHandlers({
+  io = getIO(),
+  BusModel = getBus(),
+  BusLiveLocationModel = getBusLiveLocation(),
+} = {}) {
   if (!io) return;
+  const activePreviewLookups = new Map();
+
+  const findActivePreview = async (previewNumber) => {
+    let lookup = activePreviewLookups.get(previewNumber);
+    if (!lookup) {
+      lookup = Promise.resolve()
+        .then(() =>
+          BusModel.findOne({
+            preview_number: previewNumber,
+            status: "active",
+          })
+            .select("_id")
+            .lean(),
+        )
+        .catch((error) => {
+          console.error(
+            `Preview room validation failed for ${previewNumber}: ${error?.message || error}`,
+          );
+          throw error;
+        });
+      activePreviewLookups.set(previewNumber, lookup);
+    }
+
+    try {
+      return await lookup;
+    } finally {
+      if (activePreviewLookups.get(previewNumber) === lookup) {
+        activePreviewLookups.delete(previewNumber);
+      }
+    }
+  };
 
   io.on("connection", (socket) => {
     const authenticatedUserId = String(socket.user.id);
     let locationRequests = 0;
     let locationWindowStarted = Date.now();
+    let disconnected = false;
+    const pendingPreviewRooms = new Map();
     socket.join(`user_${authenticatedUserId}`);
 
     socket.on("join-user", (userId) => {
@@ -28,32 +71,70 @@ function registerTrackSocketHandlers() {
     // Join a room for a specific preview number to receive live updates.
     // Use preview_ prefix to avoid exposing internal bus_no to clients.
     socket.on("join-bus", async (previewNumber) => {
+      const identifier = normalizeSocketIdentifier(previewNumber);
+      if (!identifier || disconnected) return;
+      const room = `preview_${identifier}`;
+      if (
+        socket.rooms.has(room) ||
+        pendingPreviewRooms.has(identifier)
+      ) {
+        return;
+      }
+
+      const joinAttempt = {};
+      pendingPreviewRooms.set(identifier, joinAttempt);
       try {
-        if (!previewNumber) return;
-        const Bus = getBus();
-        const bus = await Bus.findOne({
-          preview_number: String(previewNumber).trim(),
-          status: "active",
-        }).select("_id").lean();
-        if (!bus) return;
-        const room = `preview_${String(previewNumber)}`;
-        socket.join(room);
+        let bus;
+        try {
+          bus = await findActivePreview(identifier);
+        } catch {
+          return;
+        }
+        if (
+          !bus ||
+          disconnected ||
+          socket.connected === false ||
+          pendingPreviewRooms.get(identifier) !== joinAttempt
+        ) {
+          return;
+        }
+        await socket.join(room);
+        const stillSubscribed =
+          !disconnected &&
+          socket.connected !== false &&
+          pendingPreviewRooms.get(identifier) === joinAttempt;
+        if (!stillSubscribed) await socket.leave(room);
       } catch (error) {
-        console.error("join-bus error:", error.message);
+        console.error(
+          `Preview room join failed for ${identifier}: ${error?.message || error}`,
+        );
+      } finally {
+        if (pendingPreviewRooms.get(identifier) === joinAttempt) {
+          pendingPreviewRooms.delete(identifier);
+        }
       }
     });
 
     // Leave a room for a specific preview
-    socket.on("leave-bus", (previewNumber) => {
-      if (!previewNumber) return;
-      const room = `preview_${String(previewNumber)}`;
-      socket.leave(room);
+    socket.on("leave-bus", async (previewNumber) => {
+      const identifier = normalizeSocketIdentifier(previewNumber);
+      if (!identifier) return;
+      pendingPreviewRooms.delete(identifier);
+      const room = `preview_${identifier}`;
+      try {
+        await socket.leave(room);
+      } catch (error) {
+        console.error(
+          `Preview room leave failed for ${identifier}: ${error?.message || error}`,
+        );
+      }
     });
 
     // Client requests the latest location for a bus (search by bus_no or preview).
     // Response payload deliberately avoids exposing internal bus_no. Returns previewNumber and location only.
     socket.on("request-bus-location", async (busIdentifier) => {
-      if (!busIdentifier) return;
+      const identifier = normalizeSocketIdentifier(busIdentifier);
+      if (!identifier || disconnected) return;
       const now = Date.now();
       if (now - locationWindowStarted >= 60_000) {
         locationWindowStarted = now;
@@ -62,31 +143,39 @@ function registerTrackSocketHandlers() {
       locationRequests += 1;
       if (locationRequests > 30) {
         return socket.emit("locationUpdate", {
-          previewNumber: busIdentifier,
+            previewNumber: identifier,
           error: "Too many location requests",
         });
       }
       try {
-        const Bus = getBus();
-        const BusLiveLocation = getBusLiveLocation();
-
         // Resolve bus by bus_no first, then by preview_number.
-        let bus = await Bus.findOne({
-          bus_no: normalizeBusNumber(busIdentifier),
-        });
+        let bus = await BusModel.findOne({
+            bus_no: normalizeBusNumber(identifier),
+        })
+            .select("_id bus_no preview_number")
+            .lean();
+        if (disconnected || socket.connected === false) return;
         if (!bus) {
-          bus = await Bus.findOne({
-            preview_number: { $in: [busIdentifier, String(busIdentifier)] },
-          });
+            bus = await BusModel.findOne({
+              preview_number: { $in: [identifier, String(identifier)] },
+            })
+              .select("_id bus_no preview_number")
+              .lean();
+            if (disconnected || socket.connected === false) return;
         }
         if (!bus) {
-          return socket.emit("locationUpdate", {
-            previewNumber: busIdentifier,
-            error: "Bus not found",
-          });
+            return socket.emit("locationUpdate", {
+              previewNumber: identifier,
+              error: "Bus not found",
+            });
         }
 
-        const location = await BusLiveLocation.findOne({ bus_id: bus._id });
+        const location = await BusLiveLocationModel.findOne({ bus_id: bus._id })
+            .select(
+              "latitude longitude speed is_online source lastSuccessfulGpsUpdate updatedAt",
+            )
+          .lean();
+        if (disconnected || socket.connected === false) return;
 
         // Privacy: do NOT send internal bus_no. Use previewNumber only.
         const payload = {
@@ -103,13 +192,22 @@ function registerTrackSocketHandlers() {
           lastUpdated: location
             ? location.lastSuccessfulGpsUpdate || location.updatedAt
             : null,
+          gpsOfflineThresholdMs:
+            Number(process.env.GPS_OFFLINE_THRESHOLD_MS) || 3 * 60 * 1000,
         };
 
         socket.emit("locationUpdate", payload);
       } catch (err) {
         console.error("request-bus-location error:", err.message);
-        socket.emit("locationUpdate", { error: err.message });
+        if (!disconnected && socket.connected !== false) {
+          socket.emit("locationUpdate", { error: "Location is unavailable" });
+        }
       }
+    });
+
+    socket.on("disconnect", () => {
+      disconnected = true;
+      pendingPreviewRooms.clear();
     });
   });
 }

@@ -1,6 +1,13 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Bus = require('../models/Bus');
+const {
+  reserveLoginAttempt,
+  releaseLoginAttempt,
+  clearLoginAttempts,
+  runLimitedAuthOperation,
+  runLimitedPasswordCheck,
+} = require('../utils/authProtection');
 
 const getAssignedBusPreview = async (busNo) => {
   if (!busNo) return null;
@@ -21,51 +28,88 @@ const getAssignedBusPreview = async (busNo) => {
 };
 
 const login = async (req, res) => {
+  let email;
+  let reservationId;
   try {
-    const { email, password } = req.body;
+    const { email: submittedEmail, password } = req.body;
 
-    // Validate input
-    if (!email || !password) {
+    if (
+      typeof submittedEmail !== 'string' ||
+      typeof password !== 'string' ||
+      !submittedEmail.trim() ||
+      !password ||
+      submittedEmail.trim().length > 254 ||
+      password.length > 1024
+    ) {
       return res.status(400).json({
-        error: 'Email and password are required'
+        error: 'Email and password are required',
+        code: 'INVALID_CREDENTIALS',
       });
     }
 
-    // Find user by email
-    const user = await User.findOne({ email: email.toLowerCase() });
+    email = submittedEmail.trim().toLowerCase();
+    const attempt = reserveLoginAttempt(email);
+    if (!attempt.allowed) {
+      res.set('Retry-After', String(attempt.retryAfter));
+      return res.status(429).json({
+        error: 'Too many login attempts. Please wait before trying again.',
+        code: 'LOGIN_RATE_LIMITED',
+        retryAfter: attempt.retryAfter,
+      });
+    }
+    reservationId = attempt.reservationId;
 
-    if (!user) {
+    const result = await runLimitedAuthOperation(async () => {
+      const user = await User.findOne({ email }).select(
+        '_id name email role bus_no is_active temp_password deleted_by_user password_hash',
+      );
+
+      if (!user) return { type: 'invalid' };
+
+      if (user.deleted_by_user) {
+        return { type: 'deleted' };
+      }
+
+      if (!user.is_active && user.role !== 'superadmin' && !user.temp_password) {
+        return { type: 'inactive' };
+      }
+
+      const isValidPassword = await runLimitedPasswordCheck(() =>
+        user.comparePassword(password),
+      );
+      return isValidPassword
+        ? { type: 'authenticated', user }
+        : { type: 'invalid' };
+    });
+
+    if (result.type === 'invalid') {
       return res.status(401).json({
-        error: 'Invalid credentials'
+        error: 'Invalid credentials',
+        code: 'INVALID_CREDENTIALS',
       });
     }
 
-    // Enhanced login logic:
-    // 1. If deleted by user -> Block login completely
-    // 2. If SUPERADMIN -> Allow login even if inactive (system admin access)
-    // 3. If temp password -> Allow login to change password (unless deleted)
-    // 4. Regular users inactive -> Block login
-
-    if (user.deleted_by_user) {
+    if (result.type === 'deleted') {
+      releaseLoginAttempt(email, reservationId);
+      reservationId = undefined;
       return res.status(401).json({
-        error: 'Account has been deleted. Credentials are invalid.'
+        error: 'Account has been deleted. Credentials are invalid.',
+        code: 'ACCOUNT_DELETED',
       });
     }
 
-    if (!user.is_active && user.role !== 'superadmin' && !user.temp_password) {
+    if (result.type === 'inactive') {
+      releaseLoginAttempt(email, reservationId);
+      reservationId = undefined;
       return res.status(401).json({
-        error: 'Account deactivated. Contact admin.'
+        error: 'Account deactivated. Contact admin.',
+        code: 'ACCOUNT_DEACTIVATED',
       });
     }
 
-    // Verify password using schema method
-    const isValidPassword = await user.comparePassword(password);
-
-    if (!isValidPassword) {
-      return res.status(401).json({
-        error: 'Invalid credentials'
-      });
-    }
+    const user = result.user;
+    clearLoginAttempts(email);
+    reservationId = undefined;
 
     // Generate JWT token
     const token = jwt.sign(
@@ -97,9 +141,21 @@ const login = async (req, res) => {
     });
 
   } catch (error) {
+    if (email && reservationId !== undefined) {
+      releaseLoginAttempt(email, reservationId);
+    }
+    if (error.status === 503) {
+      res.set('Retry-After', String(error.retryAfter || 2));
+      return res.status(503).json({
+        error: 'Authentication service is busy. Please try again shortly.',
+        code: error.code || 'AUTH_BUSY',
+        retryAfter: error.retryAfter || 2,
+      });
+    }
     console.error('Login error:', error);
     res.status(500).json({
-      error: 'Internal server error'
+      error: 'Internal server error',
+      code: 'INTERNAL_SERVER_ERROR',
     });
   }
 };

@@ -2,7 +2,7 @@
  * LoginScreen — User authentication screen.
  * Handles email/password login via AuthContext, validates account status.
  */
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import {
   View,
   StyleSheet,
@@ -26,15 +26,18 @@ export default function LoginScreen() {
   const [isPasswordVisible, setIsPasswordVisible] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const loginInFlightRef = useRef(false);
 
   const { login } = useAuth();
 
   const handleLogin = async () => {
+    if (loginInFlightRef.current) return;
     if (!email.trim() || !password.trim()) {
       setError("Please fill in all fields");
       return;
     }
 
+    loginInFlightRef.current = true;
     setLoading(true);
     setError("");
 
@@ -55,6 +58,7 @@ export default function LoginScreen() {
     } catch (err) {
       setError(getErrorMessage(err, "Unable to sign in. Please try again."));
     } finally {
+      loginInFlightRef.current = false;
       setLoading(false);
     }
   };

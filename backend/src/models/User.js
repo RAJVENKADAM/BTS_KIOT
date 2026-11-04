@@ -66,6 +66,9 @@ userSchema.pre('save', async function () {
   this.password_hash = await bcrypt.hash(this.password_hash, salt);
 });
 
+userSchema.index({ role: 1, is_active: 1, bus_no: 1 });
+userSchema.index({ excel_upload_id: 1, is_active: 1, _id: 1 });
+
 // Compare password method
 userSchema.methods.comparePassword = async function (password) {
   return await bcrypt.compare(password, this.password_hash);

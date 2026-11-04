@@ -11,6 +11,7 @@ const {
 
 test("lists authorized users and excludes deactivated accounts", async () => {
   const originalFind = User.find;
+  const originalCountDocuments = User.countDocuments;
   const records = [
     { _id: "active-id", name: "Active", is_active: true },
     { _id: "legacy-id", name: "Legacy" },
@@ -21,10 +22,108 @@ test("lists authorized users and excludes deactivated accounts", async () => {
     return {
       select: () => ({
         sort: () => ({
-          lean: async () => records,
+          skip: () => ({
+            limit: () => ({ lean: async () => records }),
+          }),
         }),
       }),
     };
+  };
+  User.countDocuments = async () => records.length;
+  const response = {
+    statusCode: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.payload = payload;
+      return this;
+    },
+  };
+
+  try {
+    await getUsers({ query: {} }, response);
+
+    assert.deepEqual(filter, { is_active: { $ne: false } });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.payload.users.map((user) => user.id), [
+      "active-id",
+      "legacy-id",
+    ]);
+    assert.deepEqual(response.payload.pagination, {
+      page: 1,
+      limit: 100,
+      total: 2,
+      totalPages: 1,
+      hasNextPage: false,
+      hasPreviousPage: false,
+    });
+  } finally {
+    User.find = originalFind;
+    User.countDocuments = originalCountDocuments;
+  }
+});
+
+test("paginates superadmin users, clamps limits, and escapes search input", async () => {
+  const originalFind = User.find;
+  const originalCountDocuments = User.countDocuments;
+  let filter;
+  let skip;
+  let limit;
+  User.find = (query) => {
+    filter = query;
+    return {
+      select: () => ({
+        sort: () => ({
+          skip: (value) => {
+            skip = value;
+            return {
+              limit: (pageSize) => {
+                limit = pageSize;
+                return { lean: async () => [] };
+              },
+            };
+          },
+        }),
+      }),
+    };
+  };
+  User.countDocuments = async () => 0;
+  const response = {
+    statusCode: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.payload = payload;
+      return this;
+    },
+  };
+
+  try {
+    await getUsers(
+      { query: { page: "3", limit: "500", search: ".*" } },
+      response,
+    );
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(skip, 400);
+    assert.equal(limit, 200);
+    assert.equal(filter.$or[0].name.source, "\\.\\*");
+    assert.equal(response.payload.pagination.limit, 200);
+    assert.equal(response.payload.pagination.hasPreviousPage, true);
+  } finally {
+    User.find = originalFind;
+    User.countDocuments = originalCountDocuments;
+  }
+});
+
+test("rejects invalid superadmin user pagination", async () => {
+  const originalFind = User.find;
+  User.find = () => {
+    throw new Error("Must not query users for invalid pagination.");
   };
   const response = {
     statusCode: null,
@@ -39,14 +138,9 @@ test("lists authorized users and excludes deactivated accounts", async () => {
   };
 
   try {
-    await getUsers({}, response);
-
-    assert.deepEqual(filter, { is_active: { $ne: false } });
-    assert.equal(response.statusCode, 200);
-    assert.deepEqual(response.payload.users.map((user) => user.id), [
-      "active-id",
-      "legacy-id",
-    ]);
+    await getUsers({ query: { limit: "nope" } }, response);
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.payload.success, false);
   } finally {
     User.find = originalFind;
   }

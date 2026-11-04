@@ -98,4 +98,6 @@ const busSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+busSchema.index({ altered_to_bus_id: 1, alteration_type: 1 });
+
 module.exports = mongoose.model('Bus', busSchema);

@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
+const { escapeRegExp, parsePagination } = require('../utils/pagination');
 
 const VALID_ROLES = ['student', 'primary_admin', 'superadmin'];
 
@@ -45,14 +46,40 @@ async function preserveSuperadminAccess(users, req, changingRole) {
 
 async function getUsers(req, res) {
   try {
-    const users = await User.find({ is_active: { $ne: false } })
+    const pagination = parsePagination(req.query || {}, {
+      defaultLimit: 100,
+      maxLimit: 200,
+    });
+    if (pagination.error) {
+      return res.status(400).json({ success: false, error: pagination.error });
+    }
+
+    const filter = { is_active: { $ne: false } };
+    if (pagination.search) {
+      const search = new RegExp(escapeRegExp(pagination.search), 'i');
+      filter.$or = [{ name: search }, { email: search }];
+    }
+    const [users, total] = await Promise.all([
+      User.find(filter)
       .select('name email role bus_no is_active')
       .sort({ name: 1, email: 1 })
-      .lean();
+      .skip(pagination.skip)
+      .limit(pagination.limit)
+      .lean(),
+      User.countDocuments(filter),
+    ]);
 
     return res.status(200).json({
       success: true,
       users: users.map((user) => ({ ...user, id: String(user._id) })),
+      pagination: {
+        page: pagination.page,
+        limit: pagination.limit,
+        total,
+        totalPages: Math.ceil(total / pagination.limit),
+        hasNextPage: pagination.skip + users.length < total,
+        hasPreviousPage: pagination.page > 1,
+      },
     });
   } catch (error) {
     console.error('getUsers error:', error);

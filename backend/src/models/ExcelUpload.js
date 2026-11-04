@@ -23,4 +23,6 @@ const excelUploadSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+excelUploadSchema.index({ uploaded_by: 1, createdAt: -1 });
+
 module.exports = mongoose.model('ExcelUpload', excelUploadSchema);

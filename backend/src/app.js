@@ -20,10 +20,11 @@ if (process.env.NODE_ENV === "production") {
 }
 
 const helmet = require("helmet");
-const rateLimit = require("express-rate-limit");
+const { rateLimit, ipKeyGenerator } = require("express-rate-limit");
 
 const morgan = require("morgan");
 const jwt = require("jsonwebtoken");
+const { createSocketAuthentication } = require("./socket/authenticateSocket");
 
 const app = express();
 
@@ -61,6 +62,26 @@ const apiLimiter = rateLimit({
   limit: 300,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req) => {
+    const authorization = req.headers.authorization || "";
+    const token = authorization.match(/^Bearer\s+(.+)$/i)?.[1];
+    if (token && process.env.JWT_SECRET) {
+      try {
+        const user = jwt.verify(token, process.env.JWT_SECRET);
+        if (user?.id) return `user:${String(user.id)}`;
+      } catch {
+        // Invalid tokens remain subject to the unauthenticated IP limit.
+      }
+    }
+    return ipKeyGenerator(req.ip);
+  },
+  skip: (req) => req.path === "/auth/login",
+  handler: (_req, res) => {
+    res.status(429).json({
+      error: "Too many requests. Please try again later.",
+      code: "RATE_LIMITED",
+    });
+  },
 });
 
 app.use("/api", apiLimiter);
@@ -75,23 +96,7 @@ const io = socketIo(server, {
   cors: corsOptions,
 });
 
-io.use((socket, next) => {
-  const token =
-    socket.handshake.auth?.token ||
-    socket.handshake.headers.authorization?.replace(/^Bearer\s+/i, "");
-
-  if (!token || !process.env.JWT_SECRET) {
-    return next(new Error("Authentication required"));
-  }
-
-  jwt.verify(token, process.env.JWT_SECRET, (error, user) => {
-    if (error || !user?.id) {
-      return next(new Error("Invalid or expired token"));
-    }
-    socket.user = { ...user, id: String(user.id) };
-    next();
-  });
-});
+io.use(createSocketAuthentication(jwt));
 
 setIO(io);
 

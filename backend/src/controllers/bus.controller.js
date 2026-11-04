@@ -14,14 +14,19 @@ const {
   getPlanChangeNotifications,
   loadPlanState,
 } = require("../services/planMappingService");
-const resolveBusServiceRoutes = require("../utils/resolveBusServiceRoutes");
 const {
   resolveAssignedBusRoutes,
 } = require("../utils/resolveBusServiceRoutes");
-const selectAlterationRoutes = require("../utils/selectAlterationRoutes");
-const findVerifiedStop = require("../utils/findVerifiedStop");
 const isReusableTemporaryChangeSource = require("../utils/isReusableTemporaryChangeSource");
 const normalizeStopName = require("../utils/normalizeStopName");
+const {
+  BUS_READ_FIELDS,
+  getBusRouteRows: getContextBusRouteRows,
+  getIncomingBusChanges: getContextIncomingBusChanges,
+  getRoutesForBus: getContextRoutesForBus,
+  loadBusReadContext,
+  resolveEffectiveBus: resolveEffectiveBusFromContext,
+} = require("../utils/busReadContext");
 const {
   getEffectiveBusId,
   normalizeArrivalTime,
@@ -118,25 +123,15 @@ async function resolveEffectiveBus(bus) {
     if (visited.has(currentId)) break;
     visited.add(currentId);
 
-    const nextBus = await Bus.findById(effectiveBus.altered_to_bus_id);
+    const nextBus = await Bus.findById(effectiveBus.altered_to_bus_id)
+      .select(BUS_READ_FIELDS)
+      .lean();
     if (!nextBus) break;
     effectiveBus = nextBus;
     depth += 1;
   }
 
   return effectiveBus;
-}
-
-async function resolvePlanMappingBus(bus, planName) {
-  if (!bus || planName === "PLAN A") return bus;
-  const mapping = await PlanMapping.findOne({
-    plan_name: planName,
-    member_bus_ids: bus._id,
-  })
-    .select("root_bus_id")
-    .lean();
-  if (!mapping) return bus;
-  return (await Bus.findById(mapping.root_bus_id)) || bus;
 }
 
 async function resolvePlanMappingAssignment(bus, planName) {
@@ -146,34 +141,71 @@ async function resolvePlanMappingAssignment(bus, planName) {
   const mapping = await PlanMapping.findOne({
     plan_name: planName,
     $or: [{ root_bus_id: bus._id }, { member_bus_ids: bus._id }],
-  }).lean();
+  })
+    .select("root_bus_id location_bus_id member_bus_ids")
+    .lean();
   if (!mapping) {
     return { routeBus: bus, locationBus: bus, hasTemporaryLocationBus: false };
   }
   const isMember = (mapping.member_bus_ids || []).some(
     (memberBusId) => String(memberBusId) === String(bus._id),
   );
-  const routeBus = isMember
-    ? (await Bus.findById(mapping.root_bus_id)) || bus
-    : bus;
   const hasTemporaryLocationBus = Boolean(mapping.location_bus_id);
+  const relatedBusIds = [
+    ...(isMember ? [mapping.root_bus_id] : []),
+    ...(hasTemporaryLocationBus ? [mapping.location_bus_id] : []),
+  ];
+  const relatedBuses = relatedBusIds.length
+    ? await Bus.find({ _id: { $in: relatedBusIds } })
+        .select(BUS_READ_FIELDS)
+        .lean()
+    : [];
+  const relatedBusesById = new Map(
+    relatedBuses.map((relatedBus) => [String(relatedBus._id), relatedBus]),
+  );
+  const routeBus = isMember
+    ? relatedBusesById.get(String(mapping.root_bus_id)) || bus
+    : bus;
   const locationBus = hasTemporaryLocationBus
-    ? (await Bus.findById(mapping.location_bus_id)) || routeBus
+    ? relatedBusesById.get(String(mapping.location_bus_id)) || routeBus
     : routeBus;
   return { routeBus, locationBus, hasTemporaryLocationBus };
 }
 
+async function loadEffectiveRoutesForAllPlans(bus, relatedBuses = []) {
+  const mappings = await PlanMapping.find({
+    plan_name: { $in: DEFAULT_PLAN_NAMES.filter((plan) => plan !== "PLAN A") },
+    member_bus_ids: bus._id,
+  })
+    .select("plan_name root_bus_id")
+    .lean();
+  const rootIdsByPlan = new Map();
+  for (const mapping of mappings) {
+    if (!rootIdsByPlan.has(mapping.plan_name)) {
+      rootIdsByPlan.set(mapping.plan_name, mapping.root_bus_id);
+    }
+  }
+  const rootIds = [...new Set([...rootIdsByPlan.values()].map(String))];
+  const roots = rootIds.length
+    ? await Bus.find({ _id: { $in: rootIds } })
+        .select(BUS_READ_FIELDS)
+        .lean()
+    : [];
+  const rootsById = new Map(roots.map((root) => [String(root._id), root]));
+  const context = await loadBusReadContext([bus, ...relatedBuses, ...roots]);
+  const routeGroups = DEFAULT_PLAN_NAMES.map((planName) => {
+    const rootId = rootIdsByPlan.get(planName);
+    const planBus = rootId ? rootsById.get(String(rootId)) || bus : bus;
+    return getContextRoutesForBus(context, planBus).filter(
+      (route) => normalizeRoutePlanName(route?.plan_name) === planName,
+    );
+  });
+  return { routes: routeGroups.flat(), context };
+}
+
 async function getEffectiveRoutesForAllPlans(bus) {
-  const routeGroups = await Promise.all(
-    DEFAULT_PLAN_NAMES.map(async (planName) => {
-      const planBus = await resolvePlanMappingBus(bus, planName);
-      const routes = await getRoutesForBus(planBus);
-      return routes.filter(
-        (route) => normalizeRoutePlanName(route?.plan_name) === planName,
-      );
-    }),
-  );
-  return routeGroups.flat();
+  const { routes } = await loadEffectiveRoutesForAllPlans(bus);
+  return routes;
 }
 
 function buildAlterationDetails(sourceBus, effectiveBus) {
@@ -234,118 +266,20 @@ function buildReplacementDetails(bus, incomingChanges) {
 }
 
 async function getRoutesForBus(bus) {
-  if (bus.combined_route_source && bus.combined_routes?.length) {
-    return hydrateRouteRows(bus.combined_routes);
-  }
-  const sourceRoutes = await getBusRouteRows(bus._id);
-  const isCombined = bus.alteration_type === "combine";
-  const targetRoutes =
-    isCombined && bus.altered_to_bus_id
-      ? await getBusRouteRows(bus.altered_to_bus_id)
-      : [];
-
-  const selectedRoutes = selectAlterationRoutes(
-    bus.alteration_route_source,
-    sourceRoutes,
-    targetRoutes,
-    bus.alteration_routes,
-  );
-  if (selectedRoutes) return hydrateRouteRows(selectedRoutes);
-
-  const incomingChanges = await getIncomingBusChanges(bus);
-  const incomingRouteGroups = await Promise.all(
-    incomingChanges.map(async (changedBus) => {
-      const changedBusRoutes = await getBusRouteRows(changedBus._id);
-      const selectedChangedRoutes = selectAlterationRoutes(
-        changedBus.alteration_route_source,
-        changedBusRoutes,
-        sourceRoutes,
-        changedBus.alteration_routes,
-      );
-      return {
-        alterationType: changedBus.alteration_type,
-        hasRouteSelection: !!changedBus.alteration_route_source,
-        routes: selectedChangedRoutes || changedBusRoutes,
-      };
-    }),
-  );
-
-  return hydrateRouteRows(
-    resolveBusServiceRoutes(sourceRoutes, incomingRouteGroups, targetRoutes),
-  );
+  const context = await loadBusReadContext([bus]);
+  return getContextRoutesForBus(context, bus);
 }
 
 async function getAssignedBusRoutes(bus) {
-  const sourceRoutes = await getBusRouteRows(bus._id);
+  const context = await loadBusReadContext([bus]);
+  const sourceRoutes = getContextBusRouteRows(context, bus._id);
   const targetRoutes = bus.altered_to_bus_id
-    ? await getBusRouteRows(bus.altered_to_bus_id)
+    ? getContextBusRouteRows(context, bus.altered_to_bus_id)
     : [];
-  return hydrateRouteRows(
-    resolveAssignedBusRoutes(bus, sourceRoutes, targetRoutes),
-  );
+  return resolveAssignedBusRoutes(bus, sourceRoutes, targetRoutes);
 }
 
-async function getBusRouteRows(busId) {
-  const rows = await BusRoute.find({ bus_id: busId })
-    .select("plan_name stop_name stop_order stopId arrival_time")
-    .sort({ plan_name: 1, stop_order: 1 })
-    .lean();
-  const existingIds = rows.map((row) => row.stopId).filter(Boolean);
-  const existingStops = existingIds.length
-    ? await StopMaster.find({ stopId: { $in: existingIds } })
-        .select("stopId")
-        .lean()
-    : [];
-  const existingIdSet = new Set(existingStops.map((stop) => stop.stopId));
-  const activeRows = [];
-
-  for (const row of rows) {
-    if (row.stopId) {
-      if (existingIdSet.has(row.stopId)) activeRows.push(row);
-      continue;
-    }
-
-    const { stop } = await findVerifiedStop({ name: row.stop_name });
-    let stopId = stop?.stopId;
-    if (!stopId) {
-      const key = String(row.stop_name).trim().replace(/\s+/g, " ").toLowerCase();
-      const exact = new RegExp(`^${escapeRegExp(key)}$`, "i");
-      const pendingStop = await StopMaster.findOne({
-        status: "PENDING",
-        name: exact,
-      }).select("stopId").lean();
-      stopId = pendingStop?.stopId;
-    }
-    if (!stopId) continue;
-    await BusRoute.updateOne({ _id: row._id }, { $set: { stopId } });
-    row.stopId = stopId;
-    activeRows.push(row);
-  }
-
-  return hydrateRouteRows(activeRows);
-}
-
-async function hydrateRouteRows(routes) {
-  const stopIds = [...new Set(routes.map((route) => route.stopId).filter(Boolean))];
-  const stops = stopIds.length
-    ? await StopMaster.find({ stopId: { $in: stopIds } })
-        .select("stopId name latitude longitude status")
-        .lean()
-    : [];
-  const stopMap = new Map(stops.map((stop) => [stop.stopId, stop]));
-  return routes.map((route) => {
-    const stop = stopMap.get(route.stopId);
-    return {
-      ...route,
-      stop_name: stop?.status === "VERIFIED" ? stop.name : route.stop_name,
-      latitude: stop?.latitude ?? null,
-      longitude: stop?.longitude ?? null,
-      stopStatus: stop?.status || "PENDING",
-    };
-  });
-}
-
-async function getRouteSelectionLabel(bus, incomingChanges) {
+async function getRouteSelectionLabel(bus, incomingChanges, busesById) {
   const selectedChange =
     (bus.alteration_route_source && bus) ||
     incomingChanges.find((change) => change.alteration_route_source);
@@ -360,9 +294,10 @@ async function getRouteSelectionLabel(bus, incomingChanges) {
 
   if (selectedChange === bus) {
     const targetBus = bus.altered_to_bus_id
-      ? await Bus.findById(bus.altered_to_bus_id)
-        .select("bus_no preview_number")
-        .lean()
+      ? busesById?.get(String(bus.altered_to_bus_id)) ||
+        (await Bus.findById(bus.altered_to_bus_id)
+          .select("bus_no preview_number")
+          .lean())
       : null;
     return `Bus ${targetBus?.preview_number ?? bus.altered_to_preview ?? "replacement"} routes`;
   }
@@ -501,10 +436,15 @@ async function updateBusNumber(req, res) {
 // ================= GET ALL BUSES WITH LIVE GPS =================
 async function getAllBuses(req, res) {
   try {
-    const buses = await Bus.find({}).sort({
-      preview_number: 1,
-      bus_no: 1,
-    });
+    const buses = await Bus.find({})
+      .select(
+        "_id bus_no preview_number status gps_device_id reg_no mobile_live altered_to_bus_id altered_to_preview altered_at alteration_type combined_route_source",
+      )
+      .sort({
+        preview_number: 1,
+        bus_no: 1,
+      })
+      .lean();
     const isSuperadmin = req.user && String(req.user.role || '').toLowerCase() === 'superadmin';
     const activeChangeBusIds = new Set();
     let activeChanges = [];
@@ -522,14 +462,28 @@ async function getAllBuses(req, res) {
     const busIds = buses.map((b) => b._id);
     const liveLocations = await BusLiveLocation.find({
       bus_id: { $in: busIds },
-    });
-    const assignedStudents = await User.find({
-      role: "student",
-      is_active: true,
-      bus_no: { $nin: [null, ""] },
     })
-      .select("bus_no")
+      .select(
+        "bus_id latitude longitude speed is_online lastSuccessfulGpsUpdate updatedAt source",
+      )
       .lean();
+    const assignedStudentCounts = isSuperadmin
+      ? await User.aggregate([
+          {
+            $match: {
+              role: "student",
+              is_active: true,
+              bus_no: { $nin: [null, ""] },
+            },
+          },
+          {
+            $group: {
+              _id: "$bus_no",
+              count: { $sum: 1 },
+            },
+          },
+        ])
+      : [];
     const busIdByIdentifier = new Map();
     buses.forEach((bus) => {
       busIdByIdentifier.set(String(bus.bus_no || "").trim().toUpperCase(), String(bus._id));
@@ -541,11 +495,16 @@ async function getAllBuses(req, res) {
       }
     });
     const riderCountByBusId = new Map();
-    assignedStudents.forEach((student) => {
+    assignedStudentCounts.forEach(({ _id: busIdentifier, count }) => {
       const busId = busIdByIdentifier.get(
-        String(student.bus_no || "").trim().toUpperCase(),
+        String(busIdentifier || "").trim().toUpperCase(),
       );
-      if (busId) riderCountByBusId.set(busId, (riderCountByBusId.get(busId) || 0) + 1);
+      if (busId) {
+        riderCountByBusId.set(
+          busId,
+          (riderCountByBusId.get(busId) || 0) + count,
+        );
+      }
     });
     const locationMap = new Map(
       liveLocations.map((loc) => [loc.bus_id.toString(), loc]),
@@ -628,17 +587,46 @@ async function getBusesForPlan(req, res) {
 
     const buses = await Bus.find({
       $or: [{ status: "active" }, { altered_to_bus_id: { $ne: null } }],
-    }).sort({
-      bus_no: 1,
-      preview_number: 1,
-    });
+    })
+      .select(BUS_READ_FIELDS)
+      .sort({
+        bus_no: 1,
+        preview_number: 1,
+      })
+      .lean();
+    const mappings = targetPlan === "PLAN A"
+      ? []
+      : await PlanMapping.find({
+          plan_name: targetPlan,
+          member_bus_ids: { $in: buses.map((bus) => bus._id) },
+        })
+          .select("member_bus_ids root_bus_id")
+          .lean();
+    const rootIdByMemberId = new Map();
+    for (const mapping of mappings) {
+      for (const memberId of mapping.member_bus_ids || []) {
+        const key = String(memberId);
+        if (!rootIdByMemberId.has(key)) {
+          rootIdByMemberId.set(key, mapping.root_bus_id);
+        }
+      }
+    }
+    const rootIds = [...new Set([...rootIdByMemberId.values()].map(String))];
+    const roots = rootIds.length
+      ? await Bus.find({ _id: { $in: rootIds } })
+          .select(BUS_READ_FIELDS)
+          .lean()
+      : [];
+    const rootsById = new Map(roots.map((root) => [String(root._id), root]));
+    const context = await loadBusReadContext([...buses, ...roots]);
     const busesWithPlanById = new Map();
     for (const bus of buses) {
-      const mappedBus = await resolvePlanMappingBus(bus, targetPlan);
-      const routes = await getRoutesForBus(mappedBus);
+      const rootId = rootIdByMemberId.get(String(bus._id));
+      const mappedBus = rootId ? rootsById.get(String(rootId)) || bus : bus;
+      const routes = getContextRoutesForBus(context, mappedBus);
       if (hasRouteForPlan(routes, targetPlan)) {
         const locationBus = bus.altered_to_bus_id ? bus : mappedBus;
-        const effectiveBus = await resolveEffectiveBus(locationBus);
+        const effectiveBus = resolveEffectiveBusFromContext(context, locationBus);
         busesWithPlanById.set(String(effectiveBus._id), effectiveBus);
       }
     }
@@ -646,7 +634,11 @@ async function getBusesForPlan(req, res) {
 
     const liveLocations = await BusLiveLocation.find({
       bus_id: { $in: busesWithPlan.map((bus) => bus._id) },
-    });
+    })
+      .select(
+        "bus_id latitude longitude speed is_online lastSuccessfulGpsUpdate updatedAt source",
+      )
+      .lean();
     const locationMap = new Map(
       liveLocations.map((loc) => [loc.bus_id.toString(), loc]),
     );
@@ -1757,14 +1749,24 @@ async function getBusRoutes(req, res) {
     const assignment = await resolvePlanMappingAssignment(bus, activePlan);
     const mappedBus = assignment.routeBus;
     const locationBus = assignment.locationBus;
-    const effectiveLocationBus = await resolveEffectiveBus(locationBus);
+    const allPlanContext = isSuperadmin
+      ? await loadEffectiveRoutesForAllPlans(bus, [mappedBus, locationBus])
+      : null;
+    const context =
+      allPlanContext?.context ||
+      (await loadBusReadContext([bus, mappedBus, locationBus]));
+    const effectiveLocationBus = resolveEffectiveBusFromContext(
+      context,
+      locationBus,
+    );
     const routes = isSuperadmin
-      ? await getEffectiveRoutesForAllPlans(bus)
-      : await getRoutesForBus(mappedBus);
-    const incomingChanges = await getIncomingBusChanges(bus);
+      ? allPlanContext.routes
+      : getContextRoutesForBus(context, mappedBus);
+    const incomingChanges = getContextIncomingBusChanges(context, bus);
     const routeSelectionLabel = await getRouteSelectionLabel(
       bus,
       incomingChanges,
+      context.busesById,
     );
     const routeBusPreviewNumber =
       mappedBus._id.equals(bus._id)
@@ -1910,11 +1912,15 @@ async function getLiveLocation(req, res) {
     // Search by bus_no first, then fall back to preview_number.
     // This lets users track a bus via its short preview number (e.g. "4")
     // while still preferring exact bus_no matches to avoid ambiguity.
-    let bus = await Bus.findOne({ bus_no: normalizedBusNo });
+    let bus = await Bus.findOne({ bus_no: normalizedBusNo })
+      .select(BUS_READ_FIELDS)
+      .lean();
     if (!bus) {
       bus = await Bus.findOne({
         preview_number: { $in: [busNo, String(busNo)] },
-      });
+      })
+        .select(BUS_READ_FIELDS)
+        .lean();
     }
 
     if (!bus) {
@@ -1937,10 +1943,14 @@ async function getLiveLocation(req, res) {
       : bus.altered_to_bus_id
         ? bus
         : mappedBus;
-    const effectiveBus = assignment.hasTemporaryLocationBus
-      ? await resolveEffectiveBus(assignment.locationBus)
-      : await resolveEffectiveBus(locationBus);
-    const incomingChanges = await getIncomingBusChanges(bus);
+    const context = await loadBusReadContext([
+      bus,
+      mappedBus,
+      assignment.locationBus,
+      locationBus,
+    ]);
+    const effectiveBus = resolveEffectiveBusFromContext(context, locationBus);
+    const incomingChanges = getContextIncomingBusChanges(context, bus);
     const alteration = assignment.hasTemporaryLocationBus
       ? {
           isAltered: true,
@@ -1959,11 +1969,16 @@ async function getLiveLocation(req, res) {
         }
       : buildAlterationDetails(bus, effectiveBus) ||
         buildReplacementDetails(bus, incomingChanges);
-    const location = await BusLiveLocation.findOne({ bus_id: effectiveBus._id });
-    const routes = await getRoutesForBus(mappedBus);
+    const location = await BusLiveLocation.findOne({ bus_id: effectiveBus._id })
+      .select(
+        "bus_id latitude longitude speed is_online lastSuccessfulGpsUpdate updatedAt source",
+      )
+      .lean();
+    const routes = getContextRoutesForBus(context, mappedBus);
     const routeSelectionLabel = await getRouteSelectionLabel(
       bus,
       incomingChanges,
+      context.busesById,
     );
     const routeBusPreviewNumber = mappedBus._id.equals(bus._id)
       ? incomingChanges.find((changedBus) => changedBus.alteration_type === "alter")
@@ -2037,6 +2052,8 @@ async function getLiveLocation(req, res) {
       lastSuccessfulGpsUpdate: location?.lastSuccessfulGpsUpdate ?? null,
       lastUpdated:
         location?.lastSuccessfulGpsUpdate ?? location?.updatedAt ?? null,
+      gpsOfflineThresholdMs:
+        Number(process.env.GPS_OFFLINE_THRESHOLD_MS) || 3 * 60 * 1000,
       alteration,
       stops: activeStops,
       hasStops: activeStops.length > 0,
@@ -2070,7 +2087,9 @@ async function trackByPreview(req, res) {
     // Accept string or numeric preview numbers (e.g. "4" or 4).
     const bus = await Bus.findOne({
       preview_number: { $in: [previewNumber, String(previewNumber)] },
-    });
+    })
+      .select(BUS_READ_FIELDS)
+      .lean();
 
     if (!bus) {
       return res.status(404).json({ error: "No bus found for preview number" });
@@ -2084,10 +2103,14 @@ async function trackByPreview(req, res) {
       : bus.altered_to_bus_id
         ? bus
         : mappedBus;
-    const effectiveBus = assignment.hasTemporaryLocationBus
-      ? await resolveEffectiveBus(assignment.locationBus)
-      : await resolveEffectiveBus(locationBus);
-    const incomingChanges = await getIncomingBusChanges(bus);
+    const context = await loadBusReadContext([
+      bus,
+      mappedBus,
+      assignment.locationBus,
+      locationBus,
+    ]);
+    const effectiveBus = resolveEffectiveBusFromContext(context, locationBus);
+    const incomingChanges = getContextIncomingBusChanges(context, bus);
     const alteration = assignment.hasTemporaryLocationBus
       ? {
           isAltered: true,
@@ -2112,11 +2135,16 @@ async function trackByPreview(req, res) {
         }
       : buildAlterationDetails(bus, effectiveBus) ||
         buildReplacementDetails(bus, incomingChanges);
-    const location = await BusLiveLocation.findOne({ bus_id: effectiveBus._id });
-    const routes = await getRoutesForBus(mappedBus);
+    const location = await BusLiveLocation.findOne({ bus_id: effectiveBus._id })
+      .select(
+        "bus_id latitude longitude speed is_online lastSuccessfulGpsUpdate updatedAt source",
+      )
+      .lean();
+    const routes = getContextRoutesForBus(context, mappedBus);
     const routeSelectionLabel = await getRouteSelectionLabel(
       bus,
       incomingChanges,
+      context.busesById,
     );
     const routeBusPreviewNumber = mappedBus._id.equals(bus._id)
       ? incomingChanges.find((changedBus) => changedBus.alteration_type === "alter")
@@ -2158,6 +2186,8 @@ async function trackByPreview(req, res) {
       lastSuccessfulGpsUpdate: location?.lastSuccessfulGpsUpdate ?? null,
       lastUpdated:
         location?.lastSuccessfulGpsUpdate ?? location?.updatedAt ?? null,
+      gpsOfflineThresholdMs:
+        Number(process.env.GPS_OFFLINE_THRESHOLD_MS) || 3 * 60 * 1000,
       alteration,
     });
   } catch (error) {

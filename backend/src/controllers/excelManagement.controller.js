@@ -3,6 +3,7 @@ const ExcelUpload = require('../models/ExcelUpload');
 const User = require('../models/User');
 const Bus = require('../models/Bus');
 const normalizeBusNumber = require('../utils/normalizeBusNumber');
+const { parsePagination } = require('../utils/pagination');
 
 // Get all Excel uploads for current user
 async function getAllExcelUploads(req, res) {
@@ -19,11 +20,11 @@ async function getAllExcelUploads(req, res) {
 
     const uploads = await ExcelUpload.find({ uploaded_by: userId })
       .sort({ createdAt: -1 })
-      .select('_id file_name custom_name uploaded_by createdAt updatedAt is_active');
+      .select('_id file_name custom_name uploaded_by createdAt updatedAt is_active')
+      .lean();
 
     // Ensure frontend receives a stable `id` field and uses `custom_name` correctly.
-    const normalized = uploads.map((u) => {
-      const obj = u.toObject();
+    const normalized = uploads.map((obj) => {
       // Frontend expects: upload.id and upload.custom_name
       return {
         ...obj,
@@ -175,9 +176,16 @@ async function deleteExcelUpload(req, res) {
 async function getUsersByExcelUpload(req, res) {
   try {
     const { id } = req.params;
+    const pagination = parsePagination(req.query || {}, {
+      defaultLimit: 100,
+      maxLimit: 200,
+    });
+    if (pagination.error) {
+      return res.status(400).json({ success: false, error: pagination.error });
+    }
     
     // Find Excel upload
-    const upload = await ExcelUpload.findById(id);
+    const upload = await ExcelUpload.findById(id).select('_id').lean();
     if (!upload) {
 
       return res.status(404).json({
@@ -187,9 +195,16 @@ async function getUsersByExcelUpload(req, res) {
     }
 
     // Find active users linked to this Excel upload (FIX 3: filter only active users)
-    const users = await User.find({ excel_upload_id: id, is_active: true })
-      .select('name email role bus_no is_active')
-      .lean();
+    const userFilter = { excel_upload_id: id, is_active: true };
+    const [users, total] = await Promise.all([
+      User.find(userFilter)
+        .select('name email role bus_no is_active')
+        .sort({ _id: 1 })
+        .skip(pagination.skip)
+        .limit(pagination.limit)
+        .lean(),
+      User.countDocuments(userFilter),
+    ]);
     const busNumbers = [
       ...new Set(
         users
@@ -218,6 +233,14 @@ async function getUsersByExcelUpload(req, res) {
           normalizeBusNumber(user.bus_no),
         ) ?? null,
       })),
+      pagination: {
+        page: pagination.page,
+        limit: pagination.limit,
+        total,
+        totalPages: Math.ceil(total / pagination.limit),
+        hasNextPage: pagination.skip + users.length < total,
+        hasPreviousPage: pagination.page > 1,
+      },
     });
   } catch (error) {
     console.error('Get users by Excel upload error:', error);

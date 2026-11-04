@@ -3,8 +3,9 @@
  * Handles single bus marker display with a circular online/offline indicator,
  * college marker, and real-time coordinate updates via postMessage.
  */
-import React, { useRef, useEffect } from "react";
+import React, { useRef, useEffect, useCallback } from "react";
 import { WebView } from "react-native-webview";
+const { ROUTE_REFRESH_DISTANCE_METERS } = require("../../utils/gpsLocationPolicy.cjs");
 
 const KIOT_LAT = 11.554528;
 const KIOT_LNG = 78.019759;
@@ -16,6 +17,7 @@ export default function OSMMap({
 }) {
   const webRef = useRef(null);
   const latestPayloadRef = useRef(null);
+  const latestPayloadSignatureRef = useRef(null);
   const webViewReadyRef = useRef(false);
 
   // Push multi-bus payload + selected bus payload (legacy) to WebView
@@ -23,6 +25,7 @@ export default function OSMMap({
   // - Only send a single bus marker (BUS_LOCATION)
   // - Ignore multi-bus payloads so other buses never render simultaneously
   useEffect(() => {
+    let payload;
     // Strict single-focus behavior:
     // - If busData is null or has no valid coords → tell the map to clear ALL
     //   bus markers so it reverts to the KIOT college default (no stale marker
@@ -31,10 +34,8 @@ export default function OSMMap({
     //   markers before rendering the single one (see CLEAR before upsert in
     //   the WebView JS), so only the searched bus ever shows.
     if (!busData) {
-      latestPayloadRef.current = { type: "CLEAR_MARKERS" };
-      if (webViewReadyRef.current) {
-        webRef.current?.postMessage(JSON.stringify(latestPayloadRef.current));
-      }
+      payload = { type: "CLEAR_MARKERS" };
+      sendPayload(payload, "CLEAR_MARKERS");
       return;
     }
 
@@ -44,14 +45,12 @@ export default function OSMMap({
       Number.isFinite(Number(busData.latitude)) &&
       Number.isFinite(Number(busData.longitude));
     if (!hasPrimaryLocation) {
-      latestPayloadRef.current = { type: "CLEAR_MARKERS" };
-      if (webViewReadyRef.current) {
-        webRef.current?.postMessage(JSON.stringify(latestPayloadRef.current));
-      }
+      payload = { type: "CLEAR_MARKERS" };
+      sendPayload(payload, "CLEAR_MARKERS");
       return;
     }
 
-    latestPayloadRef.current = {
+    payload = {
       type: "BUS_LOCATION",
       previewNumber:
         busData.previewNumber ??
@@ -62,11 +61,30 @@ export default function OSMMap({
       longitude: busData.longitude,
       isOffline: busData._isOffline === true,
       markerStatus: busData._markerStatus ?? markerStatus,
+      lastSuccessfulGpsUpdate: busData.lastSuccessfulGpsUpdate ?? null,
     };
-    if (webViewReadyRef.current) {
-      webRef.current?.postMessage(JSON.stringify(latestPayloadRef.current));
+    const signature = JSON.stringify({
+      type: payload.type,
+      previewNumber: payload.previewNumber,
+      latitude: payload.latitude,
+      longitude: payload.longitude,
+      isOffline: payload.isOffline,
+      markerStatus: payload.markerStatus,
+    });
+    if (signature !== latestPayloadSignatureRef.current) {
+      sendPayload(payload, signature);
+    } else {
+      latestPayloadRef.current = payload;
     }
-  }, [busData, markerStatus]);
+  }, [busData, markerStatus, sendPayload]);
+
+  const sendPayload = useCallback((payload, signature) => {
+    latestPayloadRef.current = payload;
+    latestPayloadSignatureRef.current = signature;
+    if (webViewReadyRef.current) {
+      webRef.current?.postMessage(JSON.stringify(payload));
+    }
+  }, []);
 
   const html = `
 <!DOCTYPE html>
@@ -191,27 +209,72 @@ export default function OSMMap({
 
       var routeLayers = [];
       var routeRequestId = 0;
+      var routeRequestController = null;
+      var routeRequestTimeout = null;
       var activeRouteBus = null;
       var lastRequestedRoute = null;
+      var lastRouteAnchor = null;
+      var pendingRoute = null;
+      var lastLocationTimestampByBus = {};
       var hasFocusedRoute = false;
       var hasFocusedFallback = false;
 
       function clearRouteLines() {
         routeRequestId += 1;
+        if (routeRequestController) routeRequestController.abort();
+        routeRequestController = null;
+        if (routeRequestTimeout) clearTimeout(routeRequestTimeout);
+        routeRequestTimeout = null;
         routeLayers.forEach(function (layer) {
           map.removeLayer(layer);
         });
         routeLayers = [];
         lastRequestedRoute = null;
+        lastRouteAnchor = null;
+        pendingRoute = null;
         hasFocusedRoute = false;
         hasFocusedFallback = false;
       }
 
+      function routeDistanceMeters(pointA, pointB) {
+        var toRadians = function (degrees) {
+          return degrees * Math.PI / 180;
+        };
+        var latitudeA = toRadians(pointA.lat);
+        var latitudeB = toRadians(pointB.lat);
+        var latitudeDelta = latitudeB - latitudeA;
+        var longitudeDelta = toRadians(pointB.lng - pointA.lng);
+        var haversine =
+          Math.sin(latitudeDelta / 2) * Math.sin(latitudeDelta / 2) +
+          Math.cos(latitudeA) * Math.cos(latitudeB) *
+          Math.sin(longitudeDelta / 2) * Math.sin(longitudeDelta / 2);
+        return 2 * 6371000 * Math.atan2(
+          Math.sqrt(haversine),
+          Math.sqrt(Math.max(0, 1 - haversine))
+        );
+      }
+
       function showPossibleRoutes(busKey, lat, lng) {
         var routeKey = lat + ',' + lng;
+        if (document.hidden) {
+          pendingRoute = { busKey: busKey, lat: lat, lng: lng };
+          return;
+        }
         if (lastRequestedRoute === routeKey) return;
+        if (
+          lastRouteAnchor &&
+          routeDistanceMeters(lastRouteAnchor, { lat: lat, lng: lng }) <
+            ${ROUTE_REFRESH_DISTANCE_METERS}
+        ) {
+          return;
+        }
         lastRequestedRoute = routeKey;
+        lastRouteAnchor = { lat: lat, lng: lng };
         var requestId = ++routeRequestId;
+        if (routeRequestController) routeRequestController.abort();
+        if (routeRequestTimeout) clearTimeout(routeRequestTimeout);
+        routeRequestController =
+          typeof AbortController !== 'undefined' ? new AbortController() : null;
         var fallbackLine = L.polyline(
           [[lat, lng], [${KIOT_LAT}, ${KIOT_LNG}]],
           {
@@ -238,7 +301,15 @@ export default function OSMMap({
           lng + ',' + lat + ';' + ${KIOT_LNG} + ',' + ${KIOT_LAT} +
           '?alternatives=true&overview=full&geometries=geojson';
 
-        fetch(url)
+        if (routeRequestController) {
+          routeRequestTimeout = setTimeout(function () {
+            routeRequestController.abort();
+          }, 10000);
+        }
+        fetch(
+          url,
+          routeRequestController ? { signal: routeRequestController.signal } : undefined
+        )
           .then(function (response) {
             if (!response.ok) throw new Error('Routing service returned ' + response.status);
             return response.json();
@@ -282,13 +353,24 @@ export default function OSMMap({
           .catch(function (error) {
             if (requestId === routeRequestId) {
               lastRequestedRoute = null;
-              console.warn('Could not load live road-route alternatives:', error.message);
+              lastRouteAnchor = null;
+              if (!error || error.name !== 'AbortError') {
+                console.warn('Could not load live road-route alternatives:', error && error.message);
+              }
+            }
+          })
+          .finally(function () {
+            if (requestId === routeRequestId) {
+              if (routeRequestTimeout) clearTimeout(routeRequestTimeout);
+              routeRequestTimeout = null;
+              routeRequestController = null;
             }
           });
       }
 
       // Registry for bus markers (key -> marker)
       var busMarkers = {};
+      var activeMarkerKey = null;
 
       function isFiniteNumber(x) {
         return typeof x === 'number' && isFinite(x);
@@ -371,6 +453,7 @@ function upsertBusMarker(key, lat, lng, offline, status) {
             clearAllBusMarkers();
             clearRouteLines();
             activeRouteBus = null;
+            activeMarkerKey = null;
             return;
           }
 
@@ -379,6 +462,7 @@ function upsertBusMarker(key, lat, lng, offline, status) {
             clearAllBusMarkers();
             clearRouteLines();
             activeRouteBus = null;
+            activeMarkerKey = null;
             data.buses.forEach(function (b) {
               if (!b) return;
               var key = (b.busNo || b.bus_no || b.previewNumber || b.preview_number || '').toString();
@@ -391,12 +475,27 @@ function upsertBusMarker(key, lat, lng, offline, status) {
           // Single bus payload — STRICTLY only this bus. Clear all previous
           // markers so a previously searched bus never lingers on the map.
           if (data.type === 'BUS_LOCATION') {
-            clearAllBusMarkers();
             var keySingle = (data.previewNumber || data.preview_number || data.busNo || data.bus_no || 'single').toString();
+            var incomingTimestamp = Date.parse(data.lastSuccessfulGpsUpdate);
+            var previousTimestamp = lastLocationTimestampByBus[keySingle];
+            if (
+              isFinite(previousTimestamp) &&
+              (!isFinite(incomingTimestamp) || incomingTimestamp < previousTimestamp)
+            ) {
+              return;
+            }
+            if (isFinite(incomingTimestamp)) {
+              lastLocationTimestampByBus[keySingle] = incomingTimestamp;
+            }
             if (activeRouteBus !== keySingle) {
+              if (activeMarkerKey && busMarkers[activeMarkerKey]) {
+                map.removeLayer(busMarkers[activeMarkerKey]);
+                delete busMarkers[activeMarkerKey];
+              }
               clearRouteLines();
               activeRouteBus = keySingle;
             }
+            activeMarkerKey = keySingle;
             upsertBusMarker(
               keySingle,
               data.latitude,
@@ -451,7 +550,14 @@ function upsertBusMarker(key, lat, lng, offline, status) {
       window.addEventListener('resize', safeResize);
 
       document.addEventListener('visibilitychange', function () {
-        if (!document.hidden) safeResize();
+        if (!document.hidden) {
+          safeResize();
+          if (pendingRoute) {
+            var route = pendingRoute;
+            pendingRoute = null;
+            showPossibleRoutes(route.busKey, route.lat, route.lng);
+          }
+        }
       });
     })();
   </script>

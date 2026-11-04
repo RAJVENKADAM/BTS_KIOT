@@ -24,7 +24,7 @@ async function shutdown(signal) {
   console.log(`Received ${signal}; shutting down gracefully.`);
   try {
     const gpsSyncWorker = require('./src/workers/gpsSyncWorker');
-    gpsSyncWorker.stop();
+    await gpsSyncWorker.stop();
   } catch (error) {
     console.error('Failed to stop GPS worker:', error.message);
   }

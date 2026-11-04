@@ -49,6 +49,8 @@ export default function AddUsersScreen() {
   const [excelUploads, setExcelUploads] = useState([]);
   const [usersByUpload, setUsersByUpload] = useState({}); // { [uploadId]: users[] }
   const [loadingUsersByUpload, setLoadingUsersByUpload] = useState({});
+  const [paginationByUpload, setPaginationByUpload] = useState({});
+  const [loadingMoreUsersByUpload, setLoadingMoreUsersByUpload] = useState({});
   const [refreshing, setRefreshing] = useState(false);
   const { token, loading: authLoading } = useAuth();
 
@@ -56,25 +58,52 @@ export default function AddUsersScreen() {
     if (token) loadExcelUploads();
   }, [token]);
 
-  const loadUsersForUpload = async (uploadId) => {
+  const loadUsersForUpload = async (uploadId, { page = 1, append = false } = {}) => {
     if (!uploadId || !token) return;
 
     try {
-      setLoadingUsersByUpload((p) => ({ ...p, [uploadId]: true }));
+      if (append) {
+        setLoadingMoreUsersByUpload((p) => ({ ...p, [uploadId]: true }));
+      } else {
+        setLoadingUsersByUpload((p) => ({ ...p, [uploadId]: true }));
+      }
       const response = await excelManagementApi.getUsersByUpload(
         token,
         uploadId,
+        { page, limit: 100 },
       );
       if (response.success) {
-        setUsersByUpload((p) => ({ ...p, [uploadId]: response.data || [] }));
+        setUsersByUpload((p) => ({
+          ...p,
+          [uploadId]: append
+            ? [...(p[uploadId] || []), ...(response.data || [])]
+            : response.data || [],
+        }));
+        setPaginationByUpload((p) => ({
+          ...p,
+          [uploadId]: response.pagination || null,
+        }));
       } else {
-        setUsersByUpload((p) => ({ ...p, [uploadId]: [] }));
+        if (!append) setUsersByUpload((p) => ({ ...p, [uploadId]: [] }));
       }
     } catch (e) {
       console.error("Failed to load users for upload:", uploadId, e);
     } finally {
-      setLoadingUsersByUpload((p) => ({ ...p, [uploadId]: false }));
+      if (append) {
+        setLoadingMoreUsersByUpload((p) => ({ ...p, [uploadId]: false }));
+      } else {
+        setLoadingUsersByUpload((p) => ({ ...p, [uploadId]: false }));
+      }
     }
+  };
+
+  const loadMoreUsersForUpload = async (uploadId) => {
+    const pagination = paginationByUpload[uploadId];
+    if (!pagination?.hasNextPage || loadingMoreUsersByUpload[uploadId]) return;
+    await loadUsersForUpload(uploadId, {
+      page: pagination.page + 1,
+      append: true,
+    });
   };
 
   const loadExcelUploads = async () => {
@@ -339,7 +368,8 @@ export default function AddUsersScreen() {
                     ) : usersByUpload[upload.id]?.length ? (
                       <>
                         <MutedText style={styles.usersCount}>
-                          {usersByUpload[upload.id].length} users
+                          {paginationByUpload[upload.id]?.total ??
+                            usersByUpload[upload.id].length} active users
                         </MutedText>
                         {usersByUpload[upload.id].map((user) => (
                           <UserCard
@@ -353,6 +383,23 @@ export default function AddUsersScreen() {
                             }
                           />
                         ))}
+                        {paginationByUpload[upload.id]?.hasNextPage && (
+                          <TouchableOpacity
+                            style={styles.loadMoreButton}
+                            onPress={() => loadMoreUsersForUpload(upload.id)}
+                            disabled={loadingMoreUsersByUpload[upload.id]}
+                          >
+                            {loadingMoreUsersByUpload[upload.id] ? (
+                              <ActivityIndicator color={COLORS.primary} />
+                            ) : (
+                              <MutedText style={styles.loadMoreText}>
+                                Load more users (
+                                {usersByUpload[upload.id].length} of{" "}
+                                {paginationByUpload[upload.id].total})
+                              </MutedText>
+                            )}
+                          </TouchableOpacity>
+                        )}
                       </>
                     ) : (
                       <MutedText style={styles.noUsers}>
@@ -410,5 +457,13 @@ const styles = StyleSheet.create({
     fontSize: 13,
     marginVertical: 8,
     paddingLeft: 16,
+  },
+  loadMoreButton: {
+    alignItems: "center",
+    paddingVertical: 12,
+  },
+  loadMoreText: {
+    color: COLORS.primary,
+    fontWeight: "700",
   },
 });
