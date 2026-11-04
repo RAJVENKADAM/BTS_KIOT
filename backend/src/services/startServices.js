@@ -3,41 +3,56 @@ const { waitForDbReady } = require('../config/startup');
 // Singleton guards to prevent duplicate initialization
 const singleton = {
   started: false,
+  starting: false,
 };
 
 async function startDbDependentServices() {
-  if (singleton.started) return;
+  if (singleton.started || singleton.starting) return;
+  singleton.starting = true;
 
-  const ok = await waitForDbReady({
-    maxAttempts: 12,
-    initialDelayMs: 1000,
-    maxDelayMs: 8000,
-  });
-
-  if (!ok) {
-    console.error('❌ MongoDB not ready after retries. Tracking will NOT start.');
-    return;
-  }
-
-  singleton.started = true;
-
-  console.log('✅ MongoDB connected. Starting GPS sync scheduler...');
-
-  // Check GPS credentials exist (log yes/no only, never actual values)
-  const hasToken = !!process.env.GPS_TOKEN;
-  const hasEmail = !!process.env.GPS_EMAIL;
-  console.log('🔐 GPS credentials configured:', hasToken && hasEmail);
-  if (!hasToken || !hasEmail) {
-    console.error('❌ GPS credentials missing. GPS sync will fail (check Render env vars).');
-  }
-
-  // Start GPS sync worker (polls GPS provider in background; HTTP handlers must remain DB-only)
+  let gpsSyncWorker;
   try {
-    const gpsSyncWorker = require('../workers/gpsSyncWorker');
-    gpsSyncWorker.start();
+    const ok = await waitForDbReady({
+      maxAttempts: 12,
+      initialDelayMs: 1000,
+      maxDelayMs: 8000,
+    });
+
+    if (!ok) {
+      console.error('❌ MongoDB not ready after retries. Tracking will NOT start.');
+      return;
+    }
+
+    console.log('✅ MongoDB connected. Starting GPS sync scheduler...');
+
+    // Check GPS credentials exist (log yes/no only, never actual values)
+    const hasToken = !!process.env.GPS_TOKEN;
+    const hasEmail = !!process.env.GPS_EMAIL;
+    console.log('🔐 GPS credentials configured:', hasToken && hasEmail);
+    if (!hasToken || !hasEmail) {
+      console.error('❌ GPS credentials missing. GPS sync will fail (check Render env vars).');
+    }
+
+    // Start GPS worker only after the database is ready.
+    try {
+      gpsSyncWorker = require('../workers/gpsSyncWorker');
+      gpsSyncWorker.start();
+    } catch (error) {
+      if (gpsSyncWorker) {
+        try {
+          await gpsSyncWorker.stop();
+        } catch (cleanupError) {
+          console.error('Failed to clean up gpsSyncWorker after startup failure:', cleanupError.message);
+        }
+      }
+      console.error('Error starting gpsSyncWorker:', error.message);
+      return;
+    }
+
+    singleton.started = true;
     console.log('✅ gpsSyncWorker started successfully');
-  } catch (error) {
-    console.error('Error starting gpsSyncWorker:', error.message);
+  } finally {
+    singleton.starting = false;
   }
 }
 

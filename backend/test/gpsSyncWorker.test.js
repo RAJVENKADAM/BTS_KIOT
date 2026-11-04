@@ -672,6 +672,30 @@ test("GPS service distinguishes an explicit empty fleet from an unusable respons
   }
 });
 
+test("GPS service returns null when every record in a non-empty fleet is unusable", async () => {
+  const originalGet = axios.get;
+  const originalToken = gpsService.token;
+  const originalEmail = gpsService.email;
+  gpsService.token = "test-token";
+  gpsService.email = "test-email";
+  axios.get = async () => ({
+    data: [
+      { deviceId: "invalid-coordinates", latitude: 100, longitude: 78 },
+      { latitude: 12, longitude: 78 },
+    ],
+  });
+
+  try {
+    const locations = await gpsService.getAllCurrentLocations();
+    assert.equal(locations, null);
+    assert.equal(locations instanceof Map, false);
+  } finally {
+    axios.get = originalGet;
+    gpsService.token = originalToken;
+    gpsService.email = originalEmail;
+  }
+});
+
 test("failed provider data preserves last known coordinates while updating poll status", async () => {
   const previous = {
     bus_id: "bus-1",
