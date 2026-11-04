@@ -25,15 +25,6 @@ function isAuditSecretValid(providedSecret, expectedSecret) {
 async function runAtlasAudit(req, res) {
   res.set("Cache-Control", "no-store");
 
-  const expectedInstanceId = process.env.BTMS_ATLAS_AUDIT_INSTANCE_ID;
-  const currentInstanceId = process.env.RENDER_INSTANCE_ID;
-  if (!expectedInstanceId || !currentInstanceId || expectedInstanceId !== currentInstanceId) {
-    return res.status(503).json({
-      error: "Audit endpoint is not available on this instance.",
-      code: "AUDIT_INSTANCE_NOT_CONFIGURED",
-    });
-  }
-
   const expectedSecret = process.env.BTMS_ATLAS_AUDIT_SECRET;
   if (!expectedSecret) {
     return res.status(503).json({
