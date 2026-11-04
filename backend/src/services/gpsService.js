@@ -9,7 +9,7 @@ class GPSService {
 
   // Fetch the full fleet once per worker cycle. The worker performs all bus
   // matching against this normalized map without making per-bus requests.
-  // Returns null when the whole response is unusable.
+  // Returns null for unusable responses and an empty Map for an explicit empty vehicle list.
   async getAllCurrentLocations({ timeoutMs = 10000 } = {}) {
     if (!this.token || !this.email) {
       throw new Error("GPS credentials missing (GPS_TOKEN/GPS_EMAIL).");
@@ -42,10 +42,11 @@ class GPSService {
               ? [].concat(payload.data.location)
               : null;
 
-    if (!Array.isArray(rawList) || rawList.length === 0) {
+    if (!Array.isArray(rawList)) {
       console.warn("GPS API returned unusable response (no vehicle list)");
       return null;
     }
+    if (rawList.length === 0) return new Map();
 
     const pick = (obj, keys) => {
       if (!obj || typeof obj !== "object") return undefined;

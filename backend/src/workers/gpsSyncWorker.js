@@ -1,11 +1,35 @@
 const Bus = require("../models/Bus");
 const BusLiveLocation = require("../models/BusLiveLocation");
 const User = require("../models/User");
+const { randomUUID } = require("node:crypto");
+const { performance } = require("node:perf_hooks");
 const gpsService = require("../services/gpsService");
 const { getIO } = require("../socket");
 
 const GPS_SYNC_INTERVAL_MS = 35_000;
 const DEFAULT_STALE_THRESHOLD_MS = 3 * 60 * 1000;
+
+function logGpsEvent(event, details = {}) {
+  try {
+    console.log(JSON.stringify({ event, ...details }));
+  } catch {
+    // Logging must not interrupt GPS synchronization.
+  }
+}
+
+function getSafeError(error) {
+  return {
+    name: typeof error?.name === "string" ? error.name : "Error",
+    code:
+      typeof error?.code === "string" || typeof error?.code === "number"
+        ? error.code
+        : null,
+  };
+}
+
+function elapsedMs(startedAt) {
+  return Math.max(0, performance.now() - startedAt);
+}
 
 // These guards are process-local; multiple backend processes still need
 // external coordination and a shared Socket.IO adapter.
@@ -107,6 +131,8 @@ class GpsSyncWorker {
     this.syncLock = false;
     this.interval = null;
     this.inFlightCycle = null;
+    this.activeCycleId = null;
+    this.skippedTimerTicks = 0;
   }
 
   start() {
@@ -119,12 +145,18 @@ class GpsSyncWorker {
     );
 
     this.runCycle().catch((error) =>
-      console.error("Initial gpsSyncWorker cycle failed:", error),
+      logGpsEvent("GPS_CYCLE_UNHANDLED_FAILURE", {
+        source: "INITIAL_CYCLE",
+        ...getSafeError(error),
+      }),
     );
 
     this.interval = this.setIntervalFn(() => {
       this.runCycle().catch((error) =>
-        console.error("gpsSyncWorker cycle failed:", error),
+        logGpsEvent("GPS_CYCLE_UNHANDLED_FAILURE", {
+          source: "SCHEDULED_CYCLE",
+          ...getSafeError(error),
+        }),
       );
     }, GPS_SYNC_INTERVAL_MS);
   }
@@ -146,154 +178,279 @@ class GpsSyncWorker {
   }
 
   async runCycle() {
-    if (this.syncLock || this.stopping || this.stopped) {
-      console.log("GPS sync cycle skipped: previous cycle is active or stopping");
+    if (this.syncLock) {
+      this.skippedTimerTicks++;
+      logGpsEvent("GPS_CYCLE_SKIPPED", {
+        reason: "CYCLE_IN_PROGRESS",
+        activeCycleId: this.activeCycleId,
+        skippedTimerTicks: this.skippedTimerTicks,
+      });
+      return;
+    }
+    if (this.stopping || this.stopped) {
+      logGpsEvent("GPS_CYCLE_SKIPPED", {
+        reason: this.stopping ? "WORKER_STOPPING" : "WORKER_STOPPED",
+        activeCycleId: this.activeCycleId,
+      });
       return;
     }
 
     this.syncLock = true;
+    this.skippedTimerTicks = 0;
     const cycle = this.executeCycle();
     this.inFlightCycle = cycle;
     try {
       await cycle;
     } finally {
       if (this.inFlightCycle === cycle) this.inFlightCycle = null;
+      this.activeCycleId = null;
       this.syncLock = false;
     }
   }
 
   async executeCycle() {
-    const cycleStart = Date.now();
-    let locationMap = null;
-    try {
-      locationMap = await this.gpsService.getAllCurrentLocations({
-        timeoutMs: this.timeoutPerAttemptMs,
-      });
-    } catch (error) {
-      console.error(`GPS bulk fetch failed: ${error?.message || error}`);
-    }
+    const cycleId = `${process.pid}-${randomUUID()}`;
+    this.activeCycleId = cycleId;
+    const startedAt = new Date().toISOString();
+    const cycleStarted = performance.now();
+    const metrics = {
+      cycleId,
+      startedAt,
+      completedAt: null,
+      durationMs: null,
+      providerDurationMs: null,
+      busQueryDurationMs: null,
+      studentQueryDurationMs: null,
+      locationReadDurationMs: null,
+      locationWriteDurationMs: 0,
+      activeBusCount: null,
+      assignedStudentCount: null,
+      normalizedProviderRecordCount: null,
+      successfulWrites: 0,
+      failedWrites: 0,
+      processingFailures: 0,
+      skippedTimerTicks: 0,
+      providerFailures: 0,
+      databaseReadFailures: 0,
+      failureStage: null,
+      failureName: null,
+      failureCode: null,
+      status: "FAILED",
+    };
+    logGpsEvent("GPS_CYCLE_STARTED", { cycleId, startedAt });
 
-    const buses = await this.Bus.find({ status: "active" })
-      .select(
-        "_id gps_device_id gps_device_aliases reg_no reg_no_aliases bus_no preview_number",
-      )
-      .lean();
-    const assignedUsers = await this.User.find({
-      role: "student",
-      is_active: true,
-      bus_no: { $nin: [null, ""] },
-    })
-      .select("_id bus_no")
-      .lean();
-    const usersByBus = buildUsersByBus(assignedUsers);
-
-    let existingLocations = [];
-    if (buses.length) {
-      existingLocations = await this.BusLiveLocation.find({
-        bus_id: { $in: buses.map((bus) => bus._id) },
-      })
-        .select(
-          "bus_id user_id latitude longitude speed is_online source lastSuccessfulGpsUpdate lastUpdated updatedAt",
-        )
-        .lean();
-    }
-    const locationsByBus = new Map(
-      existingLocations.map((location) => [
-        String(location.bus_id),
-        location,
-      ]),
-    );
-
-    console.log(`GPS Sync Started - buses=${buses.length}`);
-    const now = new Date();
-    let successCount = 0;
-    let failCount = 0;
-
-    for (const bus of buses) {
-      const busId = bus._id;
-      const identifier = bus.preview_number || bus.reg_no || String(busId);
-      const previousLocation = locationsByBus.get(String(busId));
-      const providerLocation = getBusLocation(bus, locationMap);
-
+    const timedRead = async (durationField, operation) => {
+      const readStarted = performance.now();
       try {
-        let update;
-        if (providerLocation) {
-          const previousTimestamp = previousLocation?.lastSuccessfulGpsUpdate
-            ? new Date(previousLocation.lastSuccessfulGpsUpdate).getTime()
-            : NaN;
-          const elapsedSeconds =
-            (now.getTime() - previousTimestamp) / 1000;
-          const hasPreviousPoint =
-            Number.isFinite(Number(previousLocation?.latitude)) &&
-            Number.isFinite(Number(previousLocation?.longitude)) &&
-            Number.isFinite(elapsedSeconds) &&
-            elapsedSeconds > 0 &&
-            elapsedSeconds <= this.staleThresholdMs / 1000;
-          const derivedSpeedKmh = hasPreviousPoint
-            ? (distanceMeters(previousLocation, providerLocation) /
-                elapsedSeconds) *
-              3.6
-            : null;
-          update = {
-            latitude: providerLocation.latitude,
-            longitude: providerLocation.longitude,
-            speed: providerLocation.speed,
-            speedKmh:
-              derivedSpeedKmh != null && derivedSpeedKmh <= 150
-                ? derivedSpeedKmh
-                : null,
-            is_online: true,
-            lastSuccessfulGpsUpdate: now,
-            lastUpdated: now,
-          };
-        } else {
-          const lastSuccess = previousLocation?.lastSuccessfulGpsUpdate
-            ? new Date(previousLocation.lastSuccessfulGpsUpdate).getTime()
-            : NaN;
-          const shouldBeOnline =
-            Number.isFinite(lastSuccess) &&
-            now.getTime() - lastSuccess <= this.staleThresholdMs;
-          update = {
-            is_online: shouldBeOnline,
-            lastUpdated: now,
-          };
-        }
-
-        const currentLocation = {
-          ...previousLocation,
-          ...update,
-          bus_id: busId,
-          source: previousLocation
-            ? previousLocation.source
-            : "gps",
-          updatedAt: now,
-        };
-        await this.BusLiveLocation.updateOne(
-          { bus_id: busId },
-          { $set: update },
-          { upsert: true },
-        );
-        if (providerLocation) successCount++;
-        else failCount++;
-        try {
-          this.emitLocation(bus, currentLocation, usersByBus, now);
-        } catch (error) {
-          console.error(
-            `GPS event emit failed for bus ${identifier}: ${error?.message || error}`,
-          );
-        }
+        return await operation();
       } catch (error) {
-        failCount++;
-        console.error(
-          `GPS processing failed for bus ${identifier}: ${error?.message || error}`,
-        );
+        metrics.databaseReadFailures++;
+        metrics.failureStage ||= durationField;
+        const safeError = getSafeError(error);
+        metrics.failureName ||= safeError.name;
+        metrics.failureCode ??= safeError.code;
+        throw error;
+      } finally {
+        metrics[durationField] = elapsedMs(readStarted);
       }
-    }
+    };
 
-    console.log(
-      `GPS Sync Completed - success=${successCount}, failed=${failCount}`,
-    );
-    console.log(`Polling Time: ${Date.now() - cycleStart}ms`);
+    try {
+      let locationMap = null;
+      let providerRequestFailed = false;
+      const providerStarted = performance.now();
+      try {
+        locationMap = await this.gpsService.getAllCurrentLocations({
+          timeoutMs: this.timeoutPerAttemptMs,
+        });
+      } catch (error) {
+        providerRequestFailed = true;
+        metrics.providerFailures++;
+        const safeError = getSafeError(error);
+        metrics.failureStage = "PROVIDER_REQUEST";
+        metrics.failureName = safeError.name;
+        metrics.failureCode = safeError.code;
+        logGpsEvent("GPS_PROVIDER_REQUEST_FAILED", {
+          cycleId,
+          ...safeError,
+        });
+      } finally {
+        metrics.providerDurationMs = elapsedMs(providerStarted);
+      }
+      if (locationMap == null) {
+        if (!providerRequestFailed) {
+          metrics.providerFailures++;
+          metrics.failureStage = "PROVIDER_RESPONSE";
+          logGpsEvent("GPS_PROVIDER_RESPONSE_UNUSABLE", { cycleId });
+        }
+        metrics.status = "COMPLETED_WITH_ERRORS";
+        return;
+      }
+      metrics.normalizedProviderRecordCount = locationMap
+        ? new Set(locationMap.values()).size
+        : 0;
+
+      const busRead = timedRead("busQueryDurationMs", () =>
+        this.Bus.find({ status: "active" })
+          .select(
+            "_id gps_device_id gps_device_aliases reg_no reg_no_aliases bus_no preview_number",
+          )
+          .lean(),
+      );
+      const userRead = timedRead("studentQueryDurationMs", () =>
+        this.User.find({
+          role: "student",
+          is_active: true,
+          bus_no: { $nin: [null, ""] },
+        })
+          .select("_id bus_no")
+          .lean(),
+      );
+      let buses;
+      let assignedUsers;
+      try {
+        [buses, assignedUsers] = await Promise.all([busRead, userRead]);
+      } catch (error) {
+        await Promise.allSettled([busRead, userRead]);
+        throw error;
+      }
+      metrics.activeBusCount = buses.length;
+      metrics.assignedStudentCount = assignedUsers.length;
+      const usersByBus = buildUsersByBus(assignedUsers);
+
+      let existingLocations = [];
+      if (buses.length) {
+        existingLocations = await timedRead("locationReadDurationMs", () =>
+          this.BusLiveLocation.find({
+            bus_id: { $in: buses.map((bus) => bus._id) },
+          })
+            .select(
+              "bus_id user_id latitude longitude speed is_online source lastSuccessfulGpsUpdate lastUpdated updatedAt",
+            )
+            .lean(),
+        );
+      } else {
+        metrics.locationReadDurationMs = 0;
+      }
+      const locationsByBus = new Map(
+        existingLocations.map((location) => [
+          String(location.bus_id),
+          location,
+        ]),
+      );
+
+      const now = new Date();
+      for (const bus of buses) {
+        const busId = bus._id;
+        const previousLocation = locationsByBus.get(String(busId));
+        const providerLocation = getBusLocation(bus, locationMap);
+        let writeAttempted = false;
+
+        try {
+          let update;
+          if (providerLocation) {
+            const previousTimestamp = previousLocation?.lastSuccessfulGpsUpdate
+              ? new Date(previousLocation.lastSuccessfulGpsUpdate).getTime()
+              : NaN;
+            const elapsedSeconds =
+              (now.getTime() - previousTimestamp) / 1000;
+            const hasPreviousPoint =
+              Number.isFinite(Number(previousLocation?.latitude)) &&
+              Number.isFinite(Number(previousLocation?.longitude)) &&
+              Number.isFinite(elapsedSeconds) &&
+              elapsedSeconds > 0 &&
+              elapsedSeconds <= this.staleThresholdMs / 1000;
+            const derivedSpeedKmh = hasPreviousPoint
+              ? (distanceMeters(previousLocation, providerLocation) /
+                  elapsedSeconds) *
+                3.6
+              : null;
+            update = {
+              latitude: providerLocation.latitude,
+              longitude: providerLocation.longitude,
+              speed: providerLocation.speed,
+              speedKmh:
+                derivedSpeedKmh != null && derivedSpeedKmh <= 150
+                  ? derivedSpeedKmh
+                  : null,
+              is_online: true,
+              lastSuccessfulGpsUpdate: now,
+              lastUpdated: now,
+            };
+          } else {
+            const lastSuccess = previousLocation?.lastSuccessfulGpsUpdate
+              ? new Date(previousLocation.lastSuccessfulGpsUpdate).getTime()
+              : NaN;
+            const shouldBeOnline =
+              Number.isFinite(lastSuccess) &&
+              now.getTime() - lastSuccess <= this.staleThresholdMs;
+            update = {
+              is_online: shouldBeOnline,
+              lastUpdated: now,
+            };
+          }
+
+          const currentLocation = {
+            ...previousLocation,
+            ...update,
+            bus_id: busId,
+            source: previousLocation ? previousLocation.source : "gps",
+            updatedAt: now,
+          };
+          const writeStarted = performance.now();
+          writeAttempted = true;
+          try {
+            await this.BusLiveLocation.updateOne(
+              { bus_id: busId },
+              { $set: update },
+              { upsert: true },
+            );
+            metrics.successfulWrites++;
+          } finally {
+            metrics.locationWriteDurationMs += elapsedMs(writeStarted);
+          }
+          try {
+            this.emitLocation(bus, currentLocation, usersByBus, now);
+          } catch (error) {
+            logGpsEvent("GPS_LOCATION_EVENT_FAILED", {
+              cycleId,
+              ...getSafeError(error),
+            });
+          }
+        } catch (error) {
+          if (writeAttempted) {
+            metrics.failedWrites++;
+            logGpsEvent("GPS_LOCATION_WRITE_FAILED", {
+              cycleId,
+              ...getSafeError(error),
+            });
+          } else {
+            metrics.processingFailures++;
+            logGpsEvent("GPS_LOCATION_PROCESSING_FAILED", {
+              cycleId,
+              ...getSafeError(error),
+            });
+          }
+        }
+      }
+      metrics.status =
+        metrics.providerFailures ||
+        metrics.failedWrites ||
+        metrics.processingFailures
+          ? "COMPLETED_WITH_ERRORS"
+          : "COMPLETED";
+    } catch (error) {
+      metrics.failureStage ||= "CYCLE";
+      const safeError = getSafeError(error);
+      metrics.failureName ||= safeError.name;
+      metrics.failureCode ??= safeError.code;
+      throw error;
+    } finally {
+      metrics.completedAt = new Date().toISOString();
+      metrics.durationMs = elapsedMs(cycleStarted);
+      metrics.skippedTimerTicks = this.skippedTimerTicks;
+      logGpsEvent("GPS_CYCLE_COMPLETED", metrics);
+    }
   }
 
   emitLocation(bus, location, usersByBus, now) {
