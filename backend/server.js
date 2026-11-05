@@ -1,4 +1,5 @@
 const { app, server } = require('./src/app');
+const { logSocketDiagnostic } = require('./src/utils/socketDiagnostics');
 
 const PORT = process.env.PORT || 5000;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -16,12 +17,16 @@ const httpServer = server.listen(PORT, HOST, () => {
   console.log(`Accessible at: http://localhost:${PORT}`);
   console.log(`Mobile access: http://${HOST}:${PORT} (ensure same WiFi network)`);
   console.log(`Health check: curl http://${HOST}:${PORT}/health`);
+  logSocketDiagnostic('server-process-started');
 
   // DB-dependent services are started by app.js
 });
 
 async function shutdown(signal) {
   console.log(`Received ${signal}; shutting down gracefully.`);
+  logSocketDiagnostic('server-process-shutdown-started', {
+    processSignal: signal,
+  });
   try {
     await require('./src/services/startServices').stopDbDependentServices();
   } catch (error) {
@@ -43,6 +48,12 @@ async function shutdown(signal) {
   }
   process.exit(0);
 }
+
+process.once('exit', (code) => {
+  logSocketDiagnostic('server-process-exited', {
+    processExitCode: code,
+  });
+});
 
 process.once('SIGINT', () => shutdown('SIGINT'));
 process.once('SIGTERM', () => shutdown('SIGTERM'));

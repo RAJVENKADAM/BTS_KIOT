@@ -26,6 +26,7 @@ const { rateLimit, ipKeyGenerator } = require("express-rate-limit");
 const morgan = require("morgan");
 const jwt = require("jsonwebtoken");
 const { createSocketAuthentication } = require("./socket/authenticateSocket");
+const { logSocketDiagnostic } = require("./utils/socketDiagnostics");
 const { createDatabaseReadinessWaiter } = require("./utils/dbReadinessWaiter");
 const { logSafeError } = require("./utils/safeErrorLog");
 const gpsSyncWorker = require("./workers/gpsSyncWorker");
@@ -109,6 +110,25 @@ server.setTimeout(120000);
 const io = socketIo(server, {
   path: "/socket.io",
   cors: corsOptions,
+});
+
+logSocketDiagnostic("socket-server-configured", {
+  pingIntervalMs: io.engine.opts.pingInterval,
+  pingTimeoutMs: io.engine.opts.pingTimeout,
+});
+
+io.engine.on("connection_error", (error) => {
+  logSocketDiagnostic("engine-connection-error", {
+    socketId: error?.context?.sid,
+    disconnectReason: "transport error",
+    disconnectDescription: {
+      name: error?.name,
+      code: error?.code,
+      message: error?.message,
+    },
+    transportType: error?.context?.transport?.name,
+    wasConnected: false,
+  });
 });
 
 io.use(createSocketAuthentication(jwt));

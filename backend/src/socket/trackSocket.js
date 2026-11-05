@@ -5,6 +5,7 @@
 const { getIO } = require("../socket");
 const normalizeBusNumber = require("../utils/normalizeBusNumber");
 const { logSafeError } = require("../utils/safeErrorLog");
+const { logSocketDiagnostic } = require("../utils/socketDiagnostics");
 
 // Models are required lazily to avoid importing mongoose before the DB is ready.
 const getBus = () => require("../models/Bus");
@@ -64,10 +65,25 @@ function registerTrackSocketHandlers({
   };
 
   io.on("connection", (socket) => {
+    logSocketDiagnostic("server-connected", {
+      socketId: socket.id,
+      transportType: socket.conn?.transport?.name,
+      wasConnected: socket.connected === true,
+    });
+    socket.conn?.on("close", (reason, description) => {
+      logSocketDiagnostic("server-engine-closed", {
+        socketId: socket.id,
+        disconnectReason: reason,
+        disconnectDescription: description,
+        transportType: socket.conn?.transport?.name,
+        wasConnected: socket.connected === true,
+      });
+    });
     const authenticatedUserId = String(socket.user.id);
     let locationRequests = 0;
     let locationWindowStarted = Date.now();
     let disconnected = false;
+    let disconnectState = null;
     const pendingPreviewRooms = new Map();
     socket.join(`user_${authenticatedUserId}`);
 
@@ -213,7 +229,22 @@ function registerTrackSocketHandlers({
       }
     });
 
-    socket.on("disconnect", () => {
+    socket.on("disconnecting", () => {
+      disconnectState = {
+        wasConnected: socket.connected === true,
+        transportType: socket.conn?.transport?.name,
+      };
+    });
+
+    socket.on("disconnect", (reason, description) => {
+      logSocketDiagnostic("server-disconnected", {
+        socketId: socket.id,
+        disconnectReason: reason,
+        disconnectDescription: description,
+        transportType:
+          disconnectState?.transportType || socket.conn?.transport?.name,
+        wasConnected: disconnectState?.wasConnected ?? false,
+      });
       disconnected = true;
       pendingPreviewRooms.clear();
     });

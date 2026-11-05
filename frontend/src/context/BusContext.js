@@ -28,6 +28,7 @@ const {
   SOCKET_RECONNECTION_RANDOMIZATION_FACTOR,
   shouldReconnectAfterServerDisconnect,
 } = require("../utils/socketConnectionPolicy.cjs");
+const { logSocketDiagnostic } = require("../utils/socketDiagnostics.cjs");
 
 const BusContext = createContext();
 
@@ -119,6 +120,13 @@ export const BusProvider = ({ children }) => {
     setSocket(null);
     let disposed = false;
     let authenticationRejected = false;
+    let wasConnected = false;
+    let hasConnectedOnce = false;
+    let lastDisconnectWasConnected = null;
+    let diagnosticSocketId = null;
+    let manualReconnectAttemptNumber = 0;
+    let pendingManualReconnectAttempt = null;
+    const observedEngines = new WeakSet();
     // Connect to the root namespace — backend socket.io serves only "/".
     // Backend uses `path: "/socket.io"` (no trailing slash).
     const newSocket = io(`${API_BASE_URL}`, {
@@ -133,43 +141,169 @@ export const BusProvider = ({ children }) => {
       randomizationFactor: SOCKET_RECONNECTION_RANDOMIZATION_FACTOR,
     });
 
+    const logDiagnostic = (event, details = {}) =>
+      logSocketDiagnostic(event, newSocket, {
+        socketId: diagnosticSocketId,
+        ...details,
+      });
+
+    const attachEngineDiagnostics = () => {
+      const engine = newSocket.io.engine;
+      if (!engine || observedEngines.has(engine)) return;
+      observedEngines.add(engine);
+      diagnosticSocketId = newSocket.id || engine.id || diagnosticSocketId;
+      engine.on("close", (reason, description) => {
+        logDiagnostic("client-engine-closed", {
+          disconnectReason: reason,
+          disconnectDescription: description,
+          transportType: engine.transport?.name,
+          wasConnected: lastDisconnectWasConnected ?? wasConnected,
+          reconnectionAttempted: newSocket.active,
+          reconnectionAttemptNumber: manualReconnectAttemptNumber || null,
+          reconnectionResult: newSocket.active ? "pending" : null,
+        });
+      });
+    };
+    newSocket.io.on("open", attachEngineDiagnostics);
+
+    const startManualReconnect = (trigger) => {
+      manualReconnectAttemptNumber += 1;
+      pendingManualReconnectAttempt = manualReconnectAttemptNumber;
+      logDiagnostic("client-reconnection-attempt", {
+        disconnectReason:
+          trigger === "io server disconnect" ? trigger : null,
+        reconnectionTrigger:
+          trigger === "io server disconnect"
+            ? "server-disconnect"
+            : "app-foreground",
+        wasConnected,
+        reconnectionAttempted: true,
+        reconnectionAttemptNumber: manualReconnectAttemptNumber,
+        reconnectionResult: "pending",
+      });
+    };
+
     newSocket.on("connect", () => {
+      const isReconnect = hasConnectedOnce;
+      wasConnected = true;
+      lastDisconnectWasConnected = null;
+      diagnosticSocketId =
+        newSocket.id || newSocket.io.engine?.id || diagnosticSocketId;
+      attachEngineDiagnostics();
+      logDiagnostic("client-connected", {
+        wasConnected: isReconnect,
+        reconnectionAttempted: isReconnect,
+        reconnectionAttemptNumber:
+          pendingManualReconnectAttempt || manualReconnectAttemptNumber || null,
+        reconnectionResult: isReconnect ? "success" : null,
+      });
+      pendingManualReconnectAttempt = null;
+      hasConnectedOnce = true;
       if (disposed || requestGenerationRef.current === 0 || !token) return;
       setSocket(newSocket);
     });
 
     newSocket.on("connect_error", (error) => {
+      logDiagnostic("client-connect-error", {
+        disconnectDescription: error,
+        wasConnected,
+        reconnectionAttempted: hasConnectedOnce || newSocket.active,
+        reconnectionAttemptNumber:
+          pendingManualReconnectAttempt || manualReconnectAttemptNumber || null,
+        reconnectionResult: "failed",
+      });
       if (isPermanentSocketAuthenticationError(error)) {
         authenticationRejected = true;
         newSocket.io.reconnection(false);
       }
     });
 
-    newSocket.on("disconnect", (reason) => {
-      if (
+    newSocket.on("disconnect", (reason, description) => {
+      const willManuallyReconnect =
         !disposed &&
         !authenticationRejected &&
         shouldConnectSocketForAppState(appStateRef.current) &&
         shouldReconnectAfterServerDisconnect(reason) &&
-        token
-      ) {
+        Boolean(token);
+      const willManagerReconnect =
+        wasConnected &&
+        reason !== "io client disconnect" &&
+        reason !== "io server disconnect" &&
+        !authenticationRejected;
+      logDiagnostic("client-disconnected", {
+        disconnectReason: reason,
+        disconnectDescription: description,
+        wasConnected,
+        reconnectionAttempted: willManuallyReconnect || willManagerReconnect,
+        reconnectionAttemptNumber:
+          pendingManualReconnectAttempt || manualReconnectAttemptNumber || null,
+        reconnectionResult:
+          willManuallyReconnect || willManagerReconnect ? "pending" : null,
+      });
+      lastDisconnectWasConnected = wasConnected;
+      wasConnected = false;
+      if (willManuallyReconnect) {
+        startManualReconnect(reason);
         newSocket.connect();
       }
+    });
+
+    newSocket.io.on("reconnect_attempt", (attempt) => {
+      logDiagnostic("client-manager-reconnect-attempt", {
+        wasConnected,
+        reconnectionAttempted: true,
+        reconnectionAttemptNumber: attempt,
+        reconnectionResult: "pending",
+      });
+    });
+    newSocket.io.on("reconnect", (attempt) => {
+      logDiagnostic("client-manager-reconnected", {
+        wasConnected,
+        reconnectionAttempted: true,
+        reconnectionAttemptNumber: attempt,
+        reconnectionResult: "success",
+      });
+    });
+    newSocket.io.on("reconnect_error", (error) => {
+      logDiagnostic("client-manager-reconnect-error", {
+        disconnectDescription: error,
+        wasConnected,
+        reconnectionAttempted: true,
+        reconnectionAttemptNumber: manualReconnectAttemptNumber || null,
+        reconnectionResult: "failed",
+      });
+    });
+    newSocket.io.on("reconnect_failed", () => {
+      logDiagnostic("client-manager-reconnect-failed", {
+        wasConnected,
+        reconnectionAttempted: true,
+        reconnectionAttemptNumber: SOCKET_RECONNECTION_ATTEMPTS,
+        reconnectionResult: "failed",
+      });
     });
 
     const appStateSubscription = AppState.addEventListener(
       "change",
       (nextAppState) => {
+        const previousAppState = appStateRef.current;
         const action = getSocketActionForAppStateChange({
-          previousAppState: appStateRef.current,
+          previousAppState,
           nextAppState,
           socketConnected: newSocket.connected,
           authenticationRejected,
         });
         appStateRef.current = nextAppState;
-        if (action === "disconnect") newSocket.disconnect();
+        if (action === "disconnect") {
+          logDiagnostic("client-app-state-disconnect-requested", {
+            disconnectReason: "io client disconnect",
+            wasConnected: newSocket.connected,
+            reconnectionAttempted: false,
+          });
+          newSocket.disconnect();
+        }
         if (action === "connect") {
           newSocket.io.reconnection(true);
+          startManualReconnect(`app-state ${previousAppState} to ${nextAppState}`);
           newSocket.connect();
         }
       },
@@ -185,6 +319,11 @@ export const BusProvider = ({ children }) => {
     return () => {
       disposed = true;
       appStateSubscription.remove();
+      logDiagnostic("client-cleanup-disconnect-requested", {
+        disconnectReason: "io client disconnect",
+        wasConnected: newSocket.connected,
+        reconnectionAttempted: false,
+      });
       newSocket.removeAllListeners();
       newSocket.disconnect();
     };
