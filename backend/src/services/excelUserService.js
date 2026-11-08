@@ -2,6 +2,7 @@ const xlsx = require('xlsx');
 const User = require('../models/User');
 const normalizeBusNumber = require('../utils/normalizeBusNumber');
 const { runLimitedImportPasswordHash } = require('../utils/authProtection');
+const { runGpsConfigurationMutation } = require('./gpsConfigurationBarrier');
 const { sendEmail } = require('../services/emailService');
 const {
   disconnectUserSockets,
@@ -277,14 +278,37 @@ class ExcelUserService {
           }
 
           if (existing) {
-            const updateResult = await User.updateOne(
-              { email: item.value.email },
-              {
-                name: item.value.name,
-                role: item.value.role,
-                bus_no: item.value.bus_no,
-              },
-            );
+            const nextUser = {
+              role: item.value.role,
+              bus_no: item.value.bus_no,
+              is_active: true,
+              deleted_by_user: false,
+            };
+            const routingChanged =
+              existing.role !== nextUser.role ||
+              String(existing.bus_no ?? '').trim().toUpperCase() !==
+                String(nextUser.bus_no ?? '').trim().toUpperCase() ||
+              existing.is_active !== nextUser.is_active ||
+              Boolean(existing.deleted_by_user) !== nextUser.deleted_by_user;
+            const updateUser = (session, includeRoutingFields) =>
+              User.updateOne(
+                { email: item.value.email },
+                {
+                  name: item.value.name,
+                  ...(includeRoutingFields
+                    ? {
+                        role: item.value.role,
+                        bus_no: item.value.bus_no,
+                      }
+                    : {}),
+                },
+                session ? { session } : {},
+              );
+            const updateResult = routingChanged
+              ? await runGpsConfigurationMutation((session) =>
+                  updateUser(session, true),
+                )
+              : await updateUser(null, false);
             if (updateResult.modifiedCount) {
               const id = String(existing._id);
               if (
@@ -322,15 +346,35 @@ class ExcelUserService {
               item.value.phone,
               item.value.dob,
             );
+            const newUser = {
+              role: item.value.role,
+              bus_no: item.value.bus_no,
+              is_active: true,
+              deleted_by_user: false,
+            };
+            const createUser = (session) =>
+              User.create(
+                session
+                  ? [{
+                      name: item.value.name,
+                      email: item.value.email,
+                      password_hash: permanentPassword,
+                      role: item.value.role,
+                      bus_no: item.value.bus_no,
+                      is_active: true,
+                    }]
+                  : {
+                      name: item.value.name,
+                      email: item.value.email,
+                      password_hash: permanentPassword,
+                      role: item.value.role,
+                      bus_no: item.value.bus_no,
+                      is_active: true,
+                    },
+                session ? { session } : {},
+              );
             await runLimitedImportPasswordHash(() =>
-              User.create({
-                name: item.value.name,
-                email: item.value.email,
-                password_hash: permanentPassword,
-                role: item.value.role,
-                bus_no: item.value.bus_no,
-                is_active: true,
-              }),
+              runGpsConfigurationMutation(createUser),
             );
             results.created.push({
               email: item.value.email,

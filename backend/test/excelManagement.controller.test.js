@@ -116,3 +116,79 @@ test("rejects invalid Excel-user pagination without querying the upload", async 
     ExcelUpload.findById = originalFindById;
   }
 });
+
+test("cursor Excel-user pagination bounds reads and returns the continuation cursor", async () => {
+  const originalFindById = ExcelUpload.findById;
+  const originalUserFind = User.find;
+  const originalUserCountDocuments = User.countDocuments;
+  const originalBusFind = Bus.find;
+  const records = [
+    { _id: "64a000000000000000000001", bus_no: "BUS-1" },
+    { _id: "64a000000000000000000002", bus_no: "BUS-2" },
+    { _id: "64a000000000000000000003", bus_no: "BUS-3" },
+  ];
+  let queryFilter;
+  let queryLimit;
+  ExcelUpload.findById = () => ({
+    select: () => ({ lean: async () => ({ _id: "upload-1" }) }),
+  });
+  User.find = (filter) => {
+    queryFilter = filter;
+    return {
+      select: () => ({
+        sort: () => ({
+          limit: (value) => {
+            queryLimit = value;
+            return { lean: async () => records };
+          },
+        }),
+      }),
+    };
+  };
+  User.countDocuments = async () => records.length;
+  Bus.find = () => ({
+    select: () => ({ lean: async () => [] }),
+  });
+  const response = {
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.payload = payload;
+      return this;
+    },
+  };
+
+  try {
+    await getUsersByExcelUpload(
+      {
+        params: { id: "upload-1" },
+        query: {
+          cursorMode: "true",
+          cursor: "64a000000000000000000000",
+          limit: "2",
+        },
+      },
+      response,
+    );
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(queryFilter, {
+      excel_upload_id: "upload-1",
+      is_active: true,
+      _id: { $gt: "64a000000000000000000000" },
+    });
+    assert.equal(queryLimit, 3);
+    assert.equal(response.payload.data.length, 2);
+    assert.equal(
+      response.payload.pagination.nextCursor,
+      "64a000000000000000000002",
+    );
+  } finally {
+    ExcelUpload.findById = originalFindById;
+    User.find = originalUserFind;
+    User.countDocuments = originalUserCountDocuments;
+    Bus.find = originalBusFind;
+  }
+});

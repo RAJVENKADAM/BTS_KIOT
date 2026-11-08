@@ -1,5 +1,9 @@
 const mongoose = require('mongoose');
-const { MONGODB_URI } = require('./mongodb');
+const {
+  assertSafeDatabaseTarget,
+  buildMongoURI,
+  getMongoConnectionOptions,
+} = require('./mongodb');
 const { logSafeError } = require('../utils/safeErrorLog');
 
 function logStartupEvent(event, details = {}) {
@@ -14,15 +18,16 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function testMongoConnection() {
+async function testMongoConnection({ env = process.env } = {}) {
   try {
     const state = mongoose.connection.readyState;
     // 1 = connected
     if (state === 1) return true;
 
     if (state === 0 || state === 3) {
+      assertSafeDatabaseTarget(env);
       // Not connected, try to connect (Mongoose v9+ no longer supports legacy options)
-      await mongoose.connect(MONGODB_URI);
+      await mongoose.connect(buildMongoURI(env), getMongoConnectionOptions(env));
       return true;
     }
     return false;
@@ -33,6 +38,7 @@ async function testMongoConnection() {
 }
 
 async function waitForDbReady({
+  env = process.env,
   maxAttempts = 10,
   initialDelayMs = 1000,
   maxDelayMs = 10000,
@@ -42,7 +48,7 @@ async function waitForDbReady({
 
   while (attempt < maxAttempts) {
     attempt += 1;
-    const ok = await testMongoConnection();
+    const ok = await testMongoConnection({ env });
     if (ok) return true;
 
     logStartupEvent('MONGODB_CONNECTION_RETRY', {

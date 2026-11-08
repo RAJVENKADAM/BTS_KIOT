@@ -144,4 +144,36 @@ test("incoming bus lookup has a compound index declaration", () => {
       (fields) => fields.altered_to_bus_id === 1 && fields.alteration_type === 1,
     ),
   );
+  assert.ok(
+    indexes.some(
+      (fields) =>
+        fields.alteration_type === 1 &&
+        fields.altered_at === -1 &&
+        fields._id === -1,
+    ),
+  );
+});
+
+test("route and stop indexes cover the hot path reads", () => {
+  const routeIndexes = BusRoute.schema.indexes().map(([fields]) => fields);
+  const stopIndexes = StopMaster.schema.indexes().map(([fields]) => fields);
+
+  assert.ok(
+    routeIndexes.some(
+      (fields) =>
+        fields.bus_id === 1 &&
+        fields.plan_name === 1 &&
+        fields.stop_order === 1,
+    ),
+  );
+  assert.ok(
+    stopIndexes.some((fields) => fields.name === 1 && fields.status === 1),
+  );
+  assert.ok(
+    stopIndexes.some((fields) => fields.aliases === 1 && fields.status === 1),
+  );
+  assert.equal(
+    routeIndexes.some((fields) => fields.bus_id === 1 && fields.plan_name === 1 && fields.stopId === 1),
+    false,
+  );
 });

@@ -9,9 +9,17 @@
     user: null,
     data: { activePlan: "PLAN A", buses: [], clusters: [] },
     users: [],
+    userPagination: null,
+    userLoading: false,
+    userLoadingMore: false,
+    userLoadError: "",
     selectedUserIds: new Set(),
     adminBuses: [],
     temporaryChanges: [],
+    temporaryChangePagination: null,
+    temporaryChangesLoading: false,
+    temporaryChangesLoadingMore: false,
+    temporaryChangesError: "",
     changeMode: "alter",
     userSearch: "",
     userRoleFilter: "all",
@@ -26,6 +34,9 @@
   };
 
   const byId = (id) => document.getElementById(id);
+  let adminUsersRequestGeneration = 0;
+  let adminUsersSearchTimer = null;
+  let temporaryChangesRequestGeneration = 0;
   const escapeHtml = (value) =>
     String(value ?? "").replace(/[&<>"']/g, (character) => ({
       "&": "&amp;",
@@ -120,13 +131,25 @@
   }
 
   function clearSession() {
+    adminUsersRequestGeneration += 1;
+    temporaryChangesRequestGeneration += 1;
+    if (adminUsersSearchTimer) clearTimeout(adminUsersSearchTimer);
+    adminUsersSearchTimer = null;
     state.token = null;
     state.user = null;
     state.data = { activePlan: "PLAN A", buses: [], clusters: [] };
     state.users = [];
+    state.userPagination = null;
+    state.userLoading = false;
+    state.userLoadingMore = false;
+    state.userLoadError = "";
     state.selectedUserIds = new Set();
     state.adminBuses = [];
     state.temporaryChanges = [];
+    state.temporaryChangePagination = null;
+    state.temporaryChangesLoading = false;
+    state.temporaryChangesLoadingMore = false;
+    state.temporaryChangesError = "";
     state.userSearch = "";
     state.userRoleFilter = "all";
     state.userBusFilter = "all";
@@ -250,21 +273,12 @@
   }
 
   async function loadAdminRecords() {
-    const usersList = byId("users-list");
     const busesList = byId("buses-list");
-    if (usersList) usersList.innerHTML = '<div class="loading-state">Loading users…</div>';
     if (busesList) busesList.innerHTML = '<div class="loading-state">Loading buses…</div>';
-    const [usersResult, busesResult] = await Promise.allSettled([
-      request("/api/superadmin/users"),
+    const [, busesResult] = await Promise.allSettled([
+      loadAdminUsers(),
       request("/api/bus/get-all-buses"),
     ]);
-
-    if (usersResult.status === "fulfilled") {
-      state.users = usersResult.value.users || [];
-      renderUsers();
-    } else if (usersList) {
-      usersList.innerHTML = `<div class="empty-state"><strong>Could not load users</strong><p>${escapeHtml(usersResult.reason.message || "Refresh and try again.")}</p></div>`;
-    }
 
     if (busesResult.status === "fulfilled") {
       const buses = [
@@ -283,20 +297,99 @@
         };
       });
       renderBuses();
+      renderUsers();
     } else if (busesList) {
       busesList.innerHTML = `<div class="empty-state"><strong>Could not load buses</strong><p>${escapeHtml(busesResult.reason.message || "Refresh and try again.")}</p></div>`;
     }
     renderBusChangePage();
   }
 
-  async function loadTemporaryBusChanges() {
+  async function loadAdminUsers({ append = false } = {}) {
+    const cursor = append ? state.userPagination?.nextCursor : null;
+    if (append && (!cursor || state.userLoadingMore)) return;
+    const generation = append
+      ? adminUsersRequestGeneration
+      : ++adminUsersRequestGeneration;
+    if (append) {
+      state.userLoadingMore = true;
+      renderUsers();
+    }
+    else {
+      state.userLoading = true;
+      state.userLoadingMore = false;
+      state.userLoadError = "";
+      state.users = [];
+      state.userPagination = null;
+      renderUsers();
+    }
+
+    const params = new URLSearchParams({ cursorMode: "true", limit: "100" });
+    if (cursor) params.set("cursor", cursor);
+    if (state.userSearch.trim()) params.set("search", state.userSearch.trim());
+    if (state.userRoleFilter !== "all") params.set("role", state.userRoleFilter);
+    if (state.userBusFilter !== "all") params.set("busNo", state.userBusFilter);
+
     try {
-      const result = await request("/api/bus/temporary-changes");
-      state.temporaryChanges = result.changes || [];
-      renderBusChangePage();
+      const result = await request(`/api/superadmin/users?${params.toString()}`);
+      if (generation !== adminUsersRequestGeneration) return;
+      state.users = append
+        ? [...state.users, ...(result.users || [])]
+        : result.users || [];
+      state.userPagination = result.pagination || null;
+      state.userLoadError = "";
     } catch (error) {
-      byId("temporary-changes-list").innerHTML =
-        `<div class="empty-state"><strong>Could not load temporary changes</strong><p>${escapeHtml(error.message || "Refresh and try again.")}</p></div>`;
+      if (generation !== adminUsersRequestGeneration) return;
+      state.userLoadError = error.message || "Refresh and try again.";
+      if (!append) {
+        state.users = [];
+        state.userPagination = null;
+      }
+    } finally {
+      if (generation === adminUsersRequestGeneration) {
+        if (append) state.userLoadingMore = false;
+        else state.userLoading = false;
+        renderUsers();
+      }
+    }
+  }
+
+  async function loadTemporaryBusChanges({ append = false } = {}) {
+    const cursor = append ? state.temporaryChangePagination?.nextCursor : null;
+    if (append && (!cursor || state.temporaryChangesLoadingMore)) return;
+    const generation = append
+      ? temporaryChangesRequestGeneration
+      : ++temporaryChangesRequestGeneration;
+    if (append) state.temporaryChangesLoadingMore = true;
+    else {
+      state.temporaryChangesLoading = true;
+      state.temporaryChangesLoadingMore = false;
+      state.temporaryChangesError = "";
+      state.temporaryChanges = [];
+      state.temporaryChangePagination = null;
+    }
+    renderTemporaryChangeList();
+    try {
+      const params = new URLSearchParams({ limit: "50" });
+      if (cursor) params.set("cursor", cursor);
+      const result = await request(
+        `/api/bus/temporary-changes?${params.toString()}`,
+      );
+      if (generation !== temporaryChangesRequestGeneration) return;
+      state.temporaryChanges = append
+        ? [...state.temporaryChanges, ...(result.changes || [])]
+        : result.changes || [];
+      state.temporaryChangePagination = result.pagination || null;
+      state.temporaryChangesError = "";
+    } catch (error) {
+      if (generation !== temporaryChangesRequestGeneration) return;
+      state.temporaryChangesError =
+        error.message || "Could not load temporary changes.";
+    } finally {
+      if (generation === temporaryChangesRequestGeneration) {
+        if (append) state.temporaryChangesLoadingMore = false;
+        else state.temporaryChangesLoading = false;
+        renderTemporaryChangeList();
+      }
     }
   }
 
@@ -311,43 +404,36 @@
     if (searchInput) searchInput.value = state.userSearch;
     if (roleFilter) roleFilter.value = state.userRoleFilter;
     if (busFilter) {
-      const activeUsers = state.users.filter((user) => user.is_active !== false);
-      const buses = [...new Set(activeUsers.map((user) => String(user.bus_no || "").trim()).filter(Boolean))]
+      const buses = [...new Set([
+        ...state.adminBuses.map((bus) => String(bus.busNo || "").trim()),
+        ...state.users.map((user) => String(user.bus_no || "").trim()),
+        state.userBusFilter === "all" ? "" : state.userBusFilter,
+      ].filter(Boolean))]
         .sort((left, right) => left.localeCompare(right, undefined, { numeric: true }));
       busFilter.innerHTML = '<option value="all">All buses</option>' + buses.map((busNo) =>
         `<option value="${escapeHtml(busNo)}">Bus ${escapeHtml(busNo)}</option>`,
       ).join("");
-      if (buses.includes(state.userBusFilter)) busFilter.value = state.userBusFilter;
-      else {
-        state.userBusFilter = "all";
-        busFilter.value = "all";
-      }
+      busFilter.value = buses.includes(state.userBusFilter)
+        ? state.userBusFilter
+        : "all";
     }
 
     const activeUsers = state.users.filter((user) => user.is_active !== false);
     if (!activeUsers.length) {
-      if (count) count.textContent = "0 users";
-      container.innerHTML = '<div class="empty-state">No users found.</div>';
+      if (count) count.textContent = `${state.userPagination?.total ?? 0} users`;
+      container.innerHTML = state.userLoading
+        ? '<div class="loading-state">Loading users…</div>'
+        : state.userLoadError
+          ? `<div class="empty-state"><strong>Could not load users</strong><p>${escapeHtml(state.userLoadError)}</p><button class="button button-quiet" type="button" data-retry-users>Retry</button></div>`
+          : '<div class="empty-state">No users found.</div>';
       syncBulkUserControls();
       return;
     }
 
-    const search = state.userSearch.trim().toLocaleLowerCase();
-    const users = activeUsers.filter((user) => {
-      const role = String(user.role || "").toLowerCase();
-      const busNo = String(user.bus_no || "").trim();
-      const matchesSearch = !search || [
-        user.name,
-        user.email,
-        user.role,
-        user.bus_no,
-      ].some((value) => String(value || "").toLocaleLowerCase().includes(search));
-      return matchesSearch &&
-        (state.userRoleFilter === "all" || role === state.userRoleFilter) &&
-        (state.userBusFilter === "all" || busNo === state.userBusFilter);
-    });
+    const users = activeUsers;
 
-    if (count) count.textContent = `${users.length} of ${activeUsers.length} authorized accounts`;
+    if (count) count.textContent =
+      `${users.length} of ${state.userPagination?.total ?? users.length} authorized accounts`;
     if (!users.length) {
       container.innerHTML = '<div class="empty-state"><strong>No matching users</strong><p>Change or clear the search and filters to see users.</p></div>';
       syncBulkUserControls();
@@ -381,6 +467,12 @@
           }).join("")}
         </tbody>
       </table>
+      ${state.userPagination?.hasNextPage
+        ? `<div class="table-pagination"><button class="button button-quiet" type="button" data-load-more-users ${state.userLoadingMore ? "disabled" : ""}>${state.userLoadingMore ? "Loading…" : `Load more users (${users.length} of ${state.userPagination.total})`}</button></div>`
+        : ""}
+      ${state.userLoadError
+        ? `<p class="notice notice-error" role="alert">${escapeHtml(state.userLoadError)}</p>`
+        : ""}
     `;
     const visibleIds = users.map((user) => String(user.id));
     const selectVisible = byId("select-visible-users");
@@ -603,7 +695,11 @@
     const container = byId("temporary-changes-list");
     if (!container) return;
     if (!state.temporaryChanges.length) {
-      container.innerHTML = '<div class="empty-state"><strong>No active temporary changes</strong><p>Altered or combined buses will appear here with a rollback option.</p></div>';
+      container.innerHTML = state.temporaryChangesLoading
+        ? '<div class="loading-state">Loading temporary changes…</div>'
+        : state.temporaryChangesError
+          ? `<div class="empty-state"><strong>Could not load temporary changes</strong><p>${escapeHtml(state.temporaryChangesError)}</p><button class="button button-quiet" type="button" data-retry-changes>Retry</button></div>`
+          : '<div class="empty-state"><strong>No active temporary changes</strong><p>Altered or combined buses will appear here with a rollback option.</p></div>';
       return;
     }
     container.innerHTML = state.temporaryChanges.map((change) => {
@@ -656,7 +752,14 @@
             <button type="button" class="button button-quiet" data-rollback-change="${escapeHtml(change.id)}" data-legacy="${Boolean(change.legacy)}" ${isApplying ? "disabled" : ""}>${isApplying ? "Applying…" : "Rollback to normal"}</button>
           </div>
         </article>`;
-    }).join("");
+    }).join("") + `
+      ${state.temporaryChangePagination?.hasNextPage
+        ? `<div class="table-pagination"><button class="button button-quiet" type="button" data-load-more-changes ${state.temporaryChangesLoadingMore ? "disabled" : ""}>${state.temporaryChangesLoadingMore ? "Loading…" : "Load more changes"}</button></div>`
+        : ""}
+      ${state.temporaryChangesError
+        ? `<p class="notice notice-error" role="alert">${escapeHtml(state.temporaryChangesError)}</p>`
+        : ""}
+    `;
   }
 
   function renderBusChangePage() {
@@ -1555,11 +1658,27 @@
     ["alter-source", "alter-target", "combine-source", "combine-target", "combine-route-source"]
       .forEach((id) => byId(id).addEventListener("change", renderBusChangePage));
     byId("temporary-changes-list").addEventListener("click", (event) => {
+      if (event.target.closest("[data-load-more-changes]")) {
+        void loadTemporaryBusChanges({ append: true });
+        return;
+      }
+      if (event.target.closest("[data-retry-changes]")) {
+        void loadTemporaryBusChanges();
+        return;
+      }
       const button = event.target.closest("[data-rollback-change]");
       if (!button) return;
       rollbackTemporaryChange(button.dataset.rollbackChange, button.dataset.legacy === "true");
     });
     byId("users-list").addEventListener("click", (event) => {
+      if (event.target.closest("[data-load-more-users]")) {
+        void loadAdminUsers({ append: true });
+        return;
+      }
+      if (event.target.closest("[data-retry-users]")) {
+        void loadAdminUsers();
+        return;
+      }
       const button = event.target.closest("[data-user-action]");
       if (!button) return;
       if (button.dataset.userAction === "edit") openUserEditor(button.dataset.userId);
@@ -1628,15 +1747,19 @@
     });
     byId("users-search").addEventListener("input", (event) => {
       state.userSearch = event.currentTarget.value;
-      renderUsers();
+      if (adminUsersSearchTimer) clearTimeout(adminUsersSearchTimer);
+      adminUsersSearchTimer = setTimeout(() => {
+        adminUsersSearchTimer = null;
+        void loadAdminUsers();
+      }, 250);
     });
     byId("users-role-filter").addEventListener("change", (event) => {
       state.userRoleFilter = event.currentTarget.value;
-      renderUsers();
+      void loadAdminUsers();
     });
     byId("users-bus-filter").addEventListener("change", (event) => {
       state.userBusFilter = event.currentTarget.value;
-      renderUsers();
+      void loadAdminUsers();
     });
     byId("bulk-user-role").addEventListener("change", syncBulkUserControls);
     byId("apply-bulk-user-role").addEventListener("click", applyBulkUserRole);

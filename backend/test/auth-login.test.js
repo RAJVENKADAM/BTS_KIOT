@@ -7,10 +7,54 @@ const {
   runLimitedPasswordCheck,
   runLimitedImportPasswordHash,
 } = require('../src/utils/authProtection');
+const limiter = require('../src/utils/loginAttemptLimiter');
 
 process.env.JWT_SECRET = 'test-secret-with-more-than-thirty-two-characters';
 
 const users = new Map();
+const accountAttempts = new Map();
+let nextReservationId = 0;
+const prune = (attempts, now = Date.now()) =>
+  attempts.filter((attempt) => now - attempt.createdAt < 15 * 60 * 1000);
+limiter.reserveLoginAttempt = async (email) => {
+  const account = prune(accountAttempts.get(email) || []);
+  if (account.length >= 10) {
+    return { allowed: false, source: 'account', retryAfter: 60 };
+  }
+  const reservationId = `test-reservation-${++nextReservationId}`;
+  const reservation = { reservationId, createdAt: Date.now(), state: 'pending' };
+  accountAttempts.set(email, [...account, reservation]);
+  return { allowed: true, reservationId, source: 'account' };
+};
+limiter.markLoginAttemptFailed = async (email, reservationId) => {
+  accountAttempts.set(
+    email,
+    (accountAttempts.get(email) || []).map((attempt) =>
+      attempt.reservationId === reservationId
+        ? { ...attempt, state: 'failed' }
+        : attempt,
+    ),
+  );
+};
+limiter.completeLoginAttempt = async (email, reservationId) => {
+  accountAttempts.set(
+    email,
+    (accountAttempts.get(email) || []).filter(
+      (attempt) =>
+        attempt.state === 'pending' &&
+        attempt.reservationId !== reservationId,
+    ),
+  );
+};
+limiter.releaseLoginAttempt = async (email, reservationId) => {
+  accountAttempts.set(
+    email,
+    (accountAttempts.get(email) || []).filter(
+      (attempt) => attempt.reservationId !== reservationId,
+    ),
+  );
+};
+
 const passwordHash = bcrypt.hash('correct-password', 12);
 let activePasswordChecks = 0;
 let maxActivePasswordChecks = 0;
@@ -19,7 +63,45 @@ User.findOne = ({ email }) => ({
   select: async () => users.get(email) || null,
 });
 
-const { login } = require('../src/controllers/auth.controller');
+test('50 valid accounts sharing one campus IP can log in concurrently', async () => {
+  const emails = Array.from({ length: 50 }, (_, index) =>
+    `campus-burst-${index}@example.edu`,
+  );
+  for (const email of emails) users.set(email, makeUser(email));
+
+  const originalInfo = console.info;
+  console.info = () => {};
+  let responses;
+  try {
+    responses = await Promise.all(
+      emails.map((email) =>
+        attemptLogin(email, 'correct-password', { ip: '198.51.100.40' }),
+      ),
+    );
+  } finally {
+    console.info = originalInfo;
+  }
+
+  assert.ok(responses.every((response) => response.statusCode === 200));
+  assert.ok([...accountAttempts.values()].every((attempts) =>
+    attempts.every((attempt) => attempt.state !== 'pending'),
+  ));
+});
+
+test('multiple devices can authenticate the same account concurrently', async () => {
+  const email = 'multiple-devices-auth-test@example.edu';
+  users.set(email, makeUser(email));
+  const responses = await Promise.all(
+    Array.from({ length: 5 }, (_, index) =>
+      attemptLogin(email, 'correct-password', {
+        ip: `198.51.100.${index + 1}`,
+      }),
+    ),
+  );
+  assert.ok(responses.every((response) => response.statusCode === 200));
+});
+
+const { login, getClientIp } = require('../src/controllers/auth.controller');
 
 const responseDouble = () => ({
   statusCode: 200,
@@ -65,9 +147,28 @@ const makeUser = (email, { delayMs = 0 } = {}) => ({
   },
 });
 
-const attemptLogin = async (email, password) => {
+test('login source identity comes from Express req.ip, never a forwarded header', () => {
+  assert.equal(getClientIp({
+    ip: '198.51.100.27',
+    headers: { 'x-forwarded-for': '203.0.113.99, 198.51.100.1' },
+    socket: { remoteAddress: '192.0.2.10' },
+  }), '198.51.100.27');
+  assert.equal(getClientIp({
+    headers: { 'x-forwarded-for': '203.0.113.99' },
+    socket: { remoteAddress: '192.0.2.10' },
+  }), null);
+});
+
+const attemptLogin = async (email, password, overrides = {}) => {
   const res = responseDouble();
-  await login({ body: { email, password } }, res);
+  const ipOctet = Math.abs(
+    [...email].reduce((sum, character) => sum + character.charCodeAt(0), 0),
+  ) % 200 + 1;
+  await login({
+    body: { email, password },
+    ip: `203.0.113.${ipOctet}`,
+    ...overrides,
+  }, res);
   return res;
 };
 
@@ -86,6 +187,41 @@ test('successful login returns the established token and user shape', async () =
   assert.equal(payload.exp - payload.iat, 24 * 60 * 60);
 });
 
+test('login timing diagnostics include stages without credentials or personal data', async () => {
+  const email = 'timing-auth-test@example.edu';
+  const password = 'correct-password';
+  users.set(email, makeUser(email));
+  const originalInfo = console.info;
+  const logEntries = [];
+  console.info = (...values) => logEntries.push(values.join(' '));
+
+  let response;
+  try {
+    response = await attemptLogin(email, password);
+  } finally {
+    console.info = originalInfo;
+  }
+
+  const timingLog = logEntries.find((entry) => entry.startsWith('[login-timing] '));
+  assert.ok(timingLog);
+  const timing = JSON.parse(timingLog.slice('[login-timing] '.length));
+  assert.equal(timing.outcome, 'success');
+  assert.equal(typeof timing.totalMs, 'number');
+  assert.equal(typeof timing.authQueueWaitMs, 'number');
+  assert.equal(typeof timing.accountLookupMs, 'number');
+  assert.equal(typeof timing.accountStateCheckMs, 'number');
+  assert.equal(typeof timing.passwordQueueWaitMs, 'number');
+  assert.equal(typeof timing.passwordVerificationMs, 'number');
+  assert.equal(typeof timing.jwtSigningMs, 'number');
+  assert.equal(typeof timing.busPreviewLookupMs, 'number');
+  assert.equal(timing.busPreviewQueryCount, 0);
+
+  const serializedLog = JSON.stringify(timing);
+  assert.equal(serializedLog.includes(email), false);
+  assert.equal(serializedLog.includes(password), false);
+  assert.equal(serializedLog.includes(response.body.token), false);
+});
+
 test('missing credentials are rejected and nonexistent users receive the generic 401', async () => {
   const missing = await attemptLogin("", "");
   assert.equal(missing.statusCode, 400);
@@ -95,6 +231,43 @@ test('missing credentials are rejected and nonexistent users receive the generic
   assert.equal(nonexistent.statusCode, 401);
   assert.equal(nonexistent.body.code, "INVALID_CREDENTIALS");
   assert.equal(nonexistent.body.error, "Invalid credentials");
+});
+
+test('login fails closed with a safe retryable response when shared limiter storage fails', async () => {
+  const originalReserve = limiter.reserveLoginAttempt;
+  const originalFindOne = User.findOne;
+  let accountLookupCount = 0;
+  limiter.reserveLoginAttempt = async () => {
+    const error = new Error('private MongoDB transaction detail');
+    error.status = 503;
+    error.code = 'LOGIN_LIMITER_UNAVAILABLE';
+    error.retryAfter = 2;
+    throw error;
+  };
+  User.findOne = (...args) => {
+    accountLookupCount += 1;
+    return originalFindOne(...args);
+  };
+
+  let response;
+  try {
+    response = await attemptLogin(
+      'limiter-failure-auth-test@example.edu',
+      'correct-password',
+    );
+  } finally {
+    limiter.reserveLoginAttempt = originalReserve;
+    User.findOne = originalFindOne;
+  }
+
+  assert.equal(response.statusCode, 503);
+  assert.equal(response.body.code, 'LOGIN_LIMITER_UNAVAILABLE');
+  assert.equal(response.headers['Retry-After'], '2');
+  assert.equal(accountLookupCount, 0);
+  assert.equal(
+    JSON.stringify(response.body).includes('private MongoDB transaction detail'),
+    false,
+  );
 });
 
 test('incorrect credentials return 401 and repeated attempts are throttled per account', async () => {

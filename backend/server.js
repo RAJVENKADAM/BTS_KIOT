@@ -1,59 +1,74 @@
-const { app, server } = require('./src/app');
-const { logSocketDiagnostic } = require('./src/utils/socketDiagnostics');
+"use strict";
 
-const PORT = process.env.PORT || 5000;
-const HOST = process.env.HOST || '0.0.0.0';
-
-/**
- * IMPORTANT FIX:
- * Render / Nginx / proxies set X-Forwarded-For headers.
- * express-rate-limit requires trust proxy to be enabled,
- * otherwise it throws ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
- */
-app.set('trust proxy', 1);
-
-const httpServer = server.listen(PORT, HOST, () => {
-  console.log(`Server is running on http://${HOST}:${PORT}`);
-  console.log(`Accessible at: http://localhost:${PORT}`);
-  console.log(`Mobile access: http://${HOST}:${PORT} (ensure same WiFi network)`);
-  console.log(`Health check: curl http://${HOST}:${PORT}/health`);
-  logSocketDiagnostic('server-process-started');
-
-  // DB-dependent services are started by app.js
-});
-
-async function shutdown(signal) {
-  console.log(`Received ${signal}; shutting down gracefully.`);
-  logSocketDiagnostic('server-process-shutdown-started', {
-    processSignal: signal,
-  });
-  try {
-    await require('./src/services/startServices').stopDbDependentServices();
-  } catch (error) {
-    console.error('Failed to stop DB-dependent service retries:', error.message);
+function validateProductionConfiguration(env) {
+  if (env.NODE_ENV !== "production") return;
+  const missing = ["JWT_SECRET", "MONGODB_URI"].filter(
+    (name) => !env[name] || !env[name].trim(),
+  );
+  if (missing.length) {
+    throw new Error(
+      `Missing required production configuration: ${missing.join(", ")}`,
+    );
   }
-  try {
-    const gpsSyncWorker = require('./src/workers/gpsSyncWorker');
-    await gpsSyncWorker.stop();
-  } catch (error) {
-    console.error('Failed to stop GPS worker:', error.message);
+  if (env.JWT_SECRET.length < 32) {
+    console.warn(
+      "JWT_SECRET is configured but shorter than the recommended 32 characters.",
+    );
   }
-
-  await new Promise((resolve) => httpServer.close(resolve));
-  try {
-    const mongoose = require('mongoose');
-    await mongoose.disconnect();
-  } catch (error) {
-    console.error('Failed to close MongoDB:', error.message);
-  }
-  process.exit(0);
 }
 
-process.once('exit', (code) => {
-  logSocketDiagnostic('server-process-exited', {
-    processExitCode: code,
-  });
-});
+async function startServer(options = {}) {
+  const env = options.env || process.env;
+  validateProductionConfiguration(env);
+  const { createRuntime } = require("./src/runtime");
+  const runtime = createRuntime({ ...options, env });
+  await runtime.start();
+  return runtime;
+}
 
-process.once('SIGINT', () => shutdown('SIGINT'));
-process.once('SIGTERM', () => shutdown('SIGTERM'));
+async function main() {
+  require("dotenv").config();
+  const { logSafeError } = require("./src/utils/safeErrorLog");
+  const { logSocketDiagnostic } = require("./src/utils/socketDiagnostics");
+  const runtime = await startServer();
+
+  console.log("BTMS backend started.");
+  logSocketDiagnostic("server-process-started");
+
+  let shutdownPromise;
+  const shutdown = (signal) => {
+    if (shutdownPromise) return shutdownPromise;
+    console.log(`Received ${signal}; shutting down gracefully.`);
+    logSocketDiagnostic("server-process-shutdown-started", {
+      processSignal: signal,
+    });
+    shutdownPromise = runtime.shutdown(signal);
+    return shutdownPromise;
+  };
+
+  process.once("exit", (code) => {
+    logSocketDiagnostic("server-process-exited", {
+      processExitCode: code,
+    });
+  });
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    process.once(signal, () => {
+      shutdown(signal).catch((error) => {
+        logSafeError("Graceful shutdown failed", error);
+        process.exitCode = 1;
+      });
+    });
+  }
+}
+
+if (require.main === module) {
+  main().catch((error) => {
+    require("./src/utils/safeErrorLog").logSafeError(
+      "Server startup failed",
+      error,
+    );
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { startServer, validateProductionConfiguration };

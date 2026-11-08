@@ -1,6 +1,7 @@
 const express = require('express');
 const { rateLimit } = require('express-rate-limit');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth');
+const { logSafeError } = require('../utils/safeErrorLog');
 const { runAtlasAudit } = require('../controllers/atlasAudit.controller');
 const {
   deleteSelectedUsers,
@@ -12,7 +13,7 @@ const {
 
 const router = express.Router();
 
-const atlasAuditRateLimit = rateLimit({
+const localAtlasAuditRateLimit = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 1,
   standardHeaders: true,
@@ -26,6 +27,34 @@ const atlasAuditRateLimit = rateLimit({
     });
   },
 });
+
+const atlasAuditRateLimit = (req, res, next) => {
+  const incrementSharedRateLimit = req.app.locals.incrementSharedRateLimit;
+  if (!incrementSharedRateLimit) {
+    return localAtlasAuditRateLimit(req, res, next);
+  }
+  incrementSharedRateLimit(
+    `atlas-audit:user:${String(req.user.id)}`,
+    15 * 60 * 1000,
+  )
+    .then((result) => {
+      if (result.totalHits > 1) {
+        res.set('Cache-Control', 'no-store');
+        return res.status(429).json({
+          error: 'Audit rate limit exceeded.',
+          code: 'AUDIT_RATE_LIMITED',
+        });
+      }
+      return next();
+    })
+    .catch((error) => {
+      logSafeError('Shared audit rate limiting is unavailable', error, req.requestId);
+      return res.status(503).json({
+        error: 'Request protection is temporarily unavailable.',
+        code: 'RATE_LIMIT_UNAVAILABLE',
+      });
+    });
+};
 
 // Superadmin only routes
 router.post(

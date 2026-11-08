@@ -32,12 +32,116 @@ const {
   normalizeArrivalTime,
 } = require("../utils/planMapping");
 const { logSafeError } = require("../utils/safeErrorLog");
+const { runGpsConfigurationMutation } = require("../services/gpsConfigurationBarrier");
+const { parsePagination } = require("../utils/pagination");
 
 const GLOBAL_ACTIVE_PLAN_KEY = "global_active_plan";
 const DEFAULT_PLAN_NAMES = ["PLAN A", "PLAN B", "PLAN C", "PLAN D"];
 
+async function saveBusWithGpsBarrier(bus) {
+  return runGpsConfigurationMutation((session) =>
+    session ? bus.save({ session }) : bus.save(),
+  );
+}
+
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseTemporaryChangeCursor(value) {
+  if (value === undefined) {
+    return {
+      recorded: { done: false },
+      legacy: { done: false },
+    };
+  }
+  if (
+    typeof value !== "string" ||
+    value.length > 512 ||
+    !/^[A-Za-z0-9_-]+$/.test(value)
+  ) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    if (parsed?.v !== 1) return null;
+    const parsePosition = (position) => {
+      if (!position || typeof position !== "object") return null;
+      if (position.done === true) return { done: true };
+      if (
+        position.done === false &&
+        position.date === undefined &&
+        position.id === undefined
+      ) {
+        return { done: false };
+      }
+      const validDate =
+        position.date === null ||
+        (typeof position.date === "string" &&
+          Number.isFinite(Date.parse(position.date)));
+      if (
+        !validDate ||
+        !/^[a-f\d]{24}$/i.test(position.id || "")
+      ) {
+        return null;
+      }
+      return {
+        date:
+          position.date === null
+            ? null
+            : new Date(position.date).toISOString(),
+        id: position.id,
+        done: false,
+      };
+    };
+    const recorded = parsePosition(parsed.recorded);
+    const legacy = parsePosition(parsed.legacy);
+    if (!recorded || !legacy) return null;
+    return { recorded, legacy };
+  } catch {
+    return null;
+  }
+}
+
+function addDescendingCursor(filter, field, position) {
+  if (!position || position.date === undefined) return filter;
+  if (position.date === null) {
+    return {
+      ...filter,
+      $and: [
+        ...(filter.$and || []),
+        { [field]: null, _id: { $lt: position.id } },
+      ],
+    };
+  }
+  return {
+    ...filter,
+    $and: [
+      ...(filter.$and || []),
+      {
+        $or: [
+          { [field]: { $lt: new Date(position.date) } },
+          {
+            [field]: new Date(position.date),
+            _id: { $lt: position.id },
+          },
+          { [field]: null },
+        ],
+      },
+    ],
+  };
+}
+
+function getCursorTimestamp(value) {
+  const timestamp =
+    value instanceof Date
+      ? value.getTime()
+      : typeof value === "string"
+        ? Date.parse(value)
+        : Number.NaN;
+  return Number.isFinite(timestamp)
+    ? { timestamp, cursorDate: new Date(timestamp).toISOString() }
+    : { timestamp: Number.NEGATIVE_INFINITY, cursorDate: null };
 }
 
 function normalizePlanName(plan) {
@@ -350,18 +454,29 @@ async function uploadBusRoutes(req, res) {
       bus.gps_device_id = deviceId;
       bus.reg_no = regNo;
       if (previewNumber) bus.preview_number = previewNumber;
-      await bus.save();
     } else {
       // Create new bus
-      bus = await Bus.create({
+      bus = {
         bus_no: normalizedBusNo,
         bus_name: busNo,
         gps_device_id: deviceId,
         reg_no: regNo,
         preview_number: previewNumber,
         status: "active",
-      });
+      };
     }
+    bus = await runGpsConfigurationMutation(async (session) => {
+      if (bus?._id) {
+        if (session) await bus.save({ session });
+        else await bus.save();
+        return bus;
+      }
+      const [createdBus] = await Bus.create(
+        [bus],
+        session ? { session } : {},
+      );
+      return createdBus;
+    });
 
     res.status(200).json({
       message: bus ? "Bus updated" : "Bus created",
@@ -394,6 +509,8 @@ async function updateBusNumber(req, res) {
     }
 
     let finalBusNo = normalizedBusNo;
+    let updateBusNumber = false;
+    let updatePreviewNumber = false;
 
     if (normalizedNewBusNo && normalizedNewBusNo !== normalizedBusNo) {
       const exists = await Bus.findOne({ bus_no: normalizedNewBusNo });
@@ -401,10 +518,7 @@ async function updateBusNumber(req, res) {
         return res.status(400).json({ error: "Bus number already exists" });
       }
 
-      await Bus.updateOne(
-        { bus_no: normalizedBusNo },
-        { bus_no: normalizedNewBusNo },
-      );
+      updateBusNumber = true;
       finalBusNo = normalizedNewBusNo;
     }
 
@@ -417,10 +531,27 @@ async function updateBusNumber(req, res) {
         return res.status(400).json({ error: "Preview number already used" });
       }
 
-      await Bus.updateOne(
-        { bus_no: normalizeBusNumber(finalBusNo) },
-        { preview_number: previewNumber },
-      );
+      updatePreviewNumber = true;
+    }
+
+    if (updateBusNumber || updatePreviewNumber) {
+      await runGpsConfigurationMutation(async (session) => {
+        const options = session ? { session } : {};
+        if (updateBusNumber) {
+          await Bus.updateOne(
+            { bus_no: normalizedBusNo },
+            { bus_no: normalizedNewBusNo },
+            options,
+          );
+        }
+        if (updatePreviewNumber) {
+          await Bus.updateOne(
+            { bus_no: normalizeBusNumber(finalBusNo) },
+            { preview_number: previewNumber },
+            options,
+          );
+        }
+      });
     }
 
     res.status(200).json({
@@ -525,7 +656,7 @@ async function getAllBuses(req, res) {
         latitude: location?.latitude ?? null,
         longitude: location?.longitude ?? null,
         speed: location?.speed ?? 0,
-        isOnline: !!location,
+        isOnline: Boolean(location?.is_online),
         lastUpdated:
           location?.lastSuccessfulGpsUpdate ?? location?.updatedAt ?? null,
         source: location?.source ?? "offline",
@@ -708,38 +839,45 @@ async function deleteBus(req, res) {
     const assignedUsers = await User.find(assignedUserFilter)
       .select("_id")
       .lean();
-    const assignmentResult = await User.updateMany(
-      assignedUserFilter,
-      { $set: { bus_no: null } },
-    );
+    const assignmentResult = await runGpsConfigurationMutation(async (session) => {
+      const options = session ? { session } : {};
+      const result = await User.updateMany(
+        assignedUserFilter,
+        { $set: { bus_no: null } },
+        options,
+      );
+      await PlanMapping.updateMany(
+        { member_bus_ids: bus._id },
+        { $pull: { member_bus_ids: bus._id } },
+        options,
+      );
+      await PlanMapping.deleteMany({ root_bus_id: bus._id }, options);
+      await Bus.updateMany(
+        { altered_to_bus_id: bus._id },
+        {
+          $set: {
+            altered_to_bus_id: null,
+            altered_to_preview: null,
+            alteration_type: null,
+            alteration_route_source: null,
+            alteration_routes: [],
+            combined_route_source: null,
+            combined_routes: [],
+            altered_at: null,
+          },
+        },
+        options,
+      );
+      await BusRoute.deleteMany({ bus_id: bus._id }, options);
+      await BusLiveLocation.deleteMany({ bus_id: bus._id }, options);
+      await Bus.deleteOne({ _id: bus._id }, options);
+      return result;
+    });
     if (assignmentResult.modifiedCount) {
       assignedUsers.forEach((user) =>
         emitBusAssignmentNotification(user._id, null),
       );
     }
-    await PlanMapping.updateMany(
-      { member_bus_ids: bus._id },
-      { $pull: { member_bus_ids: bus._id } },
-    );
-    await PlanMapping.deleteMany({ root_bus_id: bus._id });
-    await Bus.updateMany(
-      { altered_to_bus_id: bus._id },
-      {
-        $set: {
-          altered_to_bus_id: null,
-          altered_to_preview: null,
-          alteration_type: null,
-          alteration_route_source: null,
-          alteration_routes: [],
-          combined_route_source: null,
-          combined_routes: [],
-          altered_at: null,
-        },
-      },
-    );
-    await BusRoute.deleteMany({ bus_id: bus._id });
-    await BusLiveLocation.deleteMany({ bus_id: bus._id });
-    await Bus.deleteOne({ _id: bus._id });
 
     res.json({
       success: true,
@@ -765,7 +903,7 @@ async function activateBus(req, res) {
     }
 
     bus.status = "active";
-    await bus.save();
+    await saveBusWithGpsBarrier(bus);
     await notifyAssignedUsersOfBusStatus(bus, "active");
 
     res.json({ message: "Bus activated" });
@@ -789,7 +927,7 @@ async function deactivateBus(req, res) {
     }
 
     bus.status = "inactive";
-    await bus.save();
+    await saveBusWithGpsBarrier(bus);
     await notifyAssignedUsersOfBusStatus(bus, "inactive");
 
     res.json({ message: "Bus deactivated" });
@@ -826,7 +964,7 @@ async function updatePreviewNumber(req, res) {
     }
 
     bus.preview_number = previewNumber;
-    await bus.save();
+    await saveBusWithGpsBarrier(bus);
 
     res.json({ message: "Preview updated successfully" });
   } catch (error) {
@@ -1034,40 +1172,187 @@ async function notifyBusChange(user, {
 
 async function getTemporaryBusChanges(req, res) {
   try {
-    const activeChanges = await BusChange.find({
-      status: { $in: ["applying", "active"] },
-    }).sort({ createdAt: -1 }).lean();
-    const recordedSourceIds = new Set(
-      activeChanges.map((change) => String(change.sourceBusId)),
-    );
-    const legacyAlterations = await Bus.find({
+    const pagination = parsePagination(req.query || {}, {
+      defaultLimit: 50,
+      maxLimit: 100,
+    });
+    const cursor = parseTemporaryChangeCursor(req.query?.cursor);
+    if (pagination.error || !cursor || req.query?.page !== undefined) {
+      return res.status(400).json({
+        success: false,
+        error: pagination.error || "A valid change cursor is required.",
+      });
+    }
+
+    const activeStatuses = ["applying", "active"];
+    const recordedFilter = {
+      status: { $in: activeStatuses },
+      $or: [{ createdAt: { $type: "date" } }, { createdAt: null }],
+    };
+    const legacyFilter = {
       alteration_type: "alter",
       altered_to_bus_id: { $ne: null },
-    })
-      .select("bus_no preview_number altered_to_bus_id altered_to_preview altered_at")
-      .sort({ altered_at: -1 })
-      .lean();
+      $or: [{ altered_at: { $type: "date" } }, { altered_at: null }],
+    };
+    const recordedQuery = cursor.recorded.done
+      ? Promise.resolve([])
+      : BusChange.find(
+          addDescendingCursor(recordedFilter, "createdAt", cursor.recorded),
+        )
+          .select(
+            "_id type status sourceBusNo sourcePreview targetBusNo targetPreview routeSource affectedUsersCount createdAt sourceBusId",
+          )
+          .sort({ createdAt: -1, _id: -1 })
+          .limit(pagination.limit + 1)
+          .lean();
 
-    const changes = activeChanges.map((change) => ({
-      id: String(change._id),
-      type: change.type,
-      status: change.status,
-      sourceBusNo: change.sourceBusNo,
-      sourcePreview: change.sourcePreview,
-      targetBusNo: change.targetBusNo,
-      targetPreview: change.targetPreview,
-      routeSource: change.routeSource,
-      affectedUsersCount: change.affectedUsersCount,
-      createdAt: change.createdAt,
-      legacy: false,
-    }));
-    for (const bus of legacyAlterations) {
-      if (recordedSourceIds.has(String(bus._id))) continue;
-      const target = await Bus.findById(bus.altered_to_bus_id)
-        .select("bus_no preview_number")
-        .lean();
-      const riders = await findStudentsAssignedToBus(bus);
-      changes.push({
+    const [recordedChanges, recordedSourceIds] = await Promise.all([
+      recordedQuery,
+      cursor.legacy.done
+        ? Promise.resolve([])
+        : BusChange.distinct("sourceBusId", {
+            status: { $in: activeStatuses },
+          }),
+    ]);
+    const legacyQueryFilter = {
+      ...legacyFilter,
+      ...(recordedSourceIds.length
+        ? { _id: { $nin: recordedSourceIds } }
+        : {}),
+    };
+    const legacyQuery = cursor.legacy.done
+      ? Promise.resolve([])
+      : Bus.find(
+          addDescendingCursor(legacyQueryFilter, "altered_at", cursor.legacy),
+        )
+          .select(
+            "bus_no preview_number altered_to_bus_id altered_to_preview altered_at",
+          )
+          .sort({ altered_at: -1, _id: -1 })
+          .limit(pagination.limit + 1)
+          .lean();
+    const legacyBuses = await legacyQuery;
+
+    const entries = [
+      ...recordedChanges.map((change) => ({
+        source: "recorded",
+        id: String(change._id),
+        ...getCursorTimestamp(change.createdAt),
+        change,
+      })),
+      ...legacyBuses.map((bus) => ({
+        source: "legacy",
+        id: String(bus._id),
+        ...getCursorTimestamp(bus.altered_at),
+        bus,
+      })),
+    ].sort(
+      (left, right) =>
+        right.timestamp - left.timestamp ||
+        right.id.localeCompare(left.id) ||
+        right.source.localeCompare(left.source),
+    );
+    const pageEntries = entries.slice(0, pagination.limit);
+    const nextCursor = {
+      recorded: { ...cursor.recorded },
+      legacy: { ...cursor.legacy },
+    };
+    for (const entry of pageEntries) {
+      nextCursor[entry.source] = {
+        date: entry.cursorDate,
+        id: entry.id,
+        done: false,
+      };
+    }
+    for (const source of ["recorded", "legacy"]) {
+      const sourceEntries = entries.filter((entry) => entry.source === source);
+      const sourcePageEntries = pageEntries.filter(
+        (entry) => entry.source === source,
+      );
+      if (
+        sourceEntries.length === 0 ||
+        (sourceEntries.length <= pagination.limit &&
+          sourcePageEntries.length === sourceEntries.length)
+      ) {
+        nextCursor[source] = { done: true };
+      }
+    }
+    const hasNextPage = !nextCursor.recorded.done || !nextCursor.legacy.done;
+    const legacyPage = pageEntries
+      .filter((entry) => entry.source === "legacy")
+      .map((entry) => entry.bus);
+    const targetIds = [
+      ...new Set(legacyPage.map((bus) => String(bus.altered_to_bus_id))),
+    ];
+    const riderIdentifiers = [
+      ...new Set(
+        legacyPage.flatMap((bus) =>
+          [bus.bus_no, bus.preview_number]
+            .filter((value) => value != null && String(value).trim())
+            .map((value) => String(value).trim()),
+        ),
+      ),
+    ];
+    const [targets, riderCounts] = await Promise.all([
+      targetIds.length
+        ? Bus.find({ _id: { $in: targetIds } })
+            .select("bus_no preview_number")
+            .lean()
+        : [],
+      riderIdentifiers.length
+        ? User.aggregate([
+            {
+              $match: {
+                bus_no: {
+                  $in: riderIdentifiers.map(
+                    (identifier) =>
+                      new RegExp(`^${escapeRegExp(identifier)}$`, "i"),
+                  ),
+                },
+                role: "student",
+                is_active: true,
+              },
+            },
+            { $group: { _id: { $toUpper: "$bus_no" }, count: { $sum: 1 } } },
+          ])
+        : [],
+    ]);
+    const targetsById = new Map(
+      targets.map((target) => [String(target._id), target]),
+    );
+    const riderCountsByBus = new Map(
+      riderCounts.map((result) => [String(result._id).toUpperCase(), result.count]),
+    );
+    const changes = pageEntries.map((entry) => {
+      if (entry.source === "recorded") {
+        const change = entry.change;
+        return {
+          id: entry.id,
+          type: change.type,
+          status: change.status,
+          sourceBusNo: change.sourceBusNo,
+          sourcePreview: change.sourcePreview,
+          targetBusNo: change.targetBusNo,
+          targetPreview: change.targetPreview,
+          routeSource: change.routeSource,
+          affectedUsersCount: change.affectedUsersCount,
+          createdAt: change.createdAt,
+          legacy: false,
+        };
+      }
+      const bus = entry.bus;
+      const target = targetsById.get(String(bus.altered_to_bus_id));
+      const identifiers = new Set([
+        bus.bus_no,
+        bus.preview_number,
+      ]
+        .filter((value) => value != null)
+        .map((value) => String(value).trim().toUpperCase()));
+      const affectedUsersCount = [...identifiers].reduce(
+        (sum, identifier) => sum + (riderCountsByBus.get(identifier) || 0),
+        0,
+      );
+      return {
         id: `legacy:${bus.bus_no}`,
         type: "alter",
         status: "active",
@@ -1076,13 +1361,23 @@ async function getTemporaryBusChanges(req, res) {
         targetBusNo: target?.bus_no ?? null,
         targetPreview: target?.preview_number ?? bus.altered_to_preview,
         routeSource: null,
-        affectedUsersCount: riders.length,
+        affectedUsersCount,
         createdAt: bus.altered_at,
         legacy: true,
-      });
-    }
+      };
+    });
 
-    return res.json({ success: true, changes });
+    return res.json({
+      success: true,
+      changes,
+      pagination: {
+        limit: pagination.limit,
+        hasNextPage,
+        nextCursor: hasNextPage
+          ? Buffer.from(JSON.stringify({ v: 1, ...nextCursor })).toString("base64url")
+          : null,
+      },
+    });
   } catch (error) {
     logSafeError("Get temporary bus changes failed", error);
     return res.status(500).json({
@@ -1169,26 +1464,29 @@ async function rollbackTemporaryBusChange(req, res) {
       });
     }
 
-    for (const snapshot of change.busSnapshots) {
-      const bus = busesById.get(String(snapshot.busId));
-      restoreBusSnapshot(bus, snapshot);
-      await bus.save();
-    }
-
     const restoredBusByNo = new Map(
       change.busSnapshots.map((snapshot) => [
         String(snapshot.busNo).toUpperCase(),
         snapshot.busNo,
       ]),
     );
-    for (const snapshot of change.assignmentSnapshots) {
-      const user = usersById.get(String(snapshot.userId));
-      if (!user) continue;
-      user.bus_no = snapshot.beforeBusNo
-        ? restoredBusByNo.get(String(snapshot.beforeBusNo).toUpperCase()) || snapshot.beforeBusNo
-        : null;
-      await user.save();
-    }
+    await runGpsConfigurationMutation(async (session) => {
+      for (const snapshot of change.busSnapshots) {
+        const bus = busesById.get(String(snapshot.busId));
+        restoreBusSnapshot(bus, snapshot);
+        if (session) await bus.save({ session });
+        else await bus.save();
+      }
+      for (const snapshot of change.assignmentSnapshots) {
+        const user = usersById.get(String(snapshot.userId));
+        if (!user) continue;
+        user.bus_no = snapshot.beforeBusNo
+          ? restoredBusByNo.get(String(snapshot.beforeBusNo).toUpperCase()) || snapshot.beforeBusNo
+          : null;
+        if (session) await user.save({ session });
+        else await user.save();
+      }
+    });
 
     change.status = "rolled_back";
     change.rolledBackAt = new Date();
@@ -1520,56 +1818,63 @@ async function changeBus(req, res, alterationType) {
       affectedUsersCount: assignmentSnapshots.length,
     });
 
-    if (targetCanBeReused) {
-      targetBus.status = "active";
-      targetBus.altered_to_bus_id = null;
-      targetBus.altered_to_preview = null;
-      targetBus.alteration_type = null;
-      targetBus.alteration_route_source = null;
-      targetBus.alteration_routes = [];
-      targetBus.altered_at = null;
-      targetBus.combined_route_source = null;
-      targetBus.combined_routes = [];
-      await targetBus.save();
-    }
+    await runGpsConfigurationMutation(async (session) => {
+      if (targetCanBeReused) {
+        targetBus.status = "active";
+        targetBus.altered_to_bus_id = null;
+        targetBus.altered_to_preview = null;
+        targetBus.alteration_type = null;
+        targetBus.alteration_route_source = null;
+        targetBus.alteration_routes = [];
+        targetBus.altered_at = null;
+        targetBus.combined_route_source = null;
+        targetBus.combined_routes = [];
+        if (session) await targetBus.save({ session });
+        else await targetBus.save();
+      }
 
-    if (isCombined) {
-      targetBus.combined_route_source = routeSource;
-      targetBus.combined_routes = selectedRoutes.map((route) => ({
-        plan_name: route.plan_name,
-        stop_name: route.stop_name,
-        stop_order: route.stop_order,
-        stopId: route.stopId || null,
-        arrival_time: route.arrival_time || null,
-      }));
-      await targetBus.save();
-      sourceBus.status = "active";
-      sourceBus.altered_to_bus_id = null;
-      sourceBus.altered_to_preview = null;
-      sourceBus.alteration_type = null;
-      sourceBus.alteration_route_source = null;
-      sourceBus.alteration_routes = [];
-      sourceBus.altered_at = null;
-      sourceBus.combined_route_source = null;
-      sourceBus.combined_routes = [];
-      await sourceBus.save();
-    } else {
-      sourceBus.status = "inactive";
-      sourceBus.altered_to_bus_id = targetBus._id;
-      sourceBus.altered_to_preview = targetBus.preview_number ?? null;
-      sourceBus.alteration_type = "alter";
-      sourceBus.alteration_route_source = null;
-      sourceBus.alteration_routes = [];
-      sourceBus.altered_at = new Date();
-      await sourceBus.save();
-    }
+      if (isCombined) {
+        targetBus.combined_route_source = routeSource;
+        targetBus.combined_routes = selectedRoutes.map((route) => ({
+          plan_name: route.plan_name,
+          stop_name: route.stop_name,
+          stop_order: route.stop_order,
+          stopId: route.stopId || null,
+          arrival_time: route.arrival_time || null,
+        }));
+        if (session) await targetBus.save({ session });
+        else await targetBus.save();
+        sourceBus.status = "active";
+        sourceBus.altered_to_bus_id = null;
+        sourceBus.altered_to_preview = null;
+        sourceBus.alteration_type = null;
+        sourceBus.alteration_route_source = null;
+        sourceBus.alteration_routes = [];
+        sourceBus.altered_at = null;
+        sourceBus.combined_route_source = null;
+        sourceBus.combined_routes = [];
+        if (session) await sourceBus.save({ session });
+        else await sourceBus.save();
+      } else {
+        sourceBus.status = "inactive";
+        sourceBus.altered_to_bus_id = targetBus._id;
+        sourceBus.altered_to_preview = targetBus.preview_number ?? null;
+        sourceBus.alteration_type = "alter";
+        sourceBus.alteration_route_source = null;
+        sourceBus.alteration_routes = [];
+        sourceBus.altered_at = new Date();
+        if (session) await sourceBus.save({ session });
+        else await sourceBus.save();
+      }
 
-    for (const [userId, busNo] of assignmentByUserId) {
-      await User.updateOne(
-        { _id: userId },
-        { $set: { bus_no: busNo } },
-      );
-    }
+      for (const [userId, busNo] of assignmentByUserId) {
+        await User.updateOne(
+          { _id: userId },
+          { $set: { bus_no: busNo } },
+          session ? { session } : {},
+        );
+      }
+    });
     if (isCombined) {
       const remainingSourceUsers = await findStudentsAssignedToBus(sourceBus);
       if (remainingSourceUsers.length) {
@@ -1700,7 +2005,7 @@ async function restoreAlteredBus(req, res) {
     bus.alteration_route_source = null;
     bus.alteration_routes = [];
     bus.altered_at = null;
-    await bus.save();
+    await saveBusWithGpsBarrier(bus);
 
     const message =
       alterationType === "combine"
@@ -1879,7 +2184,7 @@ async function updateBusDetails(req, res) {
 
     if (regNo !== undefined) bus.reg_no = regNo || null;
 
-    await bus.save();
+    await saveBusWithGpsBarrier(bus);
 
     res.json({
       success: true,
@@ -1923,6 +2228,9 @@ async function getLiveLocation(req, res) {
   try {
     const { busNo } = req.params;
     const normalizedBusNo = normalizeBusNumber(busNo ?? "");
+    if (req.query?.gpsOnly === "true") {
+      return await getGpsLocationSnapshot(req, res, busNo, normalizedBusNo);
+    }
 
     // Search by bus_no first, then fall back to preview_number.
     // This lets users track a bus via its short preview number (e.g. "4")
@@ -1986,7 +2294,7 @@ async function getLiveLocation(req, res) {
         buildReplacementDetails(bus, incomingChanges);
     const location = await BusLiveLocation.findOne({ bus_id: effectiveBus._id })
       .select(
-        "bus_id latitude longitude speed is_online lastSuccessfulGpsUpdate updatedAt source",
+        "bus_id latitude longitude speed is_online lastSuccessfulGpsUpdate providerTimestamp locationVersion updatedAt source",
       )
       .lean();
     const routes = getContextRoutesForBus(context, mappedBus);
@@ -2065,6 +2373,11 @@ async function getLiveLocation(req, res) {
         : "offline",
       source: location?.source || "offline",
       lastSuccessfulGpsUpdate: location?.lastSuccessfulGpsUpdate ?? null,
+      providerTimestamp: location?.providerTimestamp ?? null,
+      locationVersion:
+        location?.locationVersion == null
+          ? null
+          : String(location.locationVersion),
       lastUpdated:
         location?.lastSuccessfulGpsUpdate ?? location?.updatedAt ?? null,
       gpsOfflineThresholdMs:
@@ -2092,6 +2405,98 @@ async function getLiveLocation(req, res) {
       message: "Internal server error.",
     });
   }
+}
+
+async function getGpsLocationSnapshot(req, res, busNo, normalizedBusNo) {
+  let bus = await Bus.findOne({ bus_no: normalizedBusNo })
+    .select("_id bus_no preview_number altered_to_bus_id")
+    .lean();
+  if (!bus) {
+    bus = await Bus.findOne({
+      preview_number: { $in: [busNo, String(busNo)] },
+    })
+      .select("_id bus_no preview_number altered_to_bus_id")
+      .lean();
+  }
+  if (!bus) {
+    return res.status(404).json({
+      success: false,
+      error: "Bus not found",
+    });
+  }
+
+  const activePlan = await getCurrentGlobalPlan();
+  let locationBus = bus;
+  if (activePlan !== "PLAN A") {
+    const mapping = await PlanMapping.findOne({
+      plan_name: activePlan,
+      $or: [{ root_bus_id: bus._id }, { member_bus_ids: bus._id }],
+    })
+      .select("root_bus_id location_bus_id member_bus_ids")
+      .lean();
+    if (mapping) {
+      const isMember = (mapping.member_bus_ids || []).some(
+        (memberBusId) => String(memberBusId) === String(bus._id),
+      );
+      const locationBusId = mapping.location_bus_id
+        ? mapping.location_bus_id
+        : isMember
+          ? mapping.root_bus_id
+          : bus._id;
+      if (String(locationBusId) !== String(bus._id)) {
+        locationBus =
+          (await Bus.findById(locationBusId)
+            .select("_id bus_no preview_number altered_to_bus_id")
+            .lean()) || bus;
+      }
+    }
+  }
+
+  for (let depth = 0; locationBus?.altered_to_bus_id && depth < 20; depth += 1) {
+    const replacement = await Bus.findById(locationBus.altered_to_bus_id)
+      .select("_id bus_no preview_number altered_to_bus_id")
+      .lean();
+    if (!replacement) break;
+    locationBus = replacement;
+  }
+
+  const location = await BusLiveLocation.findOne({ bus_id: locationBus._id })
+    .select(
+      "latitude longitude speed is_online lastSuccessfulGpsUpdate providerTimestamp locationVersion source",
+    )
+    .lean();
+  const threshold =
+    Number(process.env.GPS_OFFLINE_THRESHOLD_MS) || 3 * 60 * 1000;
+  const lastSuccessfulGpsUpdate = location?.lastSuccessfulGpsUpdate ?? null;
+  const lastSuccessTime = Date.parse(lastSuccessfulGpsUpdate);
+  const isFresh =
+    location?.is_online === true &&
+    Number.isFinite(lastSuccessTime) &&
+    Date.now() - lastSuccessTime <= threshold;
+  const isSuperadmin =
+    String(req.user?.role || "").toLowerCase() === "superadmin";
+  const publicBusNumber = isSuperadmin
+    ? locationBus.bus_no
+    : String(locationBus.preview_number ?? locationBus.bus_no);
+
+  return res.status(200).json({
+    success: true,
+    busNo: publicBusNumber,
+    previewNumber: locationBus.preview_number ?? null,
+    latitude: location?.latitude ?? null,
+    longitude: location?.longitude ?? null,
+    speed: location?.speed ?? 0,
+    providerTimestamp: location?.providerTimestamp ?? null,
+    lastSuccessfulGpsUpdate,
+    locationVersion:
+      location?.locationVersion == null
+        ? null
+        : String(location.locationVersion),
+    is_online: isFresh,
+    status: isFresh ? "online" : "offline",
+    source: location?.source || "offline",
+    gpsOfflineThresholdMs: threshold,
+  });
 }
 
 // ================= TRACK BY PREVIEW =================
@@ -2152,7 +2557,7 @@ async function trackByPreview(req, res) {
         buildReplacementDetails(bus, incomingChanges);
     const location = await BusLiveLocation.findOne({ bus_id: effectiveBus._id })
       .select(
-        "bus_id latitude longitude speed is_online lastSuccessfulGpsUpdate updatedAt source",
+        "bus_id latitude longitude speed is_online lastSuccessfulGpsUpdate providerTimestamp locationVersion updatedAt source",
       )
       .lean();
     const routes = getContextRoutesForBus(context, mappedBus);
@@ -2199,6 +2604,11 @@ async function trackByPreview(req, res) {
           : "offline"
         : "offline",
       lastSuccessfulGpsUpdate: location?.lastSuccessfulGpsUpdate ?? null,
+      providerTimestamp: location?.providerTimestamp ?? null,
+      locationVersion:
+        location?.locationVersion == null
+          ? null
+          : String(location.locationVersion),
       lastUpdated:
         location?.lastSuccessfulGpsUpdate ?? location?.updatedAt ?? null,
       gpsOfflineThresholdMs:
@@ -2213,6 +2623,7 @@ async function trackByPreview(req, res) {
 
 module.exports = {
   findBusByIdentifier,
+  findStudentsAssignedToBus,
   resolveEffectiveBus,
   getCurrentGlobalPlan,
   getRoutesForBus,

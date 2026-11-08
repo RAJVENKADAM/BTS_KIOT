@@ -1,10 +1,14 @@
 const assert = require("node:assert/strict");
-const { test } = require("node:test");
+const { after, test } = require("node:test");
 const ExcelUpload = require("../src/models/ExcelUpload");
 const User = require("../src/models/User");
 const { importUsers } = require("../src/controllers/importUsers.controller");
 const excelUserService = require("../src/services/excelUserService");
 const { setIO } = require("../src/socket");
+const { mockGpsOwnershipTransactions } = require("./helpers/gpsOwnershipTransactionMock.cjs");
+
+const gpsOwnershipTransactions = mockGpsOwnershipTransactions();
+after(() => gpsOwnershipTransactions.restore());
 
 const userId = "64a000000000000000000001";
 
@@ -58,6 +62,7 @@ test("user import notifies an active session when an existing user's bus changes
     uploadUpdate: ExcelUpload.updateOne,
   };
   const notifications = createSocketCapture();
+  const transactionsBefore = gpsOwnershipTransactions.calls;
   const existingUser = {
     _id: userId,
     name: "Student",
@@ -98,6 +103,7 @@ test("user import notifies an active session when an existing user's bus changes
 
     assert.equal(response.statusCode, 200);
     assert.deepEqual(notifications, [expectedAssignmentNotification("BUS-9")]);
+    assert.equal(gpsOwnershipTransactions.calls, transactionsBefore + 1);
   } finally {
     User.find = originals.userFind;
     User.bulkWrite = originals.userBulkWrite;

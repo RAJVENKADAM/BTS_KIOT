@@ -14,7 +14,7 @@ import React, {
 } from "react";
 import io from "socket.io-client";
 import { AppState } from "react-native";
-import { API_BASE_URL } from "../api/api";
+import { API_BASE_URL, SOCKET_BASE_URL } from "../api/api";
 import { useAuth } from "./AuthContext";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { fetchJson, getErrorMessage } from "../utils/errorHandler";
@@ -126,10 +126,10 @@ export const BusProvider = ({ children }) => {
     let diagnosticSocketId = null;
     let manualReconnectAttemptNumber = 0;
     let pendingManualReconnectAttempt = null;
-    const observedEngines = new WeakSet();
+    const observedEngines = new Map();
     // Connect to the root namespace — backend socket.io serves only "/".
     // Backend uses `path: "/socket.io"` (no trailing slash).
-    const newSocket = io(`${API_BASE_URL}`, {
+    const newSocket = io(`${SOCKET_BASE_URL}`, {
       path: "/socket.io",
       transports: ["websocket"],
       autoConnect: shouldConnectSocketForAppState(appStateRef.current),
@@ -150,9 +150,8 @@ export const BusProvider = ({ children }) => {
     const attachEngineDiagnostics = () => {
       const engine = newSocket.io.engine;
       if (!engine || observedEngines.has(engine)) return;
-      observedEngines.add(engine);
       diagnosticSocketId = newSocket.id || engine.id || diagnosticSocketId;
-      engine.on("close", (reason, description) => {
+      const handleEngineClose = (reason, description) => {
         logDiagnostic("client-engine-closed", {
           disconnectReason: reason,
           disconnectDescription: description,
@@ -162,9 +161,12 @@ export const BusProvider = ({ children }) => {
           reconnectionAttemptNumber: manualReconnectAttemptNumber || null,
           reconnectionResult: newSocket.active ? "pending" : null,
         });
-      });
+      };
+      observedEngines.set(engine, handleEngineClose);
+      engine.on("close", handleEngineClose);
     };
-    newSocket.io.on("open", attachEngineDiagnostics);
+    const handleManagerOpen = () => attachEngineDiagnostics();
+    newSocket.io.on("open", handleManagerOpen);
 
     const startManualReconnect = (trigger) => {
       manualReconnectAttemptNumber += 1;
@@ -248,23 +250,23 @@ export const BusProvider = ({ children }) => {
       }
     });
 
-    newSocket.io.on("reconnect_attempt", (attempt) => {
+    const handleManagerReconnectAttempt = (attempt) => {
       logDiagnostic("client-manager-reconnect-attempt", {
         wasConnected,
         reconnectionAttempted: true,
         reconnectionAttemptNumber: attempt,
         reconnectionResult: "pending",
       });
-    });
-    newSocket.io.on("reconnect", (attempt) => {
+    };
+    const handleManagerReconnect = (attempt) => {
       logDiagnostic("client-manager-reconnected", {
         wasConnected,
         reconnectionAttempted: true,
         reconnectionAttemptNumber: attempt,
         reconnectionResult: "success",
       });
-    });
-    newSocket.io.on("reconnect_error", (error) => {
+    };
+    const handleManagerReconnectError = (error) => {
       logDiagnostic("client-manager-reconnect-error", {
         disconnectDescription: error,
         wasConnected,
@@ -272,15 +274,19 @@ export const BusProvider = ({ children }) => {
         reconnectionAttemptNumber: manualReconnectAttemptNumber || null,
         reconnectionResult: "failed",
       });
-    });
-    newSocket.io.on("reconnect_failed", () => {
+    };
+    const handleManagerReconnectFailed = () => {
       logDiagnostic("client-manager-reconnect-failed", {
         wasConnected,
         reconnectionAttempted: true,
         reconnectionAttemptNumber: SOCKET_RECONNECTION_ATTEMPTS,
         reconnectionResult: "failed",
       });
-    });
+    };
+    newSocket.io.on("reconnect_attempt", handleManagerReconnectAttempt);
+    newSocket.io.on("reconnect", handleManagerReconnect);
+    newSocket.io.on("reconnect_error", handleManagerReconnectError);
+    newSocket.io.on("reconnect_failed", handleManagerReconnectFailed);
 
     const appStateSubscription = AppState.addEventListener(
       "change",
@@ -324,6 +330,15 @@ export const BusProvider = ({ children }) => {
         wasConnected: newSocket.connected,
         reconnectionAttempted: false,
       });
+      newSocket.io.off("open", handleManagerOpen);
+      newSocket.io.off("reconnect_attempt", handleManagerReconnectAttempt);
+      newSocket.io.off("reconnect", handleManagerReconnect);
+      newSocket.io.off("reconnect_error", handleManagerReconnectError);
+      newSocket.io.off("reconnect_failed", handleManagerReconnectFailed);
+      for (const [engine, handleEngineClose] of observedEngines) {
+        engine.off("close", handleEngineClose);
+      }
+      observedEngines.clear();
       newSocket.removeAllListeners();
       newSocket.disconnect();
     };

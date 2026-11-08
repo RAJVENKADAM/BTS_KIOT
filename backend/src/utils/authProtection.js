@@ -1,163 +1,163 @@
-const ACCOUNT_WINDOW_MS = 15 * 60 * 1000;
-const MAX_ACCOUNT_ATTEMPTS = 10;
-const MAX_TRACKED_ACCOUNTS = 50000;
-
-const MAX_AUTH_OPERATIONS = 8;
-const MAX_QUEUED_AUTH_OPERATIONS = 16;
-const MAX_PASSWORD_CHECKS = 4;
-const MAX_QUEUED_PASSWORD_CHECKS = 64;
 const {
   MAX_CONCURRENT_IMPORT_PASSWORD_HASHES,
   MAX_QUEUED_IMPORT_PASSWORD_HASHES,
 } = require("./userImportLimits");
 
-const loginAttempts = new Map();
-let nextReservationId = 0;
-let activeAuthOperations = 0;
-let activePasswordChecks = 0;
-let activeImportPasswordHashes = 0;
-const authOperationQueue = [];
-const passwordCheckQueue = [];
-const importPasswordHashQueue = [];
-
 const createBusyError = () => {
-  const error = new Error('Authentication service is busy');
+  const error = new Error("Authentication service is busy");
   error.status = 503;
-  error.code = 'AUTH_BUSY';
+  error.code = "AUTH_BUSY";
   error.retryAfter = 2;
   return error;
 };
 
-const pruneAttempts = (email, now) => {
-  const attempts = loginAttempts.get(email);
-  if (!attempts) return [];
-
-  const activeAttempts = attempts.filter(
-    (attempt) => now - attempt.createdAt < ACCOUNT_WINDOW_MS,
-  );
-  if (activeAttempts.length) {
-    loginAttempts.set(email, activeAttempts);
-  } else {
-    loginAttempts.delete(email);
+function readIntegerEnv(name, fallback, { min = 1, max = 1000 } = {}) {
+  const value = process.env[name];
+  if (value === undefined || value === "") return fallback;
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`);
   }
-  return activeAttempts;
-};
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`);
+  }
+  return parsed;
+}
 
-const reserveLoginAttempt = (email, now = Date.now()) => {
-  const attempts = pruneAttempts(email, now);
-  if (attempts.length >= MAX_ACCOUNT_ATTEMPTS) {
-    return {
-      allowed: false,
-      retryAfter: Math.max(
-        1,
-        Math.ceil((ACCOUNT_WINDOW_MS - (now - attempts[0].createdAt)) / 1000),
-      ),
-    };
+function createWorkLimiter({ maxActive, maxQueued, maxWaitMs = 5000 }) {
+  if (!Number.isSafeInteger(maxActive) || maxActive < 1) {
+    throw new TypeError("maxActive must be a positive integer");
+  }
+  if (!Number.isSafeInteger(maxQueued) || maxQueued < 0) {
+    throw new TypeError("maxQueued must be a non-negative integer");
+  }
+  if (!Number.isSafeInteger(maxWaitMs) || maxWaitMs < 0) {
+    throw new TypeError("maxWaitMs must be a non-negative integer");
   }
 
-  if (!loginAttempts.has(email) && loginAttempts.size >= MAX_TRACKED_ACCOUNTS) {
-    for (const [trackedEmail] of loginAttempts) {
-      pruneAttempts(trackedEmail, now);
-      if (loginAttempts.size < MAX_TRACKED_ACCOUNTS) break;
+  let active = 0;
+  const queue = [];
+
+  const start = (entry) => {
+    if (entry.timer) clearTimeout(entry.timer);
+    entry.started = true;
+    active += 1;
+    Promise.resolve()
+      .then(entry.task)
+      .then(
+        (value) => {
+          active -= 1;
+          drain();
+          entry.resolve(value);
+        },
+        (error) => {
+          active -= 1;
+          drain();
+          entry.reject(error);
+        },
+      );
+  };
+
+  const drain = () => {
+    while (active < maxActive && queue.length > 0) {
+      const entry = queue.shift();
+      if (!entry.settled) start(entry);
     }
-    if (loginAttempts.size >= MAX_TRACKED_ACCOUNTS) {
-      loginAttempts.delete(loginAttempts.keys().next().value);
-    }
-  }
+  };
 
-  const reservationId = ++nextReservationId;
-  const updatedAttempts = [...attempts, { id: reservationId, createdAt: now }];
-  loginAttempts.set(email, updatedAttempts);
-  return { allowed: true, reservationId };
-};
+  const run = (task) =>
+    new Promise((resolve, reject) => {
+      if (typeof task !== "function") {
+        reject(new TypeError("Limited work must be a function"));
+        return;
+      }
 
-const releaseLoginAttempt = (email, reservationId) => {
-  const attempts = loginAttempts.get(email);
-  if (!attempts) return;
-  const remaining = attempts.filter((attempt) => attempt.id !== reservationId);
-  if (remaining.length) loginAttempts.set(email, remaining);
-  else loginAttempts.delete(email);
-};
+      const entry = {
+        task,
+        resolve,
+        reject,
+        timer: null,
+        started: false,
+        settled: false,
+      };
 
-const clearLoginAttempts = (email) => {
-  loginAttempts.delete(email);
-};
+      if (active < maxActive) {
+        start(entry);
+        return;
+      }
+      if (queue.length >= maxQueued) {
+        reject(createBusyError());
+        return;
+      }
 
-const runWithLimit = (task, state) =>
-  new Promise((resolve, reject) => {
-    const execute = () => {
-      state.increment();
-      Promise.resolve()
-        .then(task)
-        .then(resolve, reject)
-        .finally(() => {
-          state.decrement();
-          const next = state.queue.shift();
-          if (next) next();
-        });
-    };
+      queue.push(entry);
+      if (maxWaitMs === 0) {
+        entry.settled = true;
+        queue.splice(queue.indexOf(entry), 1);
+        reject(createBusyError());
+        return;
+      }
+      entry.timer = setTimeout(() => {
+        if (entry.started || entry.settled) return;
+        entry.settled = true;
+        const index = queue.indexOf(entry);
+        if (index !== -1) queue.splice(index, 1);
+        reject(createBusyError());
+      }, maxWaitMs);
+    });
 
-    if (state.active < state.maxActive) {
-      execute();
-    } else if (state.queue.length < state.maxQueued) {
-      state.queue.push(execute);
-    } else {
-      reject(createBusyError());
-    }
-  });
+  return {
+    run,
+    getStatus: () => ({ active, queued: queue.length }),
+  };
+}
 
-const runLimitedAuthOperation = (task) =>
-  runWithLimit(task, {
-    get active() {
-      return activeAuthOperations;
-    },
-    increment: () => {
-      activeAuthOperations += 1;
-    },
-    decrement: () => {
-      activeAuthOperations -= 1;
-    },
-    queue: authOperationQueue,
-    maxActive: MAX_AUTH_OPERATIONS,
-    maxQueued: MAX_QUEUED_AUTH_OPERATIONS,
-  });
+const authOperationLimiter = createWorkLimiter({
+  maxActive: readIntegerEnv("AUTH_MAX_CONCURRENT_OPERATIONS", 8, {
+    max: 64,
+  }),
+  maxQueued: readIntegerEnv("AUTH_MAX_QUEUED_OPERATIONS", 64, {
+    min: 0,
+    max: 512,
+  }),
+  maxWaitMs: readIntegerEnv("AUTH_QUEUE_WAIT_MS", 30000, {
+    min: 1,
+    max: 120000,
+  }),
+});
 
-const runLimitedPasswordCheck = (task) =>
-  runWithLimit(task, {
-    get active() {
-      return activePasswordChecks;
-    },
-    increment: () => {
-      activePasswordChecks += 1;
-    },
-    decrement: () => {
-      activePasswordChecks -= 1;
-    },
-    queue: passwordCheckQueue,
-    maxActive: MAX_PASSWORD_CHECKS,
-    maxQueued: MAX_QUEUED_PASSWORD_CHECKS,
-  });
+const passwordCheckLimiter = createWorkLimiter({
+  maxActive: readIntegerEnv("AUTH_MAX_CONCURRENT_PASSWORD_CHECKS", 4, {
+    max: 64,
+  }),
+  maxQueued: readIntegerEnv("AUTH_MAX_QUEUED_PASSWORD_CHECKS", 64, {
+    min: 0,
+    max: 512,
+  }),
+  maxWaitMs: readIntegerEnv(
+    "AUTH_PASSWORD_QUEUE_WAIT_MS",
+    readIntegerEnv("AUTH_QUEUE_WAIT_MS", 60000, {
+      min: 1,
+      max: 120000,
+    }),
+    { min: 1, max: 120000 },
+  ),
+});
 
+const importPasswordHashLimiter = createWorkLimiter({
+  maxActive: MAX_CONCURRENT_IMPORT_PASSWORD_HASHES,
+  maxQueued: MAX_QUEUED_IMPORT_PASSWORD_HASHES,
+  maxWaitMs: 30000,
+});
+
+const runLimitedAuthOperation = (task) => authOperationLimiter.run(task);
+const runLimitedPasswordCheck = (task) => passwordCheckLimiter.run(task);
 const runLimitedImportPasswordHash = (task) =>
-  runWithLimit(task, {
-    get active() {
-      return activeImportPasswordHashes;
-    },
-    increment: () => {
-      activeImportPasswordHashes += 1;
-    },
-    decrement: () => {
-      activeImportPasswordHashes -= 1;
-    },
-    queue: importPasswordHashQueue,
-    maxActive: MAX_CONCURRENT_IMPORT_PASSWORD_HASHES,
-    maxQueued: MAX_QUEUED_IMPORT_PASSWORD_HASHES,
-  });
+  importPasswordHashLimiter.run(task);
 
 module.exports = {
-  reserveLoginAttempt,
-  releaseLoginAttempt,
-  clearLoginAttempts,
+  createWorkLimiter,
+  readIntegerEnv,
   runLimitedAuthOperation,
   runLimitedPasswordCheck,
   runLimitedImportPasswordHash,

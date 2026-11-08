@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { test } = require("node:test");
+const { after, test } = require("node:test");
 const User = require("../src/models/User");
 const Notification = require("../src/models/Notification");
 const {
@@ -8,6 +8,10 @@ const {
   updateUser,
   updateUsersRole,
 } = require("../src/controllers/superadminUser.controller");
+const { mockGpsOwnershipTransactions } = require("./helpers/gpsOwnershipTransactionMock.cjs");
+
+const gpsOwnershipTransactions = mockGpsOwnershipTransactions();
+after(() => gpsOwnershipTransactions.restore());
 
 test("lists authorized users and excludes deactivated accounts", async () => {
   const originalFind = User.find;
@@ -120,6 +124,88 @@ test("paginates superadmin users, clamps limits, and escapes search input", asyn
   }
 });
 
+test("cursor user listing applies server filters and bounds the database read", async () => {
+  const originalFind = User.find;
+  const originalCountDocuments = User.countDocuments;
+  const records = [
+    { _id: "64a000000000000000000001", name: "One" },
+    { _id: "64a000000000000000000002", name: "Two" },
+    { _id: "64a000000000000000000003", name: "Three" },
+  ];
+  let filter;
+  let sort;
+  let limit;
+  User.find = (query) => {
+    filter = query;
+    return {
+      select: () => ({
+        sort: (value) => {
+          sort = value;
+          return {
+            limit: (value) => {
+              limit = value;
+              return { lean: async () => records };
+            },
+          };
+        },
+      }),
+    };
+  };
+  User.countDocuments = async () => 6;
+  const response = {
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.payload = payload;
+      return this;
+    },
+  };
+
+  try {
+    await getUsers(
+      {
+        query: {
+          cursorMode: "true",
+          limit: "2",
+          role: "student",
+          busNo: "bus-4",
+          search: "student",
+        },
+      },
+      response,
+    );
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(filter, {
+      is_active: { $ne: false },
+      $or: [
+        { name: /student/i },
+        { email: /student/i },
+        { role: /student/i },
+        { bus_no: /student/i },
+      ],
+      role: "student",
+      bus_no: "BUS-4",
+    });
+    assert.deepEqual(sort, { _id: 1 });
+    assert.equal(limit, 3);
+    assert.deepEqual(
+      response.payload.users.map((user) => user.id),
+      ["64a000000000000000000001", "64a000000000000000000002"],
+    );
+    assert.equal(
+      response.payload.pagination.nextCursor,
+      "64a000000000000000000002",
+    );
+    assert.equal(response.payload.pagination.hasNextPage, true);
+  } finally {
+    User.find = originalFind;
+    User.countDocuments = originalCountDocuments;
+  }
+});
+
 test("rejects invalid superadmin user pagination", async () => {
   const originalFind = User.find;
   User.find = () => {
@@ -139,6 +225,31 @@ test("rejects invalid superadmin user pagination", async () => {
 
   try {
     await getUsers({ query: { limit: "nope" } }, response);
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.payload.success, false);
+  } finally {
+    User.find = originalFind;
+  }
+});
+
+test("rejects invalid cursor before querying users", async () => {
+  const originalFind = User.find;
+  User.find = () => {
+    throw new Error("Must not query users for an invalid cursor.");
+  };
+  const response = {
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.payload = payload;
+      return this;
+    },
+  };
+
+  try {
+    await getUsers({ query: { cursor: "invalid" } }, response);
     assert.equal(response.statusCode, 400);
     assert.equal(response.payload.success, false);
   } finally {

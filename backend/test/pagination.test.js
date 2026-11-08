@@ -1,7 +1,8 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { parsePagination } = require("../src/utils/pagination");
+const { parseCursor, parsePagination } = require("../src/utils/pagination");
 const ExcelUpload = require("../src/models/ExcelUpload");
+const BusChange = require("../src/models/BusChange");
 const User = require("../src/models/User");
 
 test("pagination defaults to the first page and configured page size", () => {
@@ -38,6 +39,19 @@ test("pagination rejects malformed, zero, negative, and unsafe values", () => {
   }
 });
 
+test("cursor pagination validates opaque user identifiers and rejects mixed modes", () => {
+  assert.deepEqual(parseCursor({ cursorMode: "true" }), {
+    cursorMode: true,
+    cursor: null,
+  });
+  assert.deepEqual(parseCursor({ cursor: "64a000000000000000000001" }), {
+    cursorMode: true,
+    cursor: "64a000000000000000000001",
+  });
+  assert.ok(parseCursor({ cursor: "invalid" }).error);
+  assert.ok(parseCursor({ cursorMode: "true", page: "2" }).error);
+});
+
 test("declares indexes for upload ownership and paginated upload-user queries", () => {
   const uploadIndexes = ExcelUpload.schema.indexes().map(([fields]) => fields);
   const userIndexes = User.schema.indexes().map(([fields]) => fields);
@@ -53,6 +67,18 @@ test("declares indexes for upload ownership and paginated upload-user queries", 
         fields.excel_upload_id === 1 &&
         fields.is_active === 1 &&
         fields._id === 1,
+    ),
+  );
+});
+
+test("declares compound sort indexes for temporary bus-change cursor streams", () => {
+  const indexes = BusChange.schema.indexes().map(([fields]) => fields);
+  assert.ok(
+    indexes.some(
+      (fields) =>
+        fields.status === 1 &&
+        fields.createdAt === -1 &&
+        fields._id === -1,
     ),
   );
 });

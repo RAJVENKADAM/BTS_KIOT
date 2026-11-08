@@ -45,6 +45,10 @@ longitude: {
       type: Date,
       default: null,
     },
+    providerTimestamp: {
+      type: Date,
+      default: null,
+    },
 
     // Explicit requirement: updated every worker cycle (success or failure)
     // This is separate from timestamps.updatedAt.
@@ -57,9 +61,74 @@ longitude: {
       type: String,
       default: 'gps',
     },
+    gpsFenceToken: {
+      type: mongoose.Schema.Types.BigInt,
+      default: 0n,
+    },
+    locationVersion: {
+      type: mongoose.Schema.Types.BigInt,
+      default: 0n,
+    },
+    publishedVersion: {
+      type: mongoose.Schema.Types.BigInt,
+      default: 0n,
+    },
+    publicationPending: {
+      type: Boolean,
+      default: false,
+    },
+    publicationRooms: {
+      type: [String],
+      default: [],
+    },
+    publicationPreviewNumber: {
+      type: String,
+      default: null,
+    },
+    publicationClaimId: {
+      type: String,
+      default: null,
+    },
+    publicationClaimUntil: {
+      type: Date,
+      default: null,
+    },
+    publicationNextAttemptAt: {
+      type: Date,
+      default: null,
+    },
+    publicationCreatedAt: {
+      type: Date,
+      default: null,
+    },
+    publicationAttempts: {
+      type: Number,
+      default: 0,
+    },
+    publicationRetryExhausted: {
+      type: Boolean,
+      default: false,
+    },
+    publicationLastErrorCode: {
+      type: String,
+      default: null,
+      maxlength: 80,
+    },
+    publicationLastPublishedAt: {
+      type: Date,
+      default: null,
+    },
   },
   { timestamps: true }
 );
+
+busLiveLocationSchema.index({
+  publicationPending: 1,
+  publicationRetryExhausted: 1,
+  publicationNextAttemptAt: 1,
+  publicationClaimUntil: 1,
+  updatedAt: 1,
+});
 
 // Ensure the schema always has an initial consistent shape even when
 // upserting from worker before the first successful provider response.

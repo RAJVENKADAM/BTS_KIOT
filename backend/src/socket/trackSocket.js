@@ -196,7 +196,7 @@ function registerTrackSocketHandlers({
 
         const location = await BusLiveLocationModel.findOne({ bus_id: bus._id })
             .select(
-              "latitude longitude speed is_online source lastSuccessfulGpsUpdate updatedAt",
+              "latitude longitude speed is_online source providerTimestamp locationVersion lastSuccessfulGpsUpdate updatedAt",
             )
           .lean();
         if (disconnected || socket.connected === false) return;
@@ -213,6 +213,11 @@ function registerTrackSocketHandlers({
           lastSuccessfulGpsUpdate: location
             ? location.lastSuccessfulGpsUpdate
             : null,
+          providerTimestamp: location?.providerTimestamp ?? null,
+          locationVersion:
+            location?.locationVersion == null
+              ? null
+              : String(location.locationVersion),
           lastUpdated: location
             ? location.lastSuccessfulGpsUpdate || location.updatedAt
             : null,

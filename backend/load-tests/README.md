@@ -1,86 +1,113 @@
-# BTMS student load test
+# BTMS capacity test preparation
 
-This manual runner models exactly 20 existing student accounts. It uses the
-backend's current contracts:
+These are manual, bounded test runners. They are never imported or launched by
+the application, `npm test`, or another runner. **Production is permanently
+blocked in code.** There is no production confirmation variable or interactive
+bypass. No production load test is authorized by this documentation.
 
-- `POST /api/auth/login`
-- `GET /api/bus/get-all-buses`
-- `GET /api/bus/routes/:busNo`
-- `GET /api/bus/location/:busNo`
-- Socket.IO authentication with `auth: { token }`, `join-bus`,
-  `request-bus-location`, `locationUpdate`, and `leave-bus`
-- `POST /api/auth/logout`
+## Runners and fixtures
 
-The read-only API calls are GET requests. Login issues JWTs, and logout is a
-stateless POST that returns success without revoking those JWTs. The runner
-disconnects its local sockets and stops using the tokens, but server-side token
-validity continues until expiry. It does not create, update, or delete
-accounts, and does not issue administrative requests. The five-minute socket
-window includes one controlled reconnect per connected client. No test starts
-automatically.
+- `student-login-capacity-test.js` sends one concurrent login request for each
+  of exactly 50 unique accounts in the Git-ignored
+  `student-login-capacity-accounts.json`.
+- `student-capacity-test.js` runs exactly one selected `login`, `active`,
+  `endurance`, or `recovery` scenario per invocation at one stage (20, 50,
+  100, 250, or 500 virtual clients). Its Git-ignored `accounts.json` fixture
+  may contain fewer accounts than virtual clients. The runner reports unique
+  accounts and reuse separately: 500 clients backed by 20 accounts means 20
+  distinct students and 480 reused virtual-client assignments, not 500
+  students. Active clients log in once per unique account and reuse JWTs for
+  separate sockets; the login scenario sends one login per virtual client and
+  cycles through fixture accounts.
 
-## Prepare accounts safely
+Use only authorized, dedicated test identities. Never put real student
+passwords, production credentials, or tokens in source control. The scripts
+do not print credentials, email addresses, tokens, response bodies, or
+location coordinates. They do not create or mutate accounts, request GPS
+provider updates, or execute database migrations. Local cleanup disconnects
+their sockets and does not revoke JWTs.
 
-`backend/load-tests/accounts.json` must contain exactly 20 distinct, active
-student test accounts in the shape `{ "accounts": [{ "email": "...",
-"password": "..." }] }`. Keep the file local; it is excluded by this folder's
-`.gitignore`. Use dedicated non-personal test identities, unique credentials,
-and valid bus assignments where possible. Never use real student passwords or
-commit/share this file. The runner validates the account count and entry shape
-without printing credentials, emails, tokens, response bodies, or names. Do not
-replace or regenerate an already populated accounts file for this test.
+## Target safety
 
-## Target safety and Render production confirmation
+The default target is `http://127.0.0.1:5000`. HTTP is permitted only on
+`localhost`, IPv4 loopback, or IPv6 loopback, and only on backend port 5000.
+Remote targets require HTTPS on the default port, an exact hostname in
+`BTMS_CAPACITY_STAGING_HOSTS`, and `BTMS_CAPACITY_CONFIRM_STAGING=YES`.
+Hostnames are normalized for case, trailing dots, and URL/IDNA parsing before
+comparison. `bts-kiot.onrender.com` is rejected regardless of case, trailing
+dot, scheme, port, or confirmation variables. Arbitrary remote HTTP targets,
+credentials in URLs, paths, query strings, and fragments are rejected.
 
-The default target is `http://127.0.0.1:5000`. The known production host and
-other hosts containing `prod` / `production` are blocked. The exact Render
-origin `https://bts-kiot.onrender.com` is permitted only with the dedicated
-`BTMS_LOAD_TEST_PRODUCTION_CONFIRMATION` value shown below; the staging
-confirmation flag alone cannot authorize production. Other remote URLs require
-`BTMS_LOAD_TEST_CONFIRM_STAGING=YES`.
+The allowlist is an operator assertion, not a way to prove environment
+identity. Add only a dedicated staging hostname whose DNS and backend
+configuration have been independently confirmed to use isolated test data.
+Do not allowlist production aliases. Remote requests are not made by automated
+tests.
 
-The script cannot verify which database the deployed backend uses or whether
-Render's configured service is currently production. Confirm the URL and
-deployment identity independently. Running this test creates load on the
-deployed service: 20 concurrent password checks, read queries, sockets, and
-location requests can affect real users and may trigger service limits. Choose
-a low-traffic window and monitor Render. Do not run during incidents or peak
-usage.
+Required variables for an explicitly authorized staging run:
 
-The runner limits itself to 20 accounts, 20 simultaneous login attempts, no
-more than 20 concurrent API requests, and 20 socket clients. It makes no
-retries for HTTP requests. Summary timings include average and nearest-rank
-p50/p95/p99 per API operation. Failure details identify clients only by
-`Client 01` through `Client 20`. Socket lifecycle diagnostics use temporary
-Socket.IO IDs and sanitized reasons/descriptions; they do not include account
-data, JWTs, or location payloads.
+| Variable | Purpose |
+|---|---|
+| `BTMS_CAPACITY_BASE_URL` | Active-runner origin |
+| `BTMS_LOGIN_CAPACITY_BASE_URL` | 50-account login-runner origin |
+| `BTMS_CAPACITY_STAGING_HOSTS` | Comma-separated exact staging hostnames |
+| `BTMS_CAPACITY_CONFIRM_STAGING` | Must equal `YES` for a remote staging run |
 
-## Run manually in PowerShell
+No secrets are needed in these target variables. The runners read their
+credentials from local Git-ignored fixture JSON files.
+
+## Safe local commands (PowerShell)
+
+Run synthetic runner tests without network access:
 
 ```powershell
 Set-Location 'E:\My Works\College Products\BTS\backend'
-
-# This explicitly authorizes the known Render production origin.
-# Do not execute until you have reviewed the risks and approved the production test.
-$env:BTMS_LOAD_TEST_BASE_URL = 'https://bts-kiot.onrender.com'
-$env:BTMS_LOAD_TEST_PRODUCTION_CONFIRMATION = 'I_APPROVE_20_STUDENT_LOAD_TEST_ON_PRODUCTION'
-
-try {
-    node --check .\load-tests\student-load-test.js
-    if ($LASTEXITCODE -ne 0) { throw 'Syntax check failed; load test was not started.' }
-
-    node .\load-tests\student-load-test.js
-    $testExitCode = $LASTEXITCODE
-}
-finally {
-    Remove-Item Env:\BTMS_LOAD_TEST_BASE_URL -ErrorAction SilentlyContinue
-    Remove-Item Env:\BTMS_LOAD_TEST_PRODUCTION_CONFIRMATION -ErrorAction SilentlyContinue
-}
-
-if ($testExitCode -ne 0) { exit $testExitCode }
+node --test .\test\student-login-capacity-test.test.js
+node --test .\test\student-capacity-test.test.js
 ```
 
-The runner uses Node's built-in `fetch` and the existing `socket.io-client`
-dependency from `frontend/package.json`; no new package installation is needed
-when frontend dependencies are already installed. It takes at least five
-minutes plus connection, API, and logout time.
+For intentional local testing, first start a local backend with an isolated
+test database and populate the appropriate local fixture. Review the
+requested workload before running a command:
+
+```powershell
+Set-Location 'E:\My Works\College Products\BTS\backend'
+node .\load-tests\student-login-capacity-test.js
+node .\load-tests\student-capacity-test.js --scenario login --clients 20
+node .\load-tests\student-capacity-test.js --scenario active --clients 20 --ramp-ms 60000 --hold-ms 300000
+```
+
+The 50-account runner sends 50 simultaneous login requests. The staged runner
+caps virtual clients at 500, ramp input at 10 minutes, hold input at 2 hours,
+HTTP/socket/event timeouts at 2 minutes, reconnection attempts at 5, and
+calculated total duration (including timeout/reconnect allowance) at 2 hours.
+The total-duration limit means the maximum usable hold is less than 2 hours.
+Defaults use 15-second HTTP, 30-second socket, and 2-minute location-event
+timeouts. Login burst, sustained authenticated sessions, recovery, and
+endurance remain separate scenarios. The endurance scenario requires at least
+60 minutes of hold time.
+
+For staging, set the exact approved hostname and allowlist only for the
+current PowerShell session, then clear the variables:
+
+```powershell
+$env:BTMS_CAPACITY_BASE_URL = 'https://<approved-staging-host>'
+$env:BTMS_LOGIN_CAPACITY_BASE_URL = 'https://<approved-staging-host>'
+$env:BTMS_CAPACITY_STAGING_HOSTS = '<approved-staging-host>'
+$env:BTMS_CAPACITY_CONFIRM_STAGING = 'YES'
+try {
+    node .\load-tests\student-capacity-test.js --scenario active --clients 20 --ramp-ms 60000 --hold-ms 300000
+}
+finally {
+    Remove-Item Env:\BTMS_CAPACITY_BASE_URL -ErrorAction SilentlyContinue
+    Remove-Item Env:\BTMS_LOGIN_CAPACITY_BASE_URL -ErrorAction SilentlyContinue
+    Remove-Item Env:\BTMS_CAPACITY_STAGING_HOSTS -ErrorAction SilentlyContinue
+    Remove-Item Env:\BTMS_CAPACITY_CONFIRM_STAGING -ErrorAction SilentlyContinue
+}
+```
+
+Load tests create real backend load and can affect other users. Automated
+coverage uses synthetic accounts and injected HTTP/socket implementations;
+it proves validation and runner behavior, not backend capacity or staging
+isolation. Review reports and monitor the authorized test environment before
+choosing another stage.

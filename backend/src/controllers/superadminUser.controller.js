@@ -5,8 +5,9 @@ const {
   disconnectUserSockets,
   emitBusAssignmentNotification,
 } = require('../socket');
-const { escapeRegExp, parsePagination } = require('../utils/pagination');
+const { escapeRegExp, parseCursor, parsePagination } = require('../utils/pagination');
 const { logSafeError } = require('../utils/safeErrorLog');
+const { runGpsConfigurationMutation } = require('../services/gpsConfigurationBarrier');
 
 const VALID_ROLES = ['student', 'primary_admin', 'superadmin'];
 
@@ -58,21 +59,61 @@ async function getUsers(req, res) {
     if (pagination.error) {
       return res.status(400).json({ success: false, error: pagination.error });
     }
+    const cursor = parseCursor(req.query || {});
+    if (cursor.error) {
+      return res.status(400).json({ success: false, error: cursor.error });
+    }
 
     const filter = { is_active: { $ne: false } };
     if (pagination.search) {
       const search = new RegExp(escapeRegExp(pagination.search), 'i');
-      filter.$or = [{ name: search }, { email: search }];
+      filter.$or = [
+        { name: search },
+        { email: search },
+        { role: search },
+        { bus_no: search },
+      ];
     }
-    const [users, total] = await Promise.all([
-      User.find(filter)
-      .select('name email role bus_no is_active')
-      .sort({ name: 1, email: 1 })
-      .skip(pagination.skip)
-      .limit(pagination.limit)
-      .lean(),
+    if (req.query?.role) {
+      if (!VALID_ROLES.includes(req.query.role)) {
+        return res.status(400).json({ success: false, error: 'Select a supported role filter.' });
+      }
+      filter.role = req.query.role;
+    }
+    if (req.query?.busNo) {
+      if (typeof req.query.busNo !== 'string' || req.query.busNo.trim().length > 100) {
+        return res.status(400).json({ success: false, error: 'Bus filter is invalid.' });
+      }
+      filter.bus_no = req.query.busNo.trim().toUpperCase();
+    }
+
+    const queryFilter = cursor.cursorMode
+      ? {
+          ...filter,
+          ...(cursor.cursor ? { _id: { $gt: cursor.cursor } } : {}),
+        }
+      : filter;
+    const [records, total] = await Promise.all([
+      cursor.cursorMode
+        ? User.find(queryFilter)
+            .select('name email role bus_no is_active')
+            .sort({ _id: 1 })
+            .limit(pagination.limit + 1)
+            .lean()
+        : User.find(queryFilter)
+            .select('name email role bus_no is_active')
+            .sort({ name: 1, email: 1 })
+            .skip(pagination.skip)
+            .limit(pagination.limit)
+            .lean(),
       User.countDocuments(filter),
     ]);
+    const hasNextPage = cursor.cursorMode
+      ? records.length > pagination.limit
+      : pagination.skip + records.length < total;
+    const users = cursor.cursorMode
+      ? records.slice(0, pagination.limit)
+      : records;
 
     return res.status(200).json({
       success: true,
@@ -82,8 +123,13 @@ async function getUsers(req, res) {
         limit: pagination.limit,
         total,
         totalPages: Math.ceil(total / pagination.limit),
-        hasNextPage: pagination.skip + users.length < total,
-        hasPreviousPage: pagination.page > 1,
+        hasNextPage,
+        hasPreviousPage: cursor.cursorMode
+          ? Boolean(cursor.cursor)
+          : pagination.page > 1,
+        ...(cursor.cursorMode
+          ? { nextCursor: hasNextPage ? String(users.at(-1)._id) : null }
+          : {}),
       },
     });
   } catch (error) {
@@ -111,7 +157,12 @@ async function deleteUsers(req, res, rawIds) {
       return res.status(409).json({ success: false, error: accessError });
     }
 
-    const result = await User.deleteMany({ _id: { $in: ids } });
+    const result = await runGpsConfigurationMutation((session) =>
+      User.deleteMany(
+        { _id: { $in: ids } },
+        session ? { session } : {},
+      ),
+    );
     if (result.deletedCount) disconnectUserSockets(ids);
     await Notification.deleteMany({ user_id: { $in: ids } });
     return res.status(200).json({
@@ -156,10 +207,12 @@ async function updateUsersRole(req, res) {
     const changedUserIds = users
       .filter((user) => user.role !== role)
       .map((user) => String(user._id));
-    const result = await User.updateMany(
-      { _id: { $in: ids } },
-      { $set: { role } },
-      { runValidators: true },
+    const result = await runGpsConfigurationMutation((session) =>
+      User.updateMany(
+        { _id: { $in: ids } },
+        { $set: { role } },
+        { runValidators: true, ...(session ? { session } : {}) },
+      ),
     );
     if (result.modifiedCount && changedUserIds.length) {
       disconnectUserSockets(changedUserIds);
@@ -227,10 +280,16 @@ async function updateUser(req, res) {
       return res.status(400).json({ success: false, error: 'No valid fields provided' });
     }
 
-    const updated = await User.findByIdAndUpdate(id, update, {
-      new: true,
-      runValidators: true,
-    }).select('name email role bus_no is_active');
+    const updateUser = async (session) =>
+      User.findByIdAndUpdate(id, update, {
+        new: true,
+        runValidators: true,
+        ...(session ? { session } : {}),
+      }).select('name email role bus_no is_active');
+    const updated =
+      bus_no !== undefined || roleChanged || Object.hasOwn(update, 'is_active')
+        ? await runGpsConfigurationMutation(updateUser)
+        : await updateUser(null);
 
     if (!updated) {
       return res.status(404).json({ success: false, error: 'User not found' });

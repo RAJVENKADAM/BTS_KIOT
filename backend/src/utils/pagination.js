@@ -35,8 +35,30 @@ function parsePagination(query, { defaultLimit = 50, maxLimit = 200 } = {}) {
   };
 }
 
+function parseCursor(query = {}) {
+  const hasCursor = query.cursor !== undefined;
+  const cursorMode = query.cursorMode === "true" || hasCursor;
+  if (
+    (query.cursorMode !== undefined && query.cursorMode !== "true") ||
+    (cursorMode && query.page !== undefined)
+  ) {
+    return { error: "Cursor pagination cannot be combined with page pagination." };
+  }
+  if (
+    hasCursor &&
+    (typeof query.cursor !== "string" ||
+      !/^[a-f\d]{24}$/i.test(query.cursor))
+  ) {
+    return { error: "Cursor must be a valid user identifier." };
+  }
+  return {
+    cursorMode,
+    cursor: hasCursor ? query.cursor : null,
+  };
+}
+
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-module.exports = { escapeRegExp, parsePagination };
+module.exports = { escapeRegExp, parseCursor, parsePagination };

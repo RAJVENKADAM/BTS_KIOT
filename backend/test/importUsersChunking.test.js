@@ -1,11 +1,16 @@
 const assert = require("node:assert/strict");
-const { test } = require("node:test");
+const { after, test } = require("node:test");
 const bcrypt = require("bcryptjs");
 const XLSX = require("xlsx");
 const ExcelUpload = require("../src/models/ExcelUpload");
 const User = require("../src/models/User");
 const { importUsers, IMPORT_BATCH_SIZE } = require("../src/controllers/importUsers.controller");
 const { parseUserWorkbookUpload } = require("../src/middleware/spreadsheetImport");
+const ownershipService = require("../src/services/gpsWorkerOwnership");
+const { mockGpsOwnershipTransactions } = require("./helpers/gpsOwnershipTransactionMock.cjs");
+
+const gpsOwnershipTransactions = mockGpsOwnershipTransactions();
+after(() => gpsOwnershipTransactions.restore());
 
 function responseDouble() {
   return {
@@ -112,6 +117,179 @@ test("large JSON imports hash and persist sequential bounded batches", async () 
       batch.every((operation) => operation.updateOne.filter.email),
     ));
   });
+});
+
+test("Redis-mode assignment import passes the ownership transaction session to user writes", async () => {
+  const originalMode = process.env.SOCKET_IO_MODE;
+  const originalTransaction = ownershipService.runGpsConfigurationTransaction;
+  const session = { transaction: "gps-configuration" };
+  let writtenSession;
+  process.env.SOCKET_IO_MODE = "redis";
+  ownershipService.runGpsConfigurationTransaction = async (operation) =>
+    operation(session);
+
+  try {
+    await withImportMocks(async () => {
+      const response = responseDouble();
+      await importUsers(
+        { user: { id: "admin-id" }, body: { users: createRows(1) } },
+        response,
+      );
+      assert.equal(response.statusCode, 200);
+      assert.equal(writtenSession, session);
+    }, {
+      bulkWrite: async (_operations, options) => {
+        writtenSession = options.session;
+        return { modifiedCount: 0, upsertedCount: 1 };
+      },
+    });
+  } finally {
+    ownershipService.runGpsConfigurationTransaction = originalTransaction;
+    if (originalMode === undefined) delete process.env.SOCKET_IO_MODE;
+    else process.env.SOCKET_IO_MODE = originalMode;
+  }
+});
+
+test("Redis import fences routing writes even when the initial user read is unchanged", async () => {
+  const originalMode = process.env.SOCKET_IO_MODE;
+  const originalTransaction = ownershipService.runGpsConfigurationTransaction;
+  const session = { transaction: "stale-read-race" };
+  let writeSession;
+  let transactionCalls = 0;
+  let currentBusNo = "12";
+  process.env.SOCKET_IO_MODE = "redis";
+  ownershipService.runGpsConfigurationTransaction = async (operation) => {
+    transactionCalls += 1;
+    currentBusNo = "99";
+    return operation(session);
+  };
+
+  try {
+    await withImportMocks(async () => {
+      const response = responseDouble();
+      await importUsers(
+        { user: { id: "admin-id" }, body: { users: createRows(1) } },
+        response,
+      );
+      assert.equal(response.statusCode, 200);
+      assert.equal(transactionCalls, 1);
+      assert.equal(writeSession, session);
+      assert.equal(currentBusNo, "12");
+    }, {
+      existingUsers: [{
+        _id: "existing-student",
+        email: "student0@example.test",
+        role: "student",
+        bus_no: "12",
+        is_active: true,
+        deleted_by_user: false,
+      }],
+      bulkWrite: async (operations, options) => {
+        assert.equal(currentBusNo, "99");
+        writeSession = options.session;
+        currentBusNo = operations[0].updateOne.update.$set.bus_no;
+        return { modifiedCount: 1 };
+      },
+    });
+  } finally {
+    ownershipService.runGpsConfigurationTransaction = originalTransaction;
+    if (originalMode === undefined) delete process.env.SOCKET_IO_MODE;
+    else process.env.SOCKET_IO_MODE = originalMode;
+  }
+});
+
+test("Redis import commits each row once and reports mixed row failures without replay", async () => {
+  const originalMode = process.env.SOCKET_IO_MODE;
+  const originalTransaction = ownershipService.runGpsConfigurationTransaction;
+  const calls = [];
+  const session = { transaction: "per-row" };
+  process.env.SOCKET_IO_MODE = "redis";
+  ownershipService.runGpsConfigurationTransaction = async (operation) =>
+    operation(session);
+
+  try {
+    await withImportMocks(async () => {
+      const response = responseDouble();
+      await importUsers(
+        { user: { id: "admin-id" }, body: { users: createRows(3) } },
+        response,
+      );
+
+      assert.equal(response.statusCode, 200);
+      assert.equal(response.payload.summary.insertedRows, 2);
+      assert.equal(response.payload.summary.failedRows, 1);
+      assert.deepEqual(
+        response.payload.summary.rowResults.map((item) => item.index),
+        [1],
+      );
+      assert.deepEqual(
+        calls.map(({ emails }) => emails),
+        [
+          ["student0@example.test"],
+          ["student1@example.test"],
+          ["student2@example.test"],
+        ],
+      );
+      assert.ok(calls.every(({ session: writeSession }) => writeSession === session));
+    }, {
+      bulkWrite: async (operations, options) => {
+        calls.push({
+          emails: operations.map((operation) => operation.updateOne.filter.email),
+          session: options.session,
+        });
+        if (operations[0].updateOne.filter.email === "student1@example.test") {
+          const error = new Error("rejected row");
+          error.writeErrors = [{ index: 0 }];
+          throw error;
+        }
+        return { upsertedCount: 1 };
+      },
+    });
+  } finally {
+    ownershipService.runGpsConfigurationTransaction = originalTransaction;
+    if (originalMode === undefined) delete process.env.SOCKET_IO_MODE;
+    else process.env.SOCKET_IO_MODE = originalMode;
+  }
+});
+
+test("Redis import stops on an uncertain row without retrying it or later rows", async () => {
+  const originalMode = process.env.SOCKET_IO_MODE;
+  const originalTransaction = ownershipService.runGpsConfigurationTransaction;
+  const calls = [];
+  process.env.SOCKET_IO_MODE = "redis";
+  ownershipService.runGpsConfigurationTransaction = async (operation) =>
+    operation({ transaction: true });
+
+  try {
+    await withImportMocks(async () => {
+      const response = responseDouble();
+      await importUsers(
+        { user: { id: "admin-id" }, body: { users: createRows(3) } },
+        response,
+      );
+      assert.equal(response.payload.summary.insertedRows, 1);
+      assert.equal(response.payload.summary.outcomeUnknown, true);
+      assert.equal(response.payload.summary.failedRows, 2);
+      assert.equal(calls.length, 2);
+      assert.deepEqual(calls, [
+        "student0@example.test",
+        "student1@example.test",
+      ]);
+    }, {
+      bulkWrite: async (operations) => {
+        const email = operations[0].updateOne.filter.email;
+        calls.push(email);
+        if (email === "student1@example.test") {
+          throw new Error("ambiguous transaction result");
+        }
+        return { upsertedCount: 1 };
+      },
+    });
+  } finally {
+    ownershipService.runGpsConfigurationTransaction = originalTransaction;
+    if (originalMode === undefined) delete process.env.SOCKET_IO_MODE;
+    else process.env.SOCKET_IO_MODE = originalMode;
+  }
 });
 
 test("synthetic XLSX rows are lazily iterated into sequential database batches", async () => {

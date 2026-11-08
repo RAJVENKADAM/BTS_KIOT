@@ -38,6 +38,21 @@ export const busApi = {
     return data;
   },
 
+  getGpsLocationSnapshot: async (token, busIdentifier) => {
+    const data = await fetchJson(
+      `${API_BASE_URL}/api/bus/location/${encodeURIComponent(busIdentifier)}?gpsOnly=true`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+      },
+    );
+    if (data.success === false) {
+      const error = new Error(data.error || "Could not load GPS location.");
+      error.status = data.error === "Bus not found" ? 404 : undefined;
+      throw error;
+    }
+    return data;
+  },
+
   validatePreview: async (token, previewNumber) => {
     const data = await fetchJson(
       `${API_BASE_URL}/api/bus/validate-preview/${previewNumber}`,

@@ -1,7 +1,11 @@
 const assert = require("node:assert/strict");
-const test = require("node:test");
+const { after, test } = require("node:test");
 const User = require("../src/models/User");
 const excelUserService = require("../src/services/excelUserService");
+const { mockGpsOwnershipTransactions } = require("./helpers/gpsOwnershipTransactionMock.cjs");
+
+const gpsOwnershipTransactions = mockGpsOwnershipTransactions();
+after(() => gpsOwnershipTransactions.restore());
 
 test("legacy spreadsheet processing projects only required fields and matches rows in memory", async () => {
   const originalFind = User.find;
@@ -179,6 +183,81 @@ test("re-uploading an existing email updates that account instead of creating an
     assert.equal(accounts.size, 1);
     assert.equal(accounts.get("student1@example.test").name, "Student 1");
     assert.equal(accounts.get("student1@example.test").is_active, true);
+  });
+});
+
+test("legacy spreadsheet assignment changes use MongoDB ownership transactions", async () => {
+  await withLegacyUserDatabase(async ({ accounts }) => {
+    accounts.set("student1@example.test", {
+      _id: "existing-student",
+      email: "student1@example.test",
+      name: "Student 1",
+      role: "student",
+      bus_no: "4",
+      is_active: true,
+    });
+    const transactionsBefore = gpsOwnershipTransactions.calls;
+    const result = await excelUserService.processUsers(
+      [{ ...createLegacyRows(1, 1)[0], bus_no: "9" }],
+      "admin-id",
+    );
+
+    assert.equal(result.summary.updated, 1);
+    assert.equal(gpsOwnershipTransactions.calls, transactionsBefore + 1);
+  });
+});
+
+test("legacy spreadsheet profile-only updates avoid GPS ownership transactions", async () => {
+  await withLegacyUserDatabase(async ({ accounts }) => {
+    accounts.set("student1@example.test", {
+      _id: "existing-student",
+      email: "student1@example.test",
+      name: "Old Name",
+      role: "student",
+      bus_no: "12",
+      is_active: true,
+    });
+    const transactionsBefore = gpsOwnershipTransactions.calls;
+    const result = await excelUserService.processUsers(
+      createLegacyRows(1, 1),
+      "admin-id",
+    );
+    assert.equal(result.summary.updated, 1);
+    assert.equal(gpsOwnershipTransactions.calls, transactionsBefore);
+    assert.equal(accounts.get("student1@example.test").name, "Student 1");
+  });
+});
+
+test("profile-only Excel update cannot overwrite a concurrent bus assignment", async () => {
+  await withLegacyUserDatabase(async ({ accounts, updateFilters }) => {
+    const account = {
+      _id: "existing-student",
+      email: "student1@example.test",
+      name: "Old Name",
+      role: "student",
+      bus_no: "12",
+      is_active: true,
+    };
+    accounts.set(account.email, account);
+    const originalUpdateOne = User.updateOne;
+    User.updateOne = async (filter, update) => {
+      account.bus_no = "99";
+      updateFilters.push({ filter, update });
+      Object.assign(account, update);
+      return { modifiedCount: 1 };
+    };
+
+    try {
+      const result = await excelUserService.processUsers(
+        createLegacyRows(1, 1),
+        "admin-id",
+      );
+      assert.equal(result.summary.updated, 1);
+      assert.deepEqual(Object.keys(updateFilters[0].update), ["name"]);
+      assert.equal(account.bus_no, "99");
+    } finally {
+      User.updateOne = originalUpdateOne;
+    }
   });
 });
 

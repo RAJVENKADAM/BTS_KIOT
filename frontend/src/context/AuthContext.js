@@ -220,6 +220,7 @@ export const AuthProvider = ({ children }) => {
       try {
         const data = await fetchJson(`${API_BASE_URL}/api/auth/login`, {
           method: "POST",
+          timeoutMs: 60000,
           headers: {
             "Content-Type": "application/json",
           },

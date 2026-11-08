@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { test } = require("node:test");
+const { after, test } = require("node:test");
 const jwt = require("jsonwebtoken");
 const User = require("../src/models/User");
 const Notification = require("../src/models/Notification");
@@ -13,6 +13,11 @@ const {
 } = require("../src/controllers/superadminUser.controller");
 const { deleteExcelUpload } = require("../src/controllers/excelManagement.controller");
 const { createSocketAuthentication } = require("../src/socket/authenticateSocket");
+const ownershipService = require("../src/services/gpsWorkerOwnership");
+const { mockGpsOwnershipTransactions } = require("./helpers/gpsOwnershipTransactionMock.cjs");
+
+const gpsOwnershipTransactions = mockGpsOwnershipTransactions();
+after(() => gpsOwnershipTransactions.restore());
 
 const SECRET = "socket-revocation-tests-only";
 const firstId = "64a000000000000000000001";
@@ -78,6 +83,7 @@ test("socket revocation disconnects only the union of targeted user rooms", () =
 
 test("self-deactivated account sockets are disconnected only after a successful update", async () => {
   const calls = createRevocationSpy();
+  const transactionsBefore = gpsOwnershipTransactions.calls;
   const originalUpdateOne = User.updateOne;
   const res = responseDouble();
   User.updateOne = async () => ({ modifiedCount: 1 });
@@ -85,6 +91,7 @@ test("self-deactivated account sockets are disconnected only after a successful 
     await deleteUserAccount({ user: { id: firstId } }, res);
     assert.equal(res.statusCode, 200);
     assert.deepEqual(calls[0].rooms, [`user_${firstId}`]);
+    assert.equal(gpsOwnershipTransactions.calls, transactionsBefore + 1);
   } finally {
     User.updateOne = originalUpdateOne;
   }
@@ -100,6 +107,33 @@ test("self-deactivated account sockets are disconnected only after a successful 
     assert.deepEqual(failedCalls, []);
   } finally {
     User.updateOne = originalUpdateOne;
+  }
+});
+
+test("Redis-mode account deactivation uses the ownership transaction session", async () => {
+  const originalMode = process.env.SOCKET_IO_MODE;
+  const originalTransaction = ownershipService.runGpsConfigurationTransaction;
+  const originalUpdateOne = User.updateOne;
+  const session = { transaction: "gps-configuration" };
+  let updateOptions;
+  process.env.SOCKET_IO_MODE = "redis";
+  ownershipService.runGpsConfigurationTransaction = async (operation) =>
+    operation(session);
+  User.updateOne = async (_filter, _update, options) => {
+    updateOptions = options;
+    return { modifiedCount: 1 };
+  };
+  const res = responseDouble();
+
+  try {
+    await deleteUserAccount({ user: { id: firstId } }, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(updateOptions.session, session);
+  } finally {
+    ownershipService.runGpsConfigurationTransaction = originalTransaction;
+    User.updateOne = originalUpdateOne;
+    if (originalMode === undefined) delete process.env.SOCKET_IO_MODE;
+    else process.env.SOCKET_IO_MODE = originalMode;
   }
 });
 
@@ -308,15 +342,16 @@ test("failed bulk account deactivation does not revoke sockets", async () => {
 
 test("bulk spreadsheet deactivation revokes only linked users after the update succeeds", async () => {
   const calls = createRevocationSpy();
+  const transactionsBefore = gpsOwnershipTransactions.calls;
   const linkedUsers = [{ _id: firstId }, { _id: secondId }];
   const originalUploadFindById = ExcelUpload.findById;
-  const originalUploadDelete = ExcelUpload.findByIdAndDelete;
+  const originalUploadDelete = ExcelUpload.deleteOne;
   const originalUserFind = User.find;
   const originalUpdateMany = User.updateMany;
   ExcelUpload.findById = () => ({
     uploaded_by: adminId,
   });
-  ExcelUpload.findByIdAndDelete = async () => ({ _id: "upload-1" });
+  ExcelUpload.deleteOne = async () => ({ deletedCount: 1 });
   User.find = () => ({
     select() {
       return this;
@@ -332,11 +367,69 @@ test("bulk spreadsheet deactivation revokes only linked users after the update s
     );
     assert.equal(res.statusCode, 200);
     assert.deepEqual(calls[0].rooms, [`user_${firstId}`, `user_${secondId}`]);
+    assert.equal(gpsOwnershipTransactions.calls, transactionsBefore + 1);
   } finally {
     ExcelUpload.findById = originalUploadFindById;
-    ExcelUpload.findByIdAndDelete = originalUploadDelete;
+    ExcelUpload.deleteOne = originalUploadDelete;
     User.find = originalUserFind;
     User.updateMany = originalUpdateMany;
+  }
+});
+
+test("Redis-mode spreadsheet deactivation uses one ownership session for all mutations", async () => {
+  const originalMode = process.env.SOCKET_IO_MODE;
+  const originalTransaction = ownershipService.runGpsConfigurationTransaction;
+  const originals = {
+    uploadFind: ExcelUpload.findById,
+    uploadDelete: ExcelUpload.deleteOne,
+    userFind: User.find,
+    userUpdate: User.updateMany,
+  };
+  const session = { transaction: "gps-configuration" };
+  let querySession;
+  let updateOptions;
+  let deleteOptions;
+  process.env.SOCKET_IO_MODE = "redis";
+  ownershipService.runGpsConfigurationTransaction = async (operation) =>
+    operation(session);
+  ExcelUpload.findById = () => ({ uploaded_by: adminId });
+  ExcelUpload.deleteOne = async (_filter, options) => {
+    deleteOptions = options;
+    return { deletedCount: 1 };
+  };
+  User.find = () => ({
+    select() {
+      return this;
+    },
+    session(value) {
+      querySession = value;
+      return this;
+    },
+    lean: async () => [{ _id: firstId }],
+  });
+  User.updateMany = async (_filter, _update, options) => {
+    updateOptions = options;
+    return { modifiedCount: 1 };
+  };
+  const res = responseDouble();
+
+  try {
+    await deleteExcelUpload(
+      { params: { id: "upload-1" }, user: { id: adminId, role: "superadmin" } },
+      res,
+    );
+    assert.equal(res.statusCode, 200);
+    assert.equal(querySession, session);
+    assert.equal(updateOptions.session, session);
+    assert.equal(deleteOptions.session, session);
+  } finally {
+    ownershipService.runGpsConfigurationTransaction = originalTransaction;
+    ExcelUpload.findById = originals.uploadFind;
+    ExcelUpload.deleteOne = originals.uploadDelete;
+    User.find = originals.userFind;
+    User.updateMany = originals.userUpdate;
+    if (originalMode === undefined) delete process.env.SOCKET_IO_MODE;
+    else process.env.SOCKET_IO_MODE = originalMode;
   }
 });
 

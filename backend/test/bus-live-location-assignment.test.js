@@ -11,6 +11,8 @@ const {
   getLiveLocation,
   trackByPreview,
 } = require("../src/controllers/bus.controller");
+const busRouter = require("../src/routes/bus.routes");
+const { authenticateToken } = require("../src/middleware/auth");
 
 function createResponse() {
   return {
@@ -40,10 +42,12 @@ function emptyQuery(result = []) {
 
 function valueQuery(result) {
   return {
-    select() {
+    select(fields) {
+      result?.select?.(fields);
       return this;
     },
-    sort() {
+    sort(sort) {
+      result?.sort?.(sort);
       return this;
     },
     lean: async () => (result?.lean ? result.lean() : result),
@@ -282,6 +286,215 @@ test("track-by-preview retains its public response shape and bus isolation", asy
       assert.equal(response.payload.busNo, "12");
       assert.equal("bus_no" in response.payload, false);
       assert.equal(response.payload.status, "offline");
+    },
+  );
+});
+
+test("GPS-only location snapshot is authenticated and performs only projected indexed reads", async () => {
+  const bus = {
+    _id: new mongoose.Types.ObjectId(),
+    bus_no: "BUS-12",
+    preview_number: "12",
+    altered_to_bus_id: null,
+  };
+  const location = {
+    bus_id: bus._id,
+    latitude: 11.5,
+    longitude: 78,
+    speed: 10,
+    is_online: true,
+    source: "gps",
+    lastSuccessfulGpsUpdate: new Date(Date.now() - 1000),
+    providerTimestamp: new Date("2026-11-07T08:00:00Z"),
+    locationVersion: 12n,
+  };
+  const busProjections = [];
+  let liveLocationProjection;
+  const route = busRouter.stack.find(
+    (layer) => layer.route?.path === "/location/:busNo",
+  );
+  assert.equal(route.route.stack[0].handle, authenticateToken);
+
+  await withModelMocks(
+    {
+      appSettingFindOne: () => ({ lean: async () => null }),
+      busFindOne: (filter) => {
+        assert.deepEqual(filter, { bus_no: "BUS-12" });
+        return {
+          select(fields) {
+            busProjections.push(fields);
+            return this;
+          },
+          lean: async () => bus,
+        };
+      },
+      liveLocationFindOne: (filter) => {
+        assert.deepEqual(filter, { bus_id: bus._id });
+        return {
+          select(fields) {
+            liveLocationProjection = fields;
+            return this;
+          },
+          lean: async () => location,
+        };
+      },
+      busRouteFind: () => {
+        throw new Error("GPS-only snapshot must not load bus routes");
+      },
+      stopMasterFind: () => {
+        throw new Error("GPS-only snapshot must not load stops");
+      },
+    },
+    async () => {
+      const response = createResponse();
+      await getLiveLocation(
+        {
+          params: { busNo: "BUS-12" },
+          query: { gpsOnly: "true" },
+          user: { role: "student" },
+        },
+        response,
+      );
+
+      assert.equal(response.statusCode, 200);
+      assert.deepEqual(busProjections, [
+        "_id bus_no preview_number altered_to_bus_id",
+      ]);
+      assert.equal(
+        liveLocationProjection,
+        "latitude longitude speed is_online lastSuccessfulGpsUpdate providerTimestamp locationVersion source",
+      );
+      assert.equal(response.payload.locationVersion, "12");
+      assert.equal(response.payload.previewNumber, "12");
+      assert.equal(response.payload.status, "online");
+      assert.equal("gpsFenceToken" in response.payload, false);
+      assert.equal("publicationPending" in response.payload, false);
+      assert.equal("bus_no" in response.payload, false);
+      assert.deepEqual(
+        Object.keys(response.payload).sort(),
+        [
+          "success",
+          "busNo",
+          "previewNumber",
+          "latitude",
+          "longitude",
+          "speed",
+          "providerTimestamp",
+          "lastSuccessfulGpsUpdate",
+          "locationVersion",
+          "is_online",
+          "status",
+          "source",
+          "gpsOfflineThresholdMs",
+        ].sort(),
+      );
+    },
+  );
+});
+
+test("GPS-only location snapshot rejects an unknown bus without reading location state", async () => {
+  let locationReads = 0;
+  await withModelMocks(
+    {
+      appSettingFindOne: () => ({ lean: async () => null }),
+      busFindOne: async () => null,
+      liveLocationFindOne: async () => {
+        locationReads++;
+        return null;
+      },
+    },
+    async () => {
+      const response = createResponse();
+      await getLiveLocation(
+        {
+          params: { busNo: "UNKNOWN" },
+          query: { gpsOnly: "true" },
+          user: { role: "student" },
+        },
+        response,
+      );
+      assert.equal(response.statusCode, 404);
+      assert.deepEqual(response.payload, {
+        success: false,
+        error: "Bus not found",
+      });
+      assert.equal(locationReads, 0);
+    },
+  );
+});
+
+test("GPS-only snapshot resolves active-plan location mapping without loading route context", async () => {
+  const sourceBus = {
+    _id: new mongoose.Types.ObjectId(),
+    bus_no: "BUS-12",
+    preview_number: "12",
+    altered_to_bus_id: null,
+  };
+  const mappedBus = {
+    _id: new mongoose.Types.ObjectId(),
+    bus_no: "BUS-21",
+    preview_number: "21",
+    altered_to_bus_id: null,
+  };
+  const location = {
+    latitude: 11,
+    longitude: 78,
+    is_online: false,
+    locationVersion: 13n,
+  };
+  let liveLocationFilter;
+  let relatedBusProjection;
+  let routeReads = 0;
+  await withModelMocks(
+    {
+      appSettingFindOne: () => ({
+        lean: async () => ({ value: "PLAN B" }),
+      }),
+      busFindOne: () => sourceBus,
+      planMappingFindOne: () => ({
+        root_bus_id: sourceBus._id,
+        location_bus_id: mappedBus._id,
+        member_bus_ids: [sourceBus._id],
+      }),
+      busFindById: () => ({
+        select(fields) {
+          relatedBusProjection = fields;
+          return this;
+        },
+        lean: async () => mappedBus,
+      }),
+      liveLocationFindOne: (filter) => {
+        liveLocationFilter = filter;
+        return location;
+      },
+      busRouteFind: () => {
+        routeReads++;
+        throw new Error("GPS-only snapshot must not load bus routes");
+      },
+      stopMasterFind: () => {
+        throw new Error("GPS-only snapshot must not load stops");
+      },
+    },
+    async () => {
+      const response = createResponse();
+      await getLiveLocation(
+        {
+          params: { busNo: "BUS-12" },
+          query: { gpsOnly: "true" },
+          user: { role: "student" },
+        },
+        response,
+      );
+      assert.equal(response.statusCode, 200);
+      assert.deepEqual(liveLocationFilter, { bus_id: mappedBus._id });
+      assert.equal(
+        relatedBusProjection,
+        "_id bus_no preview_number altered_to_bus_id",
+      );
+      assert.equal(response.payload.previewNumber, "21");
+      assert.equal(response.payload.locationVersion, "13");
+      assert.equal(response.payload.status, "offline");
+      assert.equal(routeReads, 0);
     },
   );
 });

@@ -14,6 +14,10 @@ const {
   loadPlanState,
 } = require("../services/planMappingService");
 const {
+  deletePlanMappingById,
+  persistPlanMappingOperations,
+} = require("../services/planMappingPersistence");
+const {
   normalizeArrivalTime,
   validateCluster,
 } = require("../utils/planMapping");
@@ -408,7 +412,7 @@ async function savePlanMapping(req, res) {
         upsert: true,
       },
     });
-    await PlanMapping.bulkWrite(operations, { ordered: true });
+    await persistPlanMappingOperations(operations);
     if (currentPlan === planName) {
       const state = await loadPlanState();
       const notifications = getPlanMappingChangeNotifications(
@@ -681,7 +685,7 @@ async function deletePlanMapping(req, res) {
       currentPlan === normalizePlanName(cluster.plan_name)
         ? await loadPlanState()
         : null;
-    await PlanMapping.deleteOne({ _id: cluster._id });
+    await deletePlanMappingById(cluster._id);
     if (previousState) {
       const state = await loadPlanState();
       const notifications = getPlanMappingChangeNotifications(

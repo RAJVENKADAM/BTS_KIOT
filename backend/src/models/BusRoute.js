@@ -32,6 +32,6 @@ const busRouteSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-busRouteSchema.index({ bus_id: 1, plan_name: 1 });
+busRouteSchema.index({ bus_id: 1, plan_name: 1, stop_order: 1 });
 
 module.exports = mongoose.model('BusRoute', busRouteSchema);

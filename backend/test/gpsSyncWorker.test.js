@@ -2,7 +2,10 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const axios = require("axios");
 const BusLiveLocation = require("../src/models/BusLiveLocation");
+const GpsDevice = require("../src/models/GpsDevice");
 const gpsService = require("../src/services/gpsService");
+const { runGpsConfigurationMutation } = require("../src/services/gpsConfigurationBarrier");
+const gpsWorkerOwnership = require("../src/services/gpsWorkerOwnership");
 const {
   GPS_SYNC_INTERVAL_MS,
   GpsSyncWorker,
@@ -27,6 +30,8 @@ function createWorker({
   update,
   busFind,
   userFind,
+  gpsDeviceModel = null,
+  leaseGuard = null,
   socketGetter = () => null,
   timers = {},
 } = {}) {
@@ -37,6 +42,7 @@ function createWorker({
     BusModel: {
       find: busFind || (() => query(buses)),
     },
+    GpsDeviceModel: gpsDeviceModel,
     UserModel: {
       find: userFind || (() => query(users)),
     },
@@ -48,16 +54,33 @@ function createWorker({
       },
       updateOne: async (filter, operation, options) => {
         updates.push({ filter, operation, options });
-        if (update) await update(filter);
+        if (update) {
+          const result = await update(filter, operation, options);
+          if (result) return result;
+        }
+        return { matchedCount: 1, upsertedCount: 0 };
       },
     },
     service: {
-      getAllCurrentLocations: provider || (async () => new Map()),
+      async getAllCurrentLocations() {
+        const locations = await (provider || (async () => new Map()))();
+        if (!(locations instanceof Map)) return locations;
+        const currentProviderTimestamp = new Date().toISOString();
+        return new Map(
+          [...locations].map(([key, location]) => [
+            key,
+            Object.hasOwn(location, "providerTimestamp")
+              ? location
+              : { ...location, providerTimestamp: currentProviderTimestamp },
+          ]),
+        );
+      },
     },
     socketGetter,
     setIntervalFn: timers.setInterval || (() => "timer"),
     clearIntervalFn: timers.clearInterval || (() => {}),
   });
+  if (leaseGuard) worker.setLeaseGuard(leaseGuard);
   return {
     worker,
     updates,
@@ -88,26 +111,33 @@ test("worker status exposes lifecycle and sanitized latest cycle metrics", async
     syncIntervalMs: GPS_SYNC_INTERVAL_MS,
     activeCycleId: null,
     skippedTimerTicks: 0,
+    distributedLease: false,
+    fencingToken: null,
     lastCycle: null,
+    lastSuccessfulGpsUpdate: null,
+    lastProviderTimestamp: null,
   });
+});
 
-  test("worker lifecycle continues when console logging throws", async () => {
-    const originalLog = console.log;
-    const { worker } = createWorker();
-    console.log = () => {
-      throw new Error("simulated logger failure");
-    };
-    try {
-      worker.start();
-      await worker.inFlightCycle;
-      assert.equal(worker.started, true);
-      assert.equal(worker.getStatus().lastCycle.status, "COMPLETED");
-      await worker.stop();
-    } finally {
-      console.log = originalLog;
-    }
-  });
+test("worker lifecycle continues when console logging throws", async () => {
+  const originalLog = console.log;
+  const { worker } = createWorker();
+  console.log = () => {
+    throw new Error("simulated logger failure");
+  };
+  try {
+    worker.start();
+    await worker.inFlightCycle;
+    assert.equal(worker.started, true);
+    assert.equal(worker.getStatus().lastCycle.status, "COMPLETED");
+    await worker.stop();
+  } finally {
+    console.log = originalLog;
+  }
+});
 
+test("worker status includes sanitized latest cycle metrics", async () => {
+  const { worker } = createWorker();
   await worker.runCycle();
   const status = worker.getStatus();
   assert.equal(status.started, false);
@@ -259,6 +289,515 @@ test("valid empty provider response is not counted as a provider failure", async
   assert.equal(completed.providerFailures, 0);
   assert.equal(completed.normalizedProviderRecordCount, 0);
   assert.equal(updates.length, 1);
+  assert.equal(updates[0].filter.$and, undefined);
+  assert.equal(updates[0].operation.$max, undefined);
+});
+
+test("distributed fencing is applied to every GPS device and live-location write", async () => {
+  const deviceWrites = [];
+  const device = {
+    _id: "device-record-1",
+    deviceId: "device-1",
+    source: "REAL",
+    bus_id: "bus-1",
+    is_active: true,
+    providerTimestamp: null,
+  };
+  const { worker, updates } = createWorker({
+    buses: [{ _id: "bus-1", bus_no: "BUS-1", gps_device_id: "device-1" }],
+    provider: async () =>
+      new Map([["device-1", { latitude: 10, longitude: 77, speed: 1 }]]),
+    gpsDeviceModel: {
+      find: () => query([device]),
+      updateMany: async (...args) => {
+        deviceWrites.push(args);
+        return { matchedCount: 1, modifiedCount: 1 };
+      },
+      updateOne: async (...args) => {
+        deviceWrites.push(args);
+        return { matchedCount: 1, modifiedCount: 1 };
+      },
+    },
+    leaseGuard: {
+      fencingToken: 7n,
+      assertOwned: async () => true,
+      getConfigurationVersion: async () => 0n,
+      runTransaction: (operation) => operation({ mocked: true }),
+    },
+  });
+
+  test("missing and invalid provider timestamps are rejected without substituting arrival time", async () => {
+    for (const providerTimestamp of [null, "not-a-date"]) {
+      const records = [];
+      const originalLog = console.log;
+      console.log = (line) => records.push(JSON.parse(line));
+      const { worker, updates } = createWorker({
+        buses: [{ _id: "bus-1", bus_no: "BUS-1", gps_device_id: "device-1" }],
+        provider: async () => new Map([[
+          "device-1",
+          { latitude: 10, longitude: 77, speed: 1, providerTimestamp },
+        ]]),
+      });
+
+      try {
+        await worker.runCycle();
+      } finally {
+        console.log = originalLog;
+      }
+
+      assert.equal(updates.length, 0);
+      assert.equal(
+        worker.getStatus().lastCycle.missingProviderTimestampUpdates,
+        1,
+      );
+      assert.equal(
+        records.find((record) => record.event === "GPS_PROVIDER_UPDATE_REJECTED")
+          ?.reason,
+        "MISSING_OR_INVALID_PROVIDER_TIMESTAMP",
+      );
+    }
+  });
+
+  test("provider updates with older or equal timestamps are rejected as stale or duplicates", async () => {
+    const previousTimestamp = new Date(Date.now() - 10_000);
+    for (const [providerTimestamp, reason, metric] of [
+      [
+        new Date(previousTimestamp.getTime() - 1).toISOString(),
+        "OUT_OF_ORDER_PROVIDER_TIMESTAMP",
+        "staleProviderUpdates",
+      ],
+      [
+        previousTimestamp.toISOString(),
+        "DUPLICATE_PROVIDER_TIMESTAMP",
+        "duplicateProviderUpdates",
+      ],
+    ]) {
+      const records = [];
+      const originalLog = console.log;
+      console.log = (line) => records.push(JSON.parse(line));
+      const { worker, updates } = createWorker({
+        buses: [{ _id: "bus-1", bus_no: "BUS-1", gps_device_id: "device-1" }],
+        locations: [{
+          bus_id: "bus-1",
+          providerTimestamp: previousTimestamp,
+          lastSuccessfulGpsUpdate: previousTimestamp,
+        }],
+        provider: async () => new Map([[
+          "device-1",
+          { latitude: 10, longitude: 77, speed: 1, providerTimestamp },
+        ]]),
+      });
+
+      try {
+        await worker.runCycle();
+      } finally {
+        console.log = originalLog;
+      }
+
+      assert.equal(updates.length, 0);
+      assert.equal(worker.getStatus().lastCycle[metric], 1);
+      assert.equal(
+        records.find((record) => record.event === "GPS_PROVIDER_UPDATE_REJECTED")
+          ?.reason,
+        reason,
+      );
+    }
+  });
+
+  test("atomic provider timestamp predicate rejects a write superseded after the worker read", async () => {
+    const previousTimestamp = new Date(Date.now() - 10_000);
+    const incomingTimestamp = new Date(previousTimestamp.getTime() + 1_000);
+    const { worker, updates } = createWorker({
+      buses: [{ _id: "bus-1", bus_no: "BUS-1", gps_device_id: "device-1" }],
+      locations: [{
+        bus_id: "bus-1",
+        providerTimestamp: previousTimestamp,
+        lastSuccessfulGpsUpdate: previousTimestamp,
+      }],
+      provider: async () => new Map([[
+        "device-1",
+        {
+          latitude: 10,
+          longitude: 77,
+          speed: 1,
+          providerTimestamp: incomingTimestamp.toISOString(),
+        },
+      ]]),
+      update: async (filter) => {
+        assert.equal(filter.bus_id, "bus-1");
+        assert.ok(filter.$expr);
+        assert.deepEqual(filter.$expr.$or[1].$and[0], {
+          $eq: [{ $type: "$providerTimestamp" }, "date"],
+        });
+        assert.deepEqual(filter.$expr.$or[1].$and[1], {
+          $lt: ["$providerTimestamp", incomingTimestamp],
+        });
+        return { matchedCount: 0, upsertedCount: 0 };
+      },
+    });
+
+    await worker.runCycle();
+
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0].options.upsert, false);
+    assert.equal(updates[0].operation.$set.latitude, 10);
+    assert.equal(worker.getStatus().lastCycle.staleProviderUpdates, 1);
+    assert.equal(worker.getStatus().lastCycle.failedWrites, 0);
+  });
+
+  test("a concurrent stale first insert is classified as superseded after duplicate-key upsert", async () => {
+    const { worker, updates } = createWorker({
+      buses: [{ _id: "bus-1", bus_no: "BUS-1", gps_device_id: "device-1" }],
+      provider: async () => new Map([[
+        "device-1",
+        {
+          latitude: 10,
+          longitude: 77,
+          speed: 1,
+          providerTimestamp: new Date().toISOString(),
+        },
+      ]]),
+      update: async () => {
+        const error = new Error("duplicate key");
+        error.code = 11000;
+        throw error;
+      },
+    });
+
+    await worker.runCycle();
+
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0].options.upsert, true);
+    assert.equal(worker.getStatus().lastCycle.staleProviderUpdates, 1);
+    assert.equal(worker.getStatus().lastCycle.failedWrites, 0);
+  });
+
+  await worker.runCycle();
+
+  assert.equal(deviceWrites.length, 2);
+  assert.equal(updates.length, 1);
+  const allWrites = [
+    ...deviceWrites,
+    ...updates.map(({ filter, operation }) => [filter, operation]),
+  ];
+  for (const [filter, operation] of allWrites) {
+    assert.equal(operation.$max.gpsFenceToken, 7n);
+    assert.ok(
+      filter.$and.some((condition) =>
+        condition.$or?.some(
+          (part) => part.gpsFenceToken?.$lte === 7n,
+        ),
+      ),
+    );
+  }
+});
+
+test("GPS device schema persists a nonnegative fencing token", () => {
+  const path = GpsDevice.schema.path("gpsFenceToken");
+  assert.equal(path.instance, "BigInt");
+  assert.equal(path.defaultValue, 0n);
+});
+
+test("distributed worker requires a positive safe fencing token", () => {
+  const { worker } = createWorker();
+  assert.throws(
+    () => worker.setLeaseGuard({
+      fencingToken: 0n,
+      runTransaction: async () => {},
+    }),
+    /requires a token and transaction guard/,
+  );
+  assert.throws(
+    () => worker.setLeaseGuard({
+      fencingToken: Number.MAX_SAFE_INTEGER + 1,
+      getConfigurationVersion: async () => 0n,
+      runTransaction: async () => {},
+    }),
+    /requires a token and transaction guard/,
+  );
+});
+
+test("ownership loss stops the timer and an in-flight provider result cannot be written", async () => {
+  const pendingProvider = deferred();
+  let intervalCallback;
+  let clearCount = 0;
+  let ownershipFailureCount = 0;
+  let writes = 0;
+  const worker = new GpsSyncWorker({
+    BusModel: { find: () => query([{ _id: "bus-1", bus_no: "BUS-1" }]) },
+    UserModel: { find: () => query([]) },
+    LiveLocationModel: {
+      find: () => query([]),
+      updateOne: async () => {
+        writes++;
+        return { matchedCount: 1, upsertedCount: 0 };
+      },
+    },
+    service: { getAllCurrentLocations: () => pendingProvider.promise },
+    socketGetter: () => null,
+    setIntervalFn(callback) {
+      intervalCallback = callback;
+      return "gps-timer";
+    },
+    clearIntervalFn(timer) {
+      assert.equal(timer, "gps-timer");
+      clearCount++;
+    },
+  });
+  worker.setLeaseGuard(
+    {
+      fencingToken: 7n,
+      assertOwned: async () => true,
+      getConfigurationVersion: async () => 0n,
+      runTransaction: async (operation) => operation({ mocked: true }),
+    },
+    () => {
+      ownershipFailureCount++;
+    },
+  );
+  worker.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(typeof intervalCallback, "function");
+
+  const loss = new Error("ownership lost");
+  loss.gpsLeaseError = true;
+  worker.notifyOwnershipFailure(loss);
+  pendingProvider.resolve(
+    new Map([["device-1", { latitude: 10, longitude: 77, speed: 1 }]]),
+  );
+  await assert.rejects(worker.inFlightCycle, /ownership lost|already been lost/);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(clearCount, 1);
+  assert.equal(ownershipFailureCount, 1);
+  assert.equal(writes, 0);
+  await worker.stop();
+});
+
+test("a failed ownership assertion disables the timer and notifies lifecycle management", async () => {
+  let clearCount = 0;
+  let failureHandlerCalls = 0;
+  const { worker } = createWorker({
+    leaseGuard: {
+      fencingToken: 7n,
+      assertOwned: async () => false,
+      getConfigurationVersion: async () => 0n,
+      runTransaction: async (operation) => operation({ mocked: true }),
+    },
+    timers: {
+      setInterval: () => "gps-timer",
+      clearInterval: (timer) => {
+        assert.equal(timer, "gps-timer");
+        clearCount++;
+      },
+    },
+  });
+  worker.ownershipFailureHandler = async () => {
+    failureHandlerCalls++;
+  };
+
+  worker.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(worker.started, false);
+  assert.equal(worker.stopped, true);
+  assert.equal(clearCount, 1);
+  assert.equal(failureHandlerCalls, 1);
+  await worker.stop();
+});
+
+test("uncertain distributed commits emit no location event", async () => {
+  const emissions = [];
+  let ownershipFailures = 0;
+  const socket = {
+    to() {
+      return this;
+    },
+    emit() {
+      emissions.push("locationUpdate");
+    },
+  };
+  const context = createWorker({
+    buses: [{
+      _id: "bus-1",
+      bus_no: "BUS-1",
+      gps_device_id: "device-1",
+      preview_number: "PREVIEW-1",
+    }],
+    provider: async () =>
+      new Map([["device-1", { latitude: 10, longitude: 77, speed: 1 }]]),
+    socketGetter: () => socket,
+    leaseGuard: {
+      fencingToken: 7n,
+      assertOwned: async () => true,
+      getConfigurationVersion: async () => 0n,
+      runTransaction: async () => {
+        const error = new Error("commit result uncertain");
+        error.code = "GPS_OWNERSHIP_UNCERTAIN";
+        error.gpsLeaseError = true;
+        throw error;
+      },
+    },
+  });
+  context.worker.ownershipFailureHandler = async () => {
+    ownershipFailures++;
+  };
+
+  await assert.rejects(context.worker.runCycle(), /commit result uncertain/);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(emissions, []);
+  assert.equal(ownershipFailures, 1);
+});
+
+test("a runtime configuration change invalidates old-cycle writes without stopping the owner", async () => {
+  const emissions = [];
+  const socket = {
+    to() {
+      return this;
+    },
+    emit() {
+      emissions.push("locationUpdate");
+    },
+  };
+  const { worker, updates } = createWorker({
+    buses: [{
+      _id: "bus-1",
+      bus_no: "BUS-1",
+      gps_device_id: "device-1",
+      preview_number: "PREVIEW-1",
+    }],
+    provider: async () =>
+      new Map([["device-1", { latitude: 10, longitude: 77, speed: 1 }]]),
+    socketGetter: () => socket,
+    leaseGuard: {
+      fencingToken: 7n,
+      assertOwned: async () => true,
+      getConfigurationVersion: async () => 4n,
+      runTransaction: async (_operation, { expectedConfigVersion }) => {
+        assert.equal(expectedConfigVersion, 4n);
+        const error = new Error("GPS configuration changed");
+        error.code = "GPS_CONFIGURATION_CHANGED";
+        error.gpsConfigurationError = true;
+        throw error;
+      },
+    },
+  });
+
+  await worker.runCycle();
+  assert.equal(updates.length, 0);
+  assert.deepEqual(emissions, []);
+  assert.equal(worker.stopped, false);
+  assert.equal(worker.getStatus().lastCycle.status, "SKIPPED_CONFIGURATION_CHANGE");
+});
+
+test("single-instance MongoDB configuration changes reject stale worker results", async () => {
+  const originalTransaction = gpsWorkerOwnership.runGpsConfigurationTransaction;
+  let configurationVersion = 0n;
+  const emissions = [];
+  const socket = {
+    to() {
+      return this;
+    },
+    emit() {
+      emissions.push("locationUpdate");
+    },
+  };
+  let resolveProvider;
+  let providerStarted = false;
+  const { worker, updates } = createWorker({
+    buses: [{
+      _id: "bus-1",
+      bus_no: "BUS-1",
+      gps_device_id: "device-1",
+      preview_number: "PREVIEW-1",
+    }],
+    provider: () => {
+      providerStarted = true;
+      return new Promise((resolve) => {
+        resolveProvider = resolve;
+      });
+    },
+    socketGetter: () => socket,
+    leaseGuard: {
+      fencingToken: 7n,
+      assertOwned: async () => true,
+      getConfigurationVersion: async () => configurationVersion,
+      async runTransaction(operation, { expectedConfigVersion }) {
+        if (expectedConfigVersion !== configurationVersion) {
+          const error = new Error("GPS configuration changed during the worker cycle.");
+          error.code = "GPS_CONFIGURATION_CHANGED";
+          error.gpsConfigurationError = true;
+          throw error;
+        }
+        return operation({ transaction: true });
+      },
+    },
+  });
+
+  try {
+    const cycle = worker.runCycle();
+    while (!providerStarted) await new Promise((resolve) => setImmediate(resolve));
+    gpsWorkerOwnership.runGpsConfigurationTransaction = async (operation) => {
+      configurationVersion += 1n;
+      return operation({ transaction: true });
+    };
+    await runGpsConfigurationMutation(async () => {});
+    resolveProvider(new Map([
+      ["device-1", { latitude: 10, longitude: 77, speed: 1 }],
+    ]));
+    await cycle;
+
+    assert.equal(updates.length, 0);
+    assert.deepEqual(emissions, []);
+    assert.equal(worker.getStatus().lastCycle.status, "SKIPPED_CONFIGURATION_CHANGE");
+    assert.equal(worker.stopped, false);
+  } finally {
+    gpsWorkerOwnership.runGpsConfigurationTransaction = originalTransaction;
+  }
+});
+
+test("single-instance GPS persistence uses the MongoDB ownership transaction without Redis", async () => {
+  const session = { transaction: true };
+  let transactionCount = 0;
+  const emissions = [];
+  const socket = {
+    to() {
+      return this;
+    },
+    emit() {
+      emissions.push("locationUpdate");
+    },
+  };
+  const { worker, updates } = createWorker({
+    buses: [{
+      _id: "bus-1",
+      bus_no: "BUS-1",
+      gps_device_id: "device-1",
+      preview_number: "PREVIEW-1",
+    }],
+    provider: async () => new Map([
+      ["device-1", { latitude: 10, longitude: 77, speed: 1 }],
+    ]),
+    socketGetter: () => socket,
+    leaseGuard: {
+      fencingToken: 7n,
+      assertOwned: async () => true,
+      getConfigurationVersion: async () => 0n,
+      async runTransaction(operation, { expectedConfigVersion }) {
+        assert.equal(expectedConfigVersion, 0n);
+        transactionCount++;
+        return operation(session);
+      },
+    },
+  });
+
+  await worker.runCycle();
+  assert.equal(worker.leaseGuard != null, true);
+  assert.equal(transactionCount, 1);
+  assert.equal(updates.length, 1);
+  assert.deepEqual(emissions, []);
+  assert.equal(updates[0].options.session, session);
+  assert.equal(updates[0].operation.$set.publicationPending, true);
+  assert.equal(updates[0].operation.$inc.locationVersion, 1n);
 });
 
 test("one bus write failure does not prevent other buses from being processed", async () => {
@@ -279,13 +818,13 @@ test("one bus write failure does not prevent other buses from being processed", 
   const { worker, updates } = context;
 
   await worker.runCycle();
-  assert.equal(updates.length, 2);
-  assert.equal(updates[1].filter.bus_id, "bus-2");
+  assert.equal(updates.length, 3);
+  assert.equal(updates.at(-1).filter.bus_id, "bus-2");
   assert.equal(context.locationReads, 1);
   assert.deepEqual(context.locationReadFilter.bus_id.$in, ["bus-1", "bus-2"]);
 });
 
-test("failed location persistence emits no event while other buses continue", async () => {
+test("failed location persistence queues no event while other buses continue", async () => {
   const emissions = [];
   const pendingRooms = [];
   const socket = {
@@ -326,12 +865,17 @@ test("failed location persistence emits no event while other buses continue", as
 
   await context.worker.runCycle();
 
-  assert.equal(context.updates.length, 2);
-  assert.equal(context.updates[1].filter.bus_id, "bus-2");
-  assert.equal(emissions.length, 1);
-  assert.equal(emissions[0].event, "locationUpdate");
-  assert.equal(emissions[0].payload.previewNumber, "PREVIEW-2");
-  assert.deepEqual(emissions[0].rooms, ["preview_PREVIEW-2"]);
+  assert.equal(context.updates.length, 3);
+  assert.equal(context.updates.at(-1).filter.bus_id, "bus-2");
+  assert.equal(emissions.length, 0);
+  assert.equal(
+    context.updates.at(-1).operation.$set.publicationPending,
+    true,
+  );
+  assert.equal(
+    context.updates.at(-1).operation.$set.publicationPreviewNumber,
+    "PREVIEW-2",
+  );
 });
 
 test("starts bus and student reads independently and waits for both before location reads and writes", async () => {
@@ -545,6 +1089,8 @@ test("cycle observability reports timings, counts, failures, and skipped ticks w
   assert.equal(completed.failedWrites, 1);
   assert.equal(completed.skippedTimerTicks, 1);
   assert.equal(skipped.skippedTimerTicks, 1);
+  assert.ok(Date.parse(worker.getStatus().lastSuccessfulGpsUpdate));
+  assert.ok(Date.parse(worker.getStatus().lastProviderTimestamp));
   for (const field of [
     "durationMs",
     "providerDurationMs",
@@ -557,7 +1103,7 @@ test("cycle observability reports timings, counts, failures, and skipped ticks w
     assert.ok(completed[field] >= 0);
   }
   assert.ok(Date.parse(completed.completedAt) >= Date.parse(completed.startedAt));
-  assert.equal(updates.length, 2);
+  assert.equal(updates.length, 4);
   assert.equal(JSON.stringify(records).includes("latitude"), false);
   assert.equal(JSON.stringify(records).includes("longitude"), false);
 });
@@ -754,7 +1300,32 @@ test("failed provider data preserves last known coordinates while updating poll 
     is_online: true,
     lastUpdated: updates[0].operation.$set.lastUpdated,
   });
+  assert.equal(updates[0].operation.$inc, undefined);
   assert.equal(updates[0].operation.$set.latitude, undefined);
+});
+
+test("a failed provider cycle cannot mark an administratively offline location online", async () => {
+  const previous = {
+    bus_id: "bus-1",
+    latitude: 10,
+    longitude: 77,
+    speed: 3,
+    is_online: false,
+    lastSuccessfulGpsUpdate: new Date(),
+    source: "gps",
+  };
+  const { worker, updates } = createWorker({
+    buses: [{ _id: "bus-1", bus_no: "BUS-1", gps_device_id: "device-1" }],
+    locations: [previous],
+    provider: async () => new Map(),
+  });
+
+  await worker.runCycle();
+
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].operation.$set.is_online, false);
+  assert.equal(updates[0].operation.$inc, undefined);
+  assert.equal(updates[0].operation.$set.publicationPending, undefined);
 });
 
 test("GPS service exposes only the fleet-wide retrieval path", async () => {

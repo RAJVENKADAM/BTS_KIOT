@@ -3,9 +3,10 @@ const ExcelUpload = require('../models/ExcelUpload');
 const User = require('../models/User');
 const Bus = require('../models/Bus');
 const normalizeBusNumber = require('../utils/normalizeBusNumber');
-const { parsePagination } = require('../utils/pagination');
+const { parseCursor, parsePagination } = require('../utils/pagination');
 const { disconnectUserSockets } = require('../socket');
 const { logSafeError } = require('../utils/safeErrorLog');
+const { runGpsConfigurationMutation } = require('../services/gpsConfigurationBarrier');
 
 // Get all Excel uploads for current user
 async function getAllExcelUploads(req, res) {
@@ -146,19 +147,22 @@ async function deleteExcelUpload(req, res) {
     // Changed from User.deleteMany() to User.updateMany() to avoid permanent data loss.
     // This sets is_active=false, deleted_by_user=true so users cannot log in,
     // but their account records and history are preserved.
-    const linkedUsers = await User.find({ excel_upload_id: id })
-      .select('_id')
-      .lean();
-    const updateResult = await User.updateMany(
-      { excel_upload_id: id },
-      { $set: { is_active: false, deleted_by_user: true } }
-    );
+    const { linkedUsers, updateResult } = await runGpsConfigurationMutation(async (session) => {
+      const options = session ? { session } : {};
+      let linkedUsersQuery = User.find({ excel_upload_id: id }).select('_id');
+      if (session) linkedUsersQuery = linkedUsersQuery.session(session);
+      const linkedUsers = await linkedUsersQuery.lean();
+      const updateResult = await User.updateMany(
+        { excel_upload_id: id },
+        { $set: { is_active: false, deleted_by_user: true } },
+        options,
+      );
+      await ExcelUpload.deleteOne({ _id: id }, options);
+      return { linkedUsers, updateResult };
+    });
     if (linkedUsers.length) {
       disconnectUserSockets(linkedUsers.map((user) => String(user._id)));
     }
-
-    // Delete the upload record
-    await ExcelUpload.findByIdAndDelete(id);
 
     res.status(200).json({
       success: true,
@@ -185,6 +189,10 @@ async function getUsersByExcelUpload(req, res) {
     if (pagination.error) {
       return res.status(400).json({ success: false, error: pagination.error });
     }
+    const cursor = parseCursor(req.query || {});
+    if (cursor.error) {
+      return res.status(400).json({ success: false, error: cursor.error });
+    }
     
     // Find Excel upload
     const upload = await ExcelUpload.findById(id).select('_id').lean();
@@ -198,15 +206,33 @@ async function getUsersByExcelUpload(req, res) {
 
     // Find active users linked to this Excel upload (FIX 3: filter only active users)
     const userFilter = { excel_upload_id: id, is_active: true };
-    const [users, total] = await Promise.all([
-      User.find(userFilter)
-        .select('name email role bus_no is_active')
-        .sort({ _id: 1 })
-        .skip(pagination.skip)
-        .limit(pagination.limit)
-        .lean(),
+    const queryFilter = cursor.cursorMode
+      ? {
+          ...userFilter,
+          ...(cursor.cursor ? { _id: { $gt: cursor.cursor } } : {}),
+        }
+      : userFilter;
+    const [records, total] = await Promise.all([
+      cursor.cursorMode
+        ? User.find(queryFilter)
+            .select('name email role bus_no is_active')
+            .sort({ _id: 1 })
+            .limit(pagination.limit + 1)
+            .lean()
+        : User.find(queryFilter)
+            .select('name email role bus_no is_active')
+            .sort({ _id: 1 })
+            .skip(pagination.skip)
+            .limit(pagination.limit)
+            .lean(),
       User.countDocuments(userFilter),
     ]);
+    const hasNextPage = cursor.cursorMode
+      ? records.length > pagination.limit
+      : pagination.skip + records.length < total;
+    const users = cursor.cursorMode
+      ? records.slice(0, pagination.limit)
+      : records;
     const busNumbers = [
       ...new Set(
         users
@@ -240,8 +266,13 @@ async function getUsersByExcelUpload(req, res) {
         limit: pagination.limit,
         total,
         totalPages: Math.ceil(total / pagination.limit),
-        hasNextPage: pagination.skip + users.length < total,
-        hasPreviousPage: pagination.page > 1,
+        hasNextPage,
+        hasPreviousPage: cursor.cursorMode
+          ? Boolean(cursor.cursor)
+          : pagination.page > 1,
+        ...(cursor.cursorMode
+          ? { nextCursor: hasNextPage ? String(users.at(-1)._id) : null }
+          : {}),
       },
     });
   } catch (error) {

@@ -33,7 +33,6 @@ const busChangeSchema = new mongoose.Schema(
       type: String,
       enum: ["applying", "active", "rolled_back"],
       default: "applying",
-      index: true,
     },
     sourceBusId: { type: mongoose.Schema.Types.ObjectId, ref: "Bus", required: true },
     sourceBusNo: { type: String, required: true },
@@ -50,6 +49,6 @@ const busChangeSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-busChangeSchema.index({ status: 1, createdAt: -1 });
+busChangeSchema.index({ status: 1, createdAt: -1, _id: -1 });
 
 module.exports = mongoose.model("BusChange", busChangeSchema);

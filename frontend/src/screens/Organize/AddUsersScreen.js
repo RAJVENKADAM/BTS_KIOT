@@ -59,7 +59,10 @@ export default function AddUsersScreen() {
     if (token) loadExcelUploads();
   }, [token]);
 
-  const loadUsersForUpload = async (uploadId, { page = 1, append = false } = {}) => {
+  const loadUsersForUpload = async (
+    uploadId,
+    { cursorMode = true, cursor, append = false } = {},
+  ) => {
     if (!uploadId || !token) return;
 
     try {
@@ -71,7 +74,7 @@ export default function AddUsersScreen() {
       const response = await excelManagementApi.getUsersByUpload(
         token,
         uploadId,
-        { page, limit: 100 },
+        { cursorMode, cursor, limit: 100 },
       );
       if (response.success) {
         setUsersByUpload((p) => ({
@@ -102,7 +105,7 @@ export default function AddUsersScreen() {
     const pagination = paginationByUpload[uploadId];
     if (!pagination?.hasNextPage || loadingMoreUsersByUpload[uploadId]) return;
     await loadUsersForUpload(uploadId, {
-      page: pagination.page + 1,
+      cursor: pagination.nextCursor,
       append: true,
     });
   };

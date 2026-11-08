@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { createRequire } = require("node:module");
 const { performance } = require("node:perf_hooks");
+const { validateTarget: validateCapacityTarget } = require("./capacity-test-core.cjs");
 const {
   safeDescription,
   safeDisconnectReason,
@@ -16,10 +17,6 @@ const SOCKET_HOLD_MS = 5 * 60 * 1000;
 const RECONNECT_AFTER_MS = 60 * 1000;
 const SOCKET_TIMEOUT_MS = 30 * 1000;
 const REQUEST_TIMEOUT_MS = 15 * 1000;
-const PRODUCTION_HOSTS = new Set(["bts-kiot.onrender.com"]);
-const RENDER_PRODUCTION_ORIGIN = "https://bts-kiot.onrender.com";
-const PRODUCTION_CONFIRMATION =
-  "I_APPROVE_20_STUDENT_LOAD_TEST_ON_PRODUCTION";
 const ACCOUNT_FILE = path.join(__dirname, "accounts.json");
 
 const metrics = {
@@ -92,54 +89,10 @@ function logLoadTestSocketDiagnostic(session, event, details = {}) {
   console.info("[socket-diagnostic]", JSON.stringify(record));
 }
 
-function validateTarget() {
+function validateTarget(env = process.env) {
   const configuredUrl =
-    process.env.BTMS_LOAD_TEST_BASE_URL || "http://127.0.0.1:5000";
-  let url;
-
-  try {
-    url = new URL(configuredUrl);
-  } catch {
-    throw new Error("Invalid target URL. Set BTMS_LOAD_TEST_BASE_URL.");
-  }
-
-  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
-    throw new Error("Use an HTTP(S) target URL without embedded credentials.");
-  }
-
-  if (url.search || url.hash || (url.pathname !== "" && url.pathname !== "/")) {
-    throw new Error("Target URL must not include a path, query, or fragment.");
-  }
-
-  const host = url.hostname.toLowerCase();
-  if (PRODUCTION_HOSTS.has(host)) {
-    if (
-      url.origin !== RENDER_PRODUCTION_ORIGIN ||
-      process.env.BTMS_LOAD_TEST_PRODUCTION_CONFIRMATION !==
-        PRODUCTION_CONFIRMATION
-    ) {
-      throw new Error(
-        "Render production is blocked unless the exact production confirmation is set.",
-      );
-    }
-  } else if (/(^|[.-])prod(uction)?([.-]|$)/i.test(host)) {
-    throw new Error("Production-looking targets other than the approved Render host are blocked.");
-  }
-
-  const isLoopback = ["localhost", "127.0.0.1", "::1"].includes(host);
-  if (
-    !isLoopback &&
-    !PRODUCTION_HOSTS.has(host) &&
-    process.env.BTMS_LOAD_TEST_CONFIRM_STAGING !== "YES"
-  ) {
-    throw new Error(
-      "Remote targets require BTMS_LOAD_TEST_CONFIRM_STAGING=YES for a dedicated staging backend.",
-    );
-  }
-
-  url.search = "";
-  url.hash = "";
-  return url.toString().replace(/\/+$/, "");
+    env.BTMS_LOAD_TEST_BASE_URL || "http://127.0.0.1:5000";
+  return validateCapacityTarget(configuredUrl, env);
 }
 
 function readAccounts() {
@@ -759,7 +712,11 @@ async function run() {
   }
 }
 
-run().catch(() => {
-  console.error("Load test stopped due to an unexpected error.");
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  run().catch(() => {
+    console.error("Load test stopped due to an unexpected error.");
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { run, validateTarget };

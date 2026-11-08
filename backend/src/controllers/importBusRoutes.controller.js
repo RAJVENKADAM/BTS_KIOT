@@ -6,6 +6,7 @@ const Notification = require('../models/Notification');
 const BusChange = require('../models/BusChange');
 const { getIO } = require('../socket');
 const { randomUUID } = require("node:crypto");
+const { runGpsConfigurationMutation } = require("../services/gpsConfigurationBarrier");
 const { normalizeArrivalTime } = require("../utils/planMapping");
 const normalizeStopNameKey = require("../utils/normalizeStopName");
 const getRouteUpdateImpactBuses = require("../utils/routeUpdateImpact");
@@ -271,8 +272,16 @@ async function importBusRoutes(req, res) {
       },
       $setOnInsert: { status: "active" },
     };
-    await Bus.findOneAndUpdate(busFilter, busUpdate, { upsert: true, new: true });
-    const bus = await Bus.findOne({ bus_no: normalizedBusNoValue });
+    const bus = await runGpsConfigurationMutation(async (session) => {
+      await Bus.findOneAndUpdate(busFilter, busUpdate, {
+        upsert: true,
+        new: true,
+        ...(session ? { session } : {}),
+      });
+      const query = Bus.findOne({ bus_no: normalizedBusNoValue });
+      if (session) query.session(session);
+      return query;
+    });
     if (!bus) throw new Error('Bus upsert failed');
     const previousRoutes = replaceRoutes
       ? await BusRoute.find({ bus_id: bus._id })

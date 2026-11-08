@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { test } = require("node:test");
+const { after, test } = require("node:test");
 const Bus = require("../src/models/Bus");
 const BusLiveLocation = require("../src/models/BusLiveLocation");
 const BusRoute = require("../src/models/BusRoute");
@@ -8,6 +8,10 @@ const User = require("../src/models/User");
 const BusChange = require("../src/models/BusChange");
 const { deleteBus } = require("../src/controllers/bus.controller");
 const { setIO } = require("../src/socket");
+const { mockGpsOwnershipTransactions } = require("./helpers/gpsOwnershipTransactionMock.cjs");
+
+const gpsOwnershipTransactions = mockGpsOwnershipTransactions();
+after(() => gpsOwnershipTransactions.restore());
 
 function createResponse() {
   return {

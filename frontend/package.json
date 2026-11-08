@@ -7,7 +7,7 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
-    "test": "node --test"
+    "test": "node --import ./test-bootstrap.cjs --test"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.2",

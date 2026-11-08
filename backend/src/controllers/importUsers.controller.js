@@ -3,6 +3,7 @@ const User = require('../models/User');
 const ExcelUpload = require('../models/ExcelUpload');
 const normalizeBusNumber = require('../utils/normalizeBusNumber');
 const { runLimitedImportPasswordHash } = require('../utils/authProtection');
+const { runGpsConfigurationMutation } = require('../services/gpsConfigurationBarrier');
 const {
   disconnectUserSockets,
   emitBusAssignmentNotification,
@@ -103,6 +104,31 @@ function getErrorIndex(writeError) {
   return null;
 }
 
+function getDefiniteWriteErrorIndexes(error, operationCount) {
+  const writeErrors = getBulkWriteErrors(error);
+  if (
+    writeErrors.length === 0 ||
+    (Array.isArray(error?.writeConcernErrors) && error.writeConcernErrors.length > 0) ||
+    error?.writeConcernError
+  ) {
+    return null;
+  }
+  const indexes = new Set();
+  for (const writeError of writeErrors) {
+    const index = getErrorIndex(writeError);
+    if (
+      index === null ||
+      index < 0 ||
+      index >= operationCount ||
+      indexes.has(index)
+    ) {
+      return null;
+    }
+    indexes.add(index);
+  }
+  return indexes;
+}
+
 async function persistBatch(rows, state) {
   state.chunkCount += 1;
   const { summary, userId, excelCustomName } = state;
@@ -191,43 +217,62 @@ async function persistBatch(rows, state) {
     });
   }
 
-  let writeResult;
-  let indexedWriteErrors = [];
-  try {
-    writeResult = await User.bulkWrite(operations, { ordered: false });
-  } catch (error) {
-    indexedWriteErrors = getBulkWriteErrors(error);
-    writeResult = error?.result;
-    if (!indexedWriteErrors.length) {
-      summary.outcomeUnknown = true;
-      for (const { row } of operationRows) {
-        addRowFailure(
-          summary,
-          row.index,
-          row.rowNumber,
-          'Database write outcome could not be confirmed',
+  const failedOperationIndexes = new Set();
+  const completedOperationIndexes = new Set();
+  let outcomeUnknownIndex = null;
+  const persistBulkWrite = (session) =>
+    User.bulkWrite(operations, {
+      ordered: false,
+      ...(session ? { session } : {}),
+    });
+  if (process.env.SOCKET_IO_MODE === 'redis') {
+    for (let index = 0; index < operations.length; index += 1) {
+      try {
+        await runGpsConfigurationMutation((session) =>
+          User.bulkWrite([operations[index]], {
+            ordered: true,
+            ...(session ? { session } : {}),
+          }),
         );
+        completedOperationIndexes.add(index);
+      } catch (error) {
+        const definiteErrors = getDefiniteWriteErrorIndexes(error, 1);
+        if (
+          error?.gpsLeaseError ||
+          error?.gpsConfigurationError ||
+          !definiteErrors ||
+          !definiteErrors.has(0)
+        ) {
+          summary.outcomeUnknown = true;
+          outcomeUnknownIndex = index;
+          break;
+        }
+        failedOperationIndexes.add(index);
       }
-      return { stopped: true };
     }
-  }
-
-  const failedOperationIndexes = new Set(
-    indexedWriteErrors
-      .map(getErrorIndex)
-      .filter((index) => index !== null),
-  );
-  if (failedOperationIndexes.size !== indexedWriteErrors.length) {
-    summary.outcomeUnknown = true;
-    for (const { row } of operationRows) {
-      addRowFailure(
-        summary,
-        row.index,
-        row.rowNumber,
-        'Database write outcome could not be confirmed',
-      );
+  } else {
+    try {
+      await runGpsConfigurationMutation(persistBulkWrite);
+      for (let index = 0; index < operations.length; index += 1) {
+        completedOperationIndexes.add(index);
+      }
+    } catch (error) {
+      const failedIndexes =
+        error?.gpsLeaseError || error?.gpsConfigurationError
+          ? null
+          : getDefiniteWriteErrorIndexes(error, operations.length);
+      if (!failedIndexes) {
+        summary.outcomeUnknown = true;
+        outcomeUnknownIndex = 0;
+      } else {
+        for (const index of failedIndexes) failedOperationIndexes.add(index);
+        for (let index = 0; index < operations.length; index += 1) {
+          if (!failedOperationIndexes.has(index)) {
+            completedOperationIndexes.add(index);
+          }
+        }
+      }
     }
-    return { stopped: true };
   }
 
   for (let index = 0; index < operationRows.length; index += 1) {
@@ -241,6 +286,20 @@ async function persistBatch(rows, state) {
       );
       continue;
     }
+    if (outcomeUnknownIndex !== null && index >= outcomeUnknownIndex) {
+      addRowFailure(
+        summary,
+        item.row.index,
+        item.row.rowNumber,
+        process.env.SOCKET_IO_MODE !== 'redis'
+          ? 'Database write outcome could not be confirmed'
+          : index === outcomeUnknownIndex
+          ? 'Database write outcome could not be confirmed'
+          : 'Not processed after an earlier uncertain database write',
+      );
+      continue;
+    }
+    if (!completedOperationIndexes.has(index)) continue;
 
     if (item.type === 'create') {
       summary.insertedRows += 1;
@@ -280,12 +339,7 @@ async function persistBatch(rows, state) {
     }
   }
 
-  if (indexedWriteErrors.length) return { stopped: false };
-
-  return {
-    stopped: false,
-    writeResult,
-  };
+  return { stopped: outcomeUnknownIndex !== null };
 }
 
 async function importUsers(req, res) {

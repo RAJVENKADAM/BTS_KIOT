@@ -4,7 +4,7 @@ const Bus = require("../src/models/Bus");
 const BusLiveLocation = require("../src/models/BusLiveLocation");
 const { setIO } = require("../src/socket");
 const { registerTrackSocketHandlers } = require("../src/socket/trackSocket");
-const { GpsSyncWorker } = require("../src/workers/gpsSyncWorker");
+const { createGpsLocationPublisher } = require("../src/services/gpsLocationPublisher");
 
 function locationIo(sockets) {
   const emissions = [];
@@ -29,7 +29,7 @@ function locationIo(sockets) {
   return { io, emissions };
 }
 
-test("worker emits one location event to the union of relevant rooms", () => {
+test("durable publisher emits one versioned event to the union of relevant rooms", async () => {
   const firstSocket = {
     id: "socket-1",
     rooms: new Set(["preview_4", "user_student-1"]),
@@ -47,25 +47,45 @@ test("worker emits one location event to the union of relevant rooms", () => {
     secondSocket,
     unrelatedSocket,
   ]);
-  const worker = new GpsSyncWorker({
-    socketGetter: () => io,
-  });
-  worker.staleThresholdMs = 180_000;
-
-  worker.emitLocation(
-    { preview_number: "4", bus_no: "BUS-4" },
-    {
-      latitude: 10,
-      longitude: 77,
-      speed: 5,
-      is_online: true,
-      lastSuccessfulGpsUpdate: new Date("2026-11-04T00:00:00Z"),
-      source: "gps",
-      user_id: "student-1",
+  const record = {
+    _id: "bus-live-4",
+    publicationPending: true,
+    publicationRooms: ["preview_4", "user_student-1", "user_student-2"],
+    publicationPreviewNumber: "4",
+    publicationClaimId: null,
+    locationVersion: 4n,
+    publishedVersion: 3n,
+    latitude: 10,
+    longitude: 77,
+    speed: 5,
+    is_online: true,
+    lastSuccessfulGpsUpdate: new Date("2026-11-04T00:00:00Z"),
+    providerTimestamp: new Date("2026-11-04T00:00:00Z"),
+    source: "gps",
+    updatedAt: new Date("2026-11-04T00:00:00Z"),
+  };
+  const model = {
+    async findOneAndUpdate(filter, pipeline) {
+      if (!record.publicationPending || record.publicationClaimId) return null;
+      record.publicationClaimId =
+        pipeline[0].$set.publicationClaimId;
+      record.publicationAttempts = 1;
+      return { ...record };
     },
-    new Map([["BUS-4", new Set(["student-1", "student-2"])]]),
-    new Date("2026-11-04T00:00:00Z"),
-  );
+    async updateOne(filter) {
+      assert.equal(filter.publicationClaimId, record.publicationClaimId);
+      record.publicationPending = false;
+      record.publishedVersion = record.locationVersion;
+      return { matchedCount: 1 };
+    },
+  };
+  const publisher = createGpsLocationPublisher({
+    model,
+    socketGetter: () => io,
+    staleThresholdMs: 180_000,
+    batchSize: 1,
+  });
+  await publisher.drain();
 
   assert.equal(emissions.length, 1);
   assert.equal(emissions[0].event, "locationUpdate");
@@ -74,18 +94,23 @@ test("worker emits one location event to the union of relevant rooms", () => {
     Object.keys(emissions[0].payload).sort(),
     [
       "gpsOfflineThresholdMs",
+      "eventId",
       "is_online",
       "lastSuccessfulGpsUpdate",
       "lastUpdated",
       "latitude",
+      "locationVersion",
       "longitude",
       "previewNumber",
+      "providerTimestamp",
       "source",
       "speed",
       "status",
     ].sort(),
   );
   assert.equal(emissions[0].payload.gpsOfflineThresholdMs, 180_000);
+  assert.equal(emissions[0].payload.eventId, "bus-live-4:4");
+  assert.equal(emissions[0].payload.locationVersion, "4");
 });
 
 test("legacy socket location request uses projected lean reads and preserves event fields", async () => {
@@ -99,6 +124,8 @@ test("legacy socket location request uses projected lean reads and preserves eve
     is_online: true,
     source: "gps",
     lastSuccessfulGpsUpdate: new Date("2026-11-04T00:00:00Z"),
+    providerTimestamp: new Date("2026-11-04T00:00:00Z"),
+    locationVersion: 12n,
     updatedAt: new Date("2026-11-04T00:00:00Z"),
   };
   const busProjections = [];
@@ -156,7 +183,9 @@ test("legacy socket location request uses projected lean reads and preserves eve
         "lastSuccessfulGpsUpdate",
         "lastUpdated",
         "latitude",
+        "locationVersion",
         "longitude",
+        "providerTimestamp",
         "previewNumber",
         "source",
         "speed",
@@ -165,6 +194,8 @@ test("legacy socket location request uses projected lean reads and preserves eve
     );
     assert.equal(output[0].payload.previewNumber, "4");
     assert.equal(output[0].payload.gpsOfflineThresholdMs, 180_000);
+    assert.equal(output[0].payload.providerTimestamp.toISOString(), "2026-11-04T00:00:00.000Z");
+    assert.equal(output[0].payload.locationVersion, "12");
   } finally {
     Bus.findOne = originalBusFindOne;
     BusLiveLocation.findOne = originalLocationFindOne;

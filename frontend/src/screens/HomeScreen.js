@@ -46,6 +46,7 @@ import OSMMap from "../components/Map/OSMMap";
 import {
   View,
   Text,
+  AppState,
   StyleSheet,
   StatusBar,
   Platform,
@@ -66,14 +67,17 @@ import { getDisplayBusNumber } from "../utils/busDisplay";
 import notificationApi from "../api/notificationApi";
 const {
   getGpsFreshnessDelay,
+  getLocationOrder,
   getSocketRecoveryDelay,
   hasValidGpsCoordinates,
+  hasKnownLocationOrder,
   isGpsStale,
-  isIncomingLocationOlder,
   isLocationForSelection,
+  createGpsLocationReconciler,
 } = require("../utils/gpsLocationPolicy.cjs");
 const { getPreviewRoomIds } = require("../utils/socketConnectionPolicy.cjs");
 const { subscribeSocketEvent } = require("../utils/socketSubscription.cjs");
+const { createGpsSnapshotPoller } = require("../utils/gpsSnapshotPolling.cjs");
 
 const KIOT_LAT = 11.554528;
 const KIOT_LNG = 78.019759;
@@ -112,13 +116,178 @@ const HomeScreen = () => {
   const [markerStatus, setMarkerStatus] = useState("moving");
   const [isOffline, setIsOffline] = useState(false);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
+  const [appIsActive, setAppIsActive] = useState(
+    AppState.currentState === "active",
+  );
   const busDataRef = useRef(busData);
   busDataRef.current = busData;
   const selectedPreviewNumberRef = useRef(selectedPreviewNumber);
   selectedPreviewNumberRef.current = selectedPreviewNumber;
   const hasBeenFocusedRef = useRef(false);
-  const latestGpsTimestampRef = useRef(NaN);
+  const latestGpsOrderRef = useRef(getLocationOrder(null));
   const reconnectRequestRef = useRef(0);
+  const gpsSnapshotRequestInFlightRef = useRef(false);
+  const gpsReconcilerRef = useRef(createGpsLocationReconciler());
+  const gpsSelectionKeyRef = useRef(null);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      setAppIsActive(nextState === "active");
+    });
+    return () => subscription.remove();
+  }, []);
+
+  const getGpsSelectionKey = (busNo, previewNumber) => {
+    if (previewNumber) return `preview:${String(previewNumber)}`;
+    if (busNo) return `bus:${String(busNo).trim().toUpperCase()}`;
+    return null;
+  };
+
+  const selectGpsTarget = (busNo, previewNumber) => {
+    const key = getGpsSelectionKey(busNo, previewNumber);
+    if (gpsSelectionKeyRef.current !== key) {
+      gpsSelectionKeyRef.current = key;
+      gpsReconcilerRef.current.select(key);
+      latestGpsOrderRef.current = getLocationOrder(null);
+      busDataRef.current = null;
+    }
+    return key;
+  };
+
+  const beginGpsSnapshot = (key = gpsSelectionKeyRef.current) =>
+    gpsReconcilerRef.current.beginSnapshot(key);
+
+  const reconcileGpsSnapshot = (key, snapshot, generation) => {
+    const result = gpsReconcilerRef.current.reconcileSnapshot(
+      key,
+      snapshot,
+      generation,
+    );
+    if (result.accepted) {
+      latestGpsOrderRef.current = getLocationOrder(result.location);
+    }
+    return result;
+  };
+
+  useEffect(() => {
+    if (!socket || !isFocused) return undefined;
+    selectGpsTarget(
+      selectedBusNoRef.current,
+      selectedPreviewNumberRef.current,
+    );
+    let disposed = false;
+    const handleLocationUpdate = (data) => {
+      if (disposed || !data || data.error) return;
+      const selected = selectedBusNoRef.current;
+      const currentPreview = selectedPreviewNumberRef.current;
+      const currentBusData = busDataRef.current;
+      const currentKey = gpsSelectionKeyRef.current;
+      const assignedBusNo = String(user?.bus_no || "").trim().toUpperCase();
+      const allowAssignedRoomEvent =
+        Boolean(selected) &&
+        String(selected).trim().toUpperCase() === assignedBusNo;
+      if (
+        !isLocationForSelection(
+          data,
+          selected,
+          currentPreview,
+          currentBusData,
+          allowAssignedRoomEvent,
+        )
+      ) {
+        if (!currentBusData) {
+          gpsReconcilerRef.current.bufferLive(currentKey, data);
+        }
+        return;
+      }
+      const reconciliation = gpsReconcilerRef.current.acceptLive(
+        currentKey,
+        data,
+      );
+      if (!reconciliation.accepted) return;
+      latestGpsOrderRef.current = getLocationOrder(data);
+
+      const hasIncomingCoordinates = hasValidGpsCoordinates(data);
+      const nextBusData = {
+        ...(currentBusData || {}),
+        ...data,
+        busNo: data.busNo ?? data.bus_no ?? selected,
+        bus_no: data.bus_no ?? selected,
+        previewNumber: data.previewNumber ?? currentPreview ?? undefined,
+        latitude: hasIncomingCoordinates
+          ? data.latitude
+          : currentBusData?.latitude ?? null,
+        longitude: hasIncomingCoordinates
+          ? data.longitude
+          : currentBusData?.longitude ?? null,
+        speed: data.speed ?? currentBusData?.speed ?? 0,
+        source: data.source || currentBusData?.source || "gps",
+        isBusActiveInCurrentPlan:
+          data.isBusActiveInCurrentPlan ??
+          currentBusData?.isBusActiveInCurrentPlan,
+        notActiveMessage:
+          data.notActiveMessage ?? currentBusData?.notActiveMessage ?? null,
+        alteration: data.alteration ?? currentBusData?.alteration ?? null,
+      };
+      const inactive =
+        nextBusData.isBusActiveInCurrentPlan === false ||
+        !!nextBusData.notActiveMessage;
+      const live =
+        !inactive &&
+        hasIncomingCoordinates &&
+        !isGpsStale(nextBusData);
+      nextBusData._isOffline = !live;
+      nextBusData._markerStatus = inactive
+        ? "inactive"
+        : live
+          ? "moving"
+          : "offline";
+      busDataRef.current = nextBusData;
+
+      const visibleLocationChanged = [
+        "latitude",
+        "longitude",
+        "lastSuccessfulGpsUpdate",
+        "speed",
+        "status",
+        "is_online",
+        "_isOffline",
+        "_markerStatus",
+        "source",
+        "gpsOfflineThresholdMs",
+        "isBusActiveInCurrentPlan",
+        "notActiveMessage",
+      ].some((property) => !Object.is(currentBusData?.[property], nextBusData[property]));
+      if (visibleLocationChanged) {
+        setBusData(nextBusData);
+        setLastGoodLocation(nextBusData);
+      }
+      setLocationStatus(live ? "live" : "offline");
+      setIsOffline(!live);
+      setMarkerStatus(inactive ? "inactive" : live ? "moving" : "offline");
+      setTrackingError(
+        inactive
+          ? "Your bus is inactive."
+          : live
+            ? null
+            : "Bus is offline or no live GPS is available right now.",
+      );
+      setNoBusFound(false);
+      setIsBusFound(true);
+    };
+    const unsubscribe = subscribeSocketEvent(
+      socket,
+      "locationUpdate",
+      handleLocationUpdate,
+    );
+    return () => {
+      disposed = true;
+      unsubscribe();
+      gpsReconcilerRef.current.invalidate();
+      gpsSelectionKeyRef.current = null;
+      latestGpsOrderRef.current = getLocationOrder(null);
+    };
+  }, [socket, isFocused, user?.id, user?._id, user?.bus_no]);
 
   useEffect(() => {
     if (!busData || locationStatus !== "live") return undefined;
@@ -200,6 +369,7 @@ const HomeScreen = () => {
   const searchCounterRef = useRef(0);
 
   useEffect(() => {
+    busDataRef.current = null;
     setBusData(null);
     setLastGoodLocation(null);
     setRoutesData(null);
@@ -214,7 +384,10 @@ const HomeScreen = () => {
     lastCoordinateRef.current = null;
     busStatusRef.current = "moving";
     selectedBusNoRef.current = null;
-    latestGpsTimestampRef.current = NaN;
+    selectedPreviewNumberRef.current = null;
+    gpsReconcilerRef.current.invalidate();
+    gpsSelectionKeyRef.current = null;
+    latestGpsOrderRef.current = getLocationOrder(null);
 
     if (user?.bus_no) {
       setSelectedBusNo(user.bus_no);
@@ -230,12 +403,18 @@ const HomeScreen = () => {
   const autoLoadedBusKeyRef = useRef(null);
   useEffect(() => {
     const assignedBusNo = (user?.bus_no || "").trim().toUpperCase() || null;
+    let snapshotGeneration = null;
     if (assignedBusNo) {
       selectedBusNoRef.current = assignedBusNo;
       setSelectedBusNo(assignedBusNo);
+      selectedPreviewNumberRef.current = null;
+      const selectionKey = selectGpsTarget(assignedBusNo, null);
+      snapshotGeneration = beginGpsSnapshot(selectionKey);
     } else {
       selectedBusNoRef.current = null;
       setSelectedBusNo(null);
+      selectedPreviewNumberRef.current = null;
+      selectGpsTarget(null, null);
       setLocationStatus("idle");
       setNoBusFound(false);
       return;
@@ -255,13 +434,15 @@ const HomeScreen = () => {
 
     (async () => {
       try {
-        const data = await busApi.getBusLocation(token, assignedBusNo);
+        const snapshot = await busApi.getBusLocation(token, assignedBusNo);
         if (cancelled) return;
-        if (isIncomingLocationOlder(data, latestGpsTimestampRef.current)) return;
-        const responseTimestamp = Date.parse(data?.lastSuccessfulGpsUpdate);
-        if (Number.isFinite(responseTimestamp)) {
-          latestGpsTimestampRef.current = responseTimestamp;
-        }
+        const reconciliation = reconcileGpsSnapshot(
+          `bus:${assignedBusNo}`,
+          snapshot,
+          snapshotGeneration,
+        );
+        if (!reconciliation.accepted) return;
+        const data = reconciliation.location;
 
         const hasValidCoords = hasValidGpsCoordinates(data);
 
@@ -327,8 +508,13 @@ const HomeScreen = () => {
           );
         }
       } catch (err) {
-        if (cancelled) return;
-        if (Number.isFinite(latestGpsTimestampRef.current)) return;
+        if (
+          cancelled ||
+          gpsSelectionKeyRef.current !== `bus:${assignedBusNo}`
+        ) {
+          return;
+        }
+        if (hasKnownLocationOrder(latestGpsOrderRef.current)) return;
         setSelectedBusNo(assignedBusNo);
         setBusData(null);
         setLastGoodLocation(null);
@@ -389,52 +575,73 @@ const HomeScreen = () => {
   ]);
 
   useEffect(() => {
-    if (!socket || !isFocused) return undefined;
+    if (!socket || !isFocused || !appIsActive) return undefined;
     let hasConnected = !!socket.connected;
     let recoveryAttempt = 0;
     let recoveryTimer = null;
     let recoveryRequestInFlight = false;
     let disposed = false;
+    let poller;
+    let scheduleRecovery = () => {};
 
-    const refreshLocation = async () => {
-      recoveryTimer = null;
-      if (disposed || !socket.connected || recoveryRequestInFlight) return;
+    const getSelectedKey = () => {
+      const currentBusNo = selectedBusNoRef.current;
+      const currentPreview = selectedPreviewNumberRef.current;
+      if (currentPreview) return `preview:${currentPreview}`;
+      if (currentBusNo) return `bus:${currentBusNo}`;
+      return null;
+    };
+
+    const refreshLocation = async (targetKey) => {
+      if (
+        disposed ||
+        !socket.connected ||
+        recoveryRequestInFlight ||
+        gpsSnapshotRequestInFlightRef.current
+      ) return;
       const currentBusNo = selectedBusNoRef.current;
       const currentPreview = selectedPreviewNumberRef.current;
       if (!currentBusNo && !currentPreview) return;
       recoveryRequestInFlight = true;
-      const selectedKey = currentPreview
+      const selectedKey = targetKey || (currentPreview
         ? `preview:${currentPreview}`
-        : `bus:${currentBusNo}`;
+        : `bus:${currentBusNo}`);
+      if (selectedKey !== getSelectedKey()) {
+        recoveryRequestInFlight = false;
+        return;
+      }
+      gpsSnapshotRequestInFlightRef.current = true;
+      const snapshotGeneration = beginGpsSnapshot(selectedKey);
       const requestId = ++reconnectRequestRef.current;
       try {
-        const data = currentPreview
-          ? await busApi.trackByPreview(token, currentPreview)
-          : await busApi.getBusLocation(token, currentBusNo);
+        const data = await busApi.getGpsLocationSnapshot(
+          token,
+          currentPreview || currentBusNo,
+        );
         if (disposed || requestId !== reconnectRequestRef.current) return;
-        const currentSelectionKey = selectedPreviewNumberRef.current
-          ? `preview:${selectedPreviewNumberRef.current}`
-          : `bus:${selectedBusNoRef.current}`;
+        const currentSelectionKey = getSelectedKey();
         if (selectedKey !== currentSelectionKey) return;
-        if (isIncomingLocationOlder(data, latestGpsTimestampRef.current)) {
+        const reconciliation = reconcileGpsSnapshot(
+          selectedKey,
+          data,
+          snapshotGeneration,
+        );
+        if (!reconciliation.accepted) {
           recoveryAttempt = 0;
           return;
         }
 
-        const timestamp = Date.parse(data?.lastSuccessfulGpsUpdate);
-        if (Number.isFinite(timestamp)) {
-          latestGpsTimestampRef.current = timestamp;
-        }
+        const reconciledData = reconciliation.location;
         const nextBusData = {
           ...(busDataRef.current || {}),
-          ...data,
+          ...reconciledData,
           busNo:
-            data.busNo ||
-            data.bus_no ||
+            reconciledData.busNo ||
+            reconciledData.bus_no ||
             selectedBusNoRef.current ||
             currentPreview,
           previewNumber:
-            data.previewNumber ||
+            reconciledData.previewNumber ||
             selectedPreviewNumberRef.current ||
             busDataRef.current?.previewNumber,
         };
@@ -475,27 +682,36 @@ const HomeScreen = () => {
         );
         if (!socket.connected) return;
         recoveryAttempt += 1;
-        recoveryTimer = setTimeout(
-          refreshLocation,
-          getSocketRecoveryDelay(recoveryAttempt),
-        );
+        scheduleRecovery();
       } finally {
         recoveryRequestInFlight = false;
+        gpsSnapshotRequestInFlightRef.current = false;
       }
     };
 
-    const scheduleRecovery = () => {
-      if (recoveryRequestInFlight) return;
+    poller = createGpsSnapshotPoller({
+      request: refreshLocation,
+    });
+
+    scheduleRecovery = () => {
+      if (disposed || !getSelectedKey()) return;
       if (recoveryTimer) clearTimeout(recoveryTimer);
       recoveryTimer = setTimeout(
-        refreshLocation,
+        () => {
+          recoveryTimer = null;
+          void poller.refreshNow();
+        },
         getSocketRecoveryDelay(recoveryAttempt),
       );
     };
 
+    poller.start(getSelectedKey());
+    if (socket.connected) scheduleRecovery();
+
     const handleConnect = () => {
       if (!hasConnected) {
         hasConnected = true;
+        poller.start(getSelectedKey());
         return;
       }
       const currentBusNo = selectedBusNoRef.current;
@@ -516,10 +732,18 @@ const HomeScreen = () => {
     return () => {
       disposed = true;
       if (recoveryTimer) clearTimeout(recoveryTimer);
+      poller.stop();
       reconnectRequestRef.current += 1;
       unsubscribeConnect();
     };
-  }, [socket, token, isFocused]);
+  }, [
+    socket,
+    token,
+    isFocused,
+    appIsActive,
+    selectedBusNo,
+    selectedPreviewNumber,
+  ]);
 
   useEffect(() => {
     if (!socket || !user?.id) return;
@@ -527,6 +751,10 @@ const HomeScreen = () => {
       setUnreadNotifications((count) => count + 1);
       if (notification?.type === "plan_changed" && user?.bus_no) {
         const assignedBusNo = String(user.bus_no).toUpperCase();
+        selectedBusNoRef.current = assignedBusNo;
+        selectedPreviewNumberRef.current = null;
+        const selectionKey = selectGpsTarget(assignedBusNo, null);
+        const snapshotGeneration = beginGpsSnapshot(selectionKey);
         setSelectedBusNo(assignedBusNo);
         setSelectedPreviewNumber(null);
         setTrackingError(null);
@@ -536,15 +764,22 @@ const HomeScreen = () => {
           busApi.getBusRoutes(token, assignedBusNo),
         ])
           .then(([nextBus, nextRoutes]) => {
+            const reconciliation = reconcileGpsSnapshot(
+              selectionKey,
+              nextBus,
+              snapshotGeneration,
+            );
+            if (!reconciliation.accepted) return;
+            const reconciledBus = reconciliation.location;
             const inactive =
-              nextBus?.isBusActiveInCurrentPlan === false ||
-              Boolean(nextBus?.notActiveMessage);
+              reconciledBus?.isBusActiveInCurrentPlan === false ||
+              Boolean(reconciledBus?.notActiveMessage);
             const offline =
               inactive ||
-              !hasValidGpsCoordinates(nextBus) ||
-              isGpsStale(nextBus);
-            setBusData(nextBus);
-            setLastGoodLocation(nextBus);
+              !hasValidGpsCoordinates(reconciledBus) ||
+              isGpsStale(reconciledBus);
+            setBusData(reconciledBus);
+            setLastGoodLocation(reconciledBus);
             setRoutesData(nextRoutes);
             setIsBusFound(true);
             setIsOffline(offline);
@@ -552,7 +787,7 @@ const HomeScreen = () => {
             setMarkerStatus(inactive ? "inactive" : offline ? "offline" : "moving");
             setTrackingError(
               inactive
-                ? nextBus?.notActiveMessage || "Your bus is inactive for today's service."
+                ? reconciledBus?.notActiveMessage || "Your bus is inactive for today's service."
                 : null,
             );
           })
@@ -609,6 +844,11 @@ const HomeScreen = () => {
         }
 
         if (isUnassigned) {
+          gpsReconcilerRef.current.invalidate();
+          gpsSelectionKeyRef.current = null;
+          selectedBusNoRef.current = null;
+          selectedPreviewNumberRef.current = null;
+          latestGpsOrderRef.current = getLocationOrder(null);
           setSelectedBusNo(null);
           setSelectedPreviewNumber(null);
           setBusData(null);
@@ -626,6 +866,11 @@ const HomeScreen = () => {
           assignmentChanged ? assignmentBusNo : user.bus_no || "",
         ).trim();
         if (busNoToRefresh) {
+          selectedBusNoRef.current = busNoToRefresh;
+          selectedPreviewNumberRef.current = null;
+          busDataRef.current = null;
+          const selectionKey = selectGpsTarget(busNoToRefresh, null);
+          const snapshotGeneration = beginGpsSnapshot(selectionKey);
           setSelectedBusNo(busNoToRefresh);
           setSelectedPreviewNumber(null);
           setSearchQuery(
@@ -638,14 +883,21 @@ const HomeScreen = () => {
             busApi.getBusRoutes(token, busNoToRefresh),
           ])
             .then(([nextBus, nextRoutes]) => {
+              const reconciliation = reconcileGpsSnapshot(
+                selectionKey,
+                nextBus,
+                snapshotGeneration,
+              );
+              if (!reconciliation.accepted) return;
+              const reconciledBus = reconciliation.location;
               const isOffline =
-                !hasValidGpsCoordinates(nextBus) || isGpsStale(nextBus);
+                !hasValidGpsCoordinates(reconciledBus) || isGpsStale(reconciledBus);
               setBusData({
-                ...nextBus,
+                ...reconciledBus,
                 _isOffline: isOffline,
                 _markerStatus: isOffline ? "offline" : "moving",
               });
-              setLastGoodLocation(nextBus);
+              setLastGoodLocation(reconciledBus);
               setRoutesData(nextRoutes);
               setIsBusFound(true);
               setIsOffline(isOffline);
@@ -674,24 +926,36 @@ const HomeScreen = () => {
       if (!["PLAN_CHANGED", "PLAN_MAPPING_CHANGED", "BUS_ALTERED", "BUS_COMBINED"].includes(data?.actionType)) return;
       const identifier = selectedPreviewNumber || selectedBusNo || user?.bus_no;
       if (!identifier) return;
+      const selectionKey = selectGpsTarget(
+        selectedBusNoRef.current || identifier,
+        selectedPreviewNumberRef.current,
+      );
+      const snapshotGeneration = beginGpsSnapshot(selectionKey);
       busApi
         .getBusLocation(token, identifier)
         .then((nextBusData) => {
-          setBusData(nextBusData);
-          setLastGoodLocation(nextBusData);
+          const reconciliation = reconcileGpsSnapshot(
+            selectionKey,
+            nextBusData,
+            snapshotGeneration,
+          );
+          if (!reconciliation.accepted) return;
+          const reconciledBusData = reconciliation.location;
+          setBusData(reconciledBusData);
+          setLastGoodLocation(reconciledBusData);
           const inactive =
-            nextBusData?.isBusActiveInCurrentPlan === false ||
-            Boolean(nextBusData?.notActiveMessage);
+            reconciledBusData?.isBusActiveInCurrentPlan === false ||
+            Boolean(reconciledBusData?.notActiveMessage);
           setTrackingError(
             inactive
-              ? nextBusData?.notActiveMessage || "Your bus is inactive for today's service."
+              ? reconciledBusData?.notActiveMessage || "Your bus is inactive for today's service."
               : null,
           );
           setMarkerStatus(inactive ? "inactive" : "moving");
           const offline =
             inactive ||
-            !hasValidGpsCoordinates(nextBusData) ||
-            isGpsStale(nextBusData);
+            !hasValidGpsCoordinates(reconciledBusData) ||
+            isGpsStale(reconciledBusData);
           setIsOffline(offline);
           setLocationStatus(offline ? "offline" : "live");
         })
@@ -749,98 +1013,6 @@ const HomeScreen = () => {
   }, [selectedBusNo, token]);
 
   useEffect(() => {
-    if (!socket || !isFocused) return;
-    const handleLocationUpdate = (data) => {
-      if (!data || data.error) return;
-      const selected = selectedBusNoRef.current;
-      const currentBusData = busDataRef.current;
-      const currentPreview = selectedPreviewNumberRef.current;
-      if (
-        !isLocationForSelection(
-          data,
-          selected,
-          currentPreview,
-          currentBusData,
-        )
-      ) return;
-      if (isIncomingLocationOlder(data, latestGpsTimestampRef.current)) return;
-      const timestamp = Date.parse(data?.lastSuccessfulGpsUpdate);
-      if (Number.isFinite(timestamp)) {
-        latestGpsTimestampRef.current = timestamp;
-      }
-
-      const hasIncomingCoordinates = hasValidGpsCoordinates(data);
-      const nextBusData = {
-        ...currentBusData,
-        ...data,
-        busNo: data.busNo ?? data.bus_no ?? selected,
-        bus_no: data.bus_no ?? selected,
-        previewNumber: data.previewNumber ?? currentPreview ?? undefined,
-        latitude: hasIncomingCoordinates
-          ? data.latitude
-          : currentBusData?.latitude ?? null,
-        longitude: hasIncomingCoordinates
-          ? data.longitude
-          : currentBusData?.longitude ?? null,
-        speed: data.speed ?? currentBusData?.speed ?? 0,
-        source: data.source || currentBusData?.source || "gps",
-        isBusActiveInCurrentPlan:
-          data.isBusActiveInCurrentPlan ??
-          currentBusData?.isBusActiveInCurrentPlan,
-        notActiveMessage:
-          data.notActiveMessage ?? currentBusData?.notActiveMessage ?? null,
-        alteration: data.alteration ?? currentBusData?.alteration ?? null,
-      };
-      const inactive =
-        nextBusData.isBusActiveInCurrentPlan === false ||
-        !!nextBusData.notActiveMessage;
-      const live =
-        !inactive &&
-        hasIncomingCoordinates &&
-        !isGpsStale(nextBusData);
-      nextBusData._isOffline = !live;
-      nextBusData._markerStatus = inactive
-        ? "inactive"
-        : live
-          ? "moving"
-          : "offline";
-      busDataRef.current = nextBusData;
-
-      const visibleLocationChanged = [
-        "latitude",
-        "longitude",
-        "lastSuccessfulGpsUpdate",
-        "speed",
-        "status",
-        "is_online",
-        "_isOffline",
-        "_markerStatus",
-        "source",
-        "gpsOfflineThresholdMs",
-        "isBusActiveInCurrentPlan",
-        "notActiveMessage",
-      ].some((key) => !Object.is(currentBusData[key], nextBusData[key]));
-      if (visibleLocationChanged) {
-        setBusData(nextBusData);
-        setLastGoodLocation(nextBusData);
-      }
-      setLocationStatus(live ? "live" : "offline");
-      setIsOffline(!live);
-      setMarkerStatus(inactive ? "inactive" : live ? "moving" : "offline");
-      setTrackingError(
-        inactive
-          ? "Your bus is inactive."
-          : live
-            ? null
-            : "Bus is offline or no live GPS is available right now.",
-      );
-      setNoBusFound(false);
-      setIsBusFound(true);
-    };
-    return subscribeSocketEvent(socket, "locationUpdate", handleLocationUpdate);
-  }, [socket, isFocused]);
-
-  useEffect(() => {
     refreshBuses();
   }, [refreshBuses]);
 
@@ -884,12 +1056,16 @@ const HomeScreen = () => {
   const handleSearch = async () => {
     const query = searchQuery.trim();
     if (!query) return;
-    latestGpsTimestampRef.current = NaN;
     reconnectRequestRef.current += 1;
     const isPreviewSearch = /^\d+$/.test(query);
     busDataRef.current = null;
     selectedPreviewNumberRef.current = isPreviewSearch ? query : null;
     selectedBusNoRef.current = isPreviewSearch ? null : query.toUpperCase();
+    const selectionKey = selectGpsTarget(
+      selectedBusNoRef.current,
+      selectedPreviewNumberRef.current,
+    );
+    const snapshotGeneration = beginGpsSnapshot(selectionKey);
 
     const currentSearch = ++searchCounterRef.current;
     setNoBusFound(false);
@@ -908,21 +1084,28 @@ const HomeScreen = () => {
       setSelectedPreviewNumber(query);
       setSelectedBusNo(null);
       try {
-        const data = await busApi.trackByPreview(token, query);
+        const snapshot = await busApi.trackByPreview(token, query);
 
         if (currentSearch !== searchCounterRef.current) return;
-        if (isIncomingLocationOlder(data, latestGpsTimestampRef.current)) return;
-        const responseTimestamp = Date.parse(data?.lastSuccessfulGpsUpdate);
-        if (Number.isFinite(responseTimestamp)) {
-          latestGpsTimestampRef.current = responseTimestamp;
-        }
+        const reconciliation = reconcileGpsSnapshot(
+          selectionKey,
+          snapshot,
+          snapshotGeneration,
+        );
+        if (!reconciliation.accepted) return;
+        const reconciledData = reconciliation.location;
         setTrackingError(null);
 
-        if (!data || data.error || !(data.busNo || data.bus_no)) {
+        if (
+          !reconciledData ||
+          reconciledData.error ||
+          !(reconciledData.busNo || reconciledData.bus_no)
+        ) {
           throw new Error(
-            data?.error || "No bus found for this preview number",
+            reconciledData?.error || "No bus found for this preview number",
           );
         }
+        const data = reconciledData;
         const nextBusNo = data.busNo || data.bus_no || null;
         setSelectedBusNo(nextBusNo);
         setIsBusFound(true);
@@ -979,7 +1162,7 @@ const HomeScreen = () => {
         }
       } catch (err) {
         if (currentSearch !== searchCounterRef.current) return;
-        if (Number.isFinite(latestGpsTimestampRef.current)) return;
+        if (hasKnownLocationOrder(latestGpsOrderRef.current)) return;
         setTrackingError(null);
         setSelectedBusNo(null);
         setSelectedPreviewNumber(null);
@@ -1001,14 +1184,16 @@ const HomeScreen = () => {
       setSelectedBusNo(busNo);
 
       try {
-        const data = await busApi.getBusLocation(token, busNo);
+        const snapshot = await busApi.getBusLocation(token, busNo);
 
         if (currentSearch !== searchCounterRef.current) return;
-        if (isIncomingLocationOlder(data, latestGpsTimestampRef.current)) return;
-        const responseTimestamp = Date.parse(data?.lastSuccessfulGpsUpdate);
-        if (Number.isFinite(responseTimestamp)) {
-          latestGpsTimestampRef.current = responseTimestamp;
-        }
+        const reconciliation = reconcileGpsSnapshot(
+          selectionKey,
+          snapshot,
+          snapshotGeneration,
+        );
+        if (!reconciliation.accepted) return;
+        const data = reconciliation.location;
         setIsBusFound(true);
         setTrackingError(null);
 
@@ -1057,7 +1242,7 @@ const HomeScreen = () => {
         }
       } catch (err) {
         if (currentSearch !== searchCounterRef.current) return;
-        if (Number.isFinite(latestGpsTimestampRef.current)) return;
+        if (hasKnownLocationOrder(latestGpsOrderRef.current)) return;
         setBusData(null);
         setLastGoodLocation(null);
         setIsBusFound(false);
@@ -1076,13 +1261,16 @@ const HomeScreen = () => {
   const handleClearSearch = useCallback(() => {
     searchCounterRef.current += 1;
     reconnectRequestRef.current += 1;
-    latestGpsTimestampRef.current = NaN;
+    gpsReconcilerRef.current.invalidate();
+    gpsSelectionKeyRef.current = null;
+    latestGpsOrderRef.current = getLocationOrder(null);
     setSearchQuery("");
     setNoBusFound(false);
     setTrackingError(null);
     setLocationStatus("idle");
     setIsBusSearchAttempted(false);
     setSelectedPreviewNumber(null);
+    selectedPreviewNumberRef.current = null;
     setSelectedBusNo(null);
     setLastGoodLocation(null);
     setBusData(null);

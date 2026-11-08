@@ -1,10 +1,14 @@
 const Bus = require("../models/Bus");
 const BusLiveLocation = require("../models/BusLiveLocation");
+const GpsDevice = require("../models/GpsDevice");
 const User = require("../models/User");
 const { randomUUID } = require("node:crypto");
 const { performance } = require("node:perf_hooks");
 const gpsService = require("../services/gpsService");
-const { getIO } = require("../socket");
+const {
+  captureSingleInstanceGpsConfigurationVersion,
+  runSingleInstanceGpsPersistence,
+} = require("../services/gpsConfigurationBarrier");
 
 const GPS_SYNC_INTERVAL_MS = 35_000;
 const DEFAULT_STALE_THRESHOLD_MS = 3 * 60 * 1000;
@@ -31,8 +35,11 @@ function elapsedMs(startedAt) {
   return Math.max(0, performance.now() - startedAt);
 }
 
-// These guards are process-local; multiple backend processes still need
-// external coordination and a shared Socket.IO adapter.
+function isDuplicateKeyError(error) {
+  return error?.code === 11000 || error?.code === "11000";
+}
+
+// The lock prevents local overlap; leaseGuard coordinates fleet ownership across instances.
 const distanceMeters = (pointA, pointB) => {
   const radians = (degrees) => (degrees * Math.PI) / 180;
   const latitudeA = radians(Number(pointA.latitude));
@@ -53,8 +60,12 @@ const distanceMeters = (pointA, pointB) => {
   );
 };
 
-function getBusLocation(bus, locationMap) {
+function getBusLocation(bus, locationMap, registeredDevice) {
   if (!locationMap) return null;
+  if (registeredDevice) {
+    if (registeredDevice.source !== "REAL") return null;
+    return locationMap.get(String(registeredDevice.deviceId)) || null;
+  }
 
   for (const deviceId of [
     bus.gps_device_id,
@@ -85,20 +96,35 @@ function buildUsersByBus(assignedUsers) {
   return usersByBus;
 }
 
-function getLocationPayload(bus, location, now, staleThresholdMs) {
-  const lastSuccessfulGpsUpdate = location?.lastSuccessfulGpsUpdate ?? null;
-  const updatedAt = location?.updatedAt ?? now;
+function getLocationPublicationRooms(bus, usersByBus, location) {
+  const rooms = new Set();
+  if (bus.preview_number != null) {
+    rooms.add(`preview_${String(bus.preview_number)}`);
+  }
+  const assignedUserIds =
+    usersByBus.get(String(bus.bus_no || "").trim().toUpperCase()) ||
+    new Set();
+  for (const userId of assignedUserIds) rooms.add(`user_${userId}`);
+  if (location.user_id) rooms.add(`user_${String(location.user_id)}`);
+  return [...rooms];
+}
+
+function isProviderTimestampNewerExpression(providerTimestamp) {
+  const providerTimestampType = { $type: "$providerTimestamp" };
   return {
-    previewNumber: bus.preview_number || null,
-    latitude: location?.latitude ?? null,
-    longitude: location?.longitude ?? null,
-    speed: location?.speed ?? 0,
-    status: location?.is_online ? "online" : "offline",
-    source: location?.source || "offline",
-    is_online: !!location?.is_online,
-    lastSuccessfulGpsUpdate,
-    lastUpdated: lastSuccessfulGpsUpdate || updatedAt,
-    gpsOfflineThresholdMs: staleThresholdMs,
+    $expr: {
+      $or: [
+        {
+          $in: [providerTimestampType, ["missing", "null"]],
+        },
+        {
+          $and: [
+            { $eq: [providerTimestampType, "date"] },
+            { $lt: ["$providerTimestamp", providerTimestamp] },
+          ],
+        },
+      ],
+    },
   };
 }
 
@@ -106,17 +132,17 @@ class GpsSyncWorker {
   constructor({
     BusModel = Bus,
     LiveLocationModel = BusLiveLocation,
+    GpsDeviceModel = null,
     UserModel = User,
     service = gpsService,
-    socketGetter = getIO,
     setIntervalFn = setInterval,
     clearIntervalFn = clearInterval,
   } = {}) {
     this.Bus = BusModel;
     this.BusLiveLocation = LiveLocationModel;
+    this.GpsDevice = GpsDeviceModel;
     this.User = UserModel;
     this.gpsService = service;
-    this.socketGetter = socketGetter;
     this.setIntervalFn = setIntervalFn;
     this.clearIntervalFn = clearIntervalFn;
 
@@ -134,6 +160,219 @@ class GpsSyncWorker {
     this.activeCycleId = null;
     this.skippedTimerTicks = 0;
     this.lastCycleMetrics = null;
+    this.lastSuccessfulGpsUpdate = null;
+    this.lastProviderTimestamp = null;
+    this.leaseGuard = null;
+    this.fencingToken = 0;
+    this.ownershipFailureHandler = null;
+    this.ownershipLost = false;
+    this.providerAbortController = null;
+  }
+
+  setLeaseGuard(leaseGuard, ownershipFailureHandler = null) {
+    if (this.started) {
+      throw new Error("Cannot change the GPS worker lease while it is running.");
+    }
+    const rawToken = leaseGuard?.fencingToken;
+    const fencingToken =
+      typeof rawToken === "bigint"
+        ? rawToken
+        : rawToken?._bsontype === "Long"
+          ? rawToken.toBigInt()
+          : 0n;
+    if (
+      leaseGuard &&
+      (fencingToken <= 0n ||
+        typeof leaseGuard.runTransaction !== "function" ||
+        typeof leaseGuard.getConfigurationVersion !== "function")
+    ) {
+      throw new Error("GPS worker ownership requires a token and transaction guard.");
+    }
+    this.leaseGuard = leaseGuard;
+    this.fencingToken = leaseGuard ? fencingToken : 0n;
+    this.ownershipFailureHandler = leaseGuard ? ownershipFailureHandler : null;
+    this.ownershipLost = false;
+  }
+
+  notifyOwnershipFailure(error) {
+    if (this.ownershipLost) return;
+    this.ownershipLost = true;
+    this.started = false;
+    this.stopped = true;
+    if (this.interval) {
+      this.clearIntervalFn(this.interval);
+      this.interval = null;
+    }
+    this.providerAbortController?.abort();
+    if (this.ownershipFailureHandler) {
+      Promise.resolve()
+        .then(() => this.ownershipFailureHandler(error))
+        .catch((handlerError) =>
+          logGpsEvent("GPS_OWNERSHIP_FAILURE_HANDLER_FAILED", {
+            ...getSafeError(handlerError),
+          }),
+        );
+    }
+  }
+
+  async assertLeaseOwnership() {
+    if (!this.leaseGuard) return;
+    if (this.ownershipLost) {
+      const error = new Error("GPS worker ownership has already been lost.");
+      error.code = "GPS_LEASE_LOST";
+      error.gpsLeaseError = true;
+      throw error;
+    }
+    try {
+      if (await this.leaseGuard.assertOwned()) return;
+    } catch (error) {
+      error.gpsLeaseError = true;
+      this.notifyOwnershipFailure(error);
+      throw error;
+    }
+    const error = new Error("GPS worker lease ownership was lost.");
+    error.code = "GPS_LEASE_LOST";
+    error.gpsLeaseError = true;
+    this.notifyOwnershipFailure(error);
+    throw error;
+  }
+
+  async persistGpsOperations(operations, expectedConfigVersion) {
+    const committed = [];
+    const failed = [];
+    const rejected = [];
+    const batchSize = 25;
+
+    const executeBatch = async (batch) => {
+      const execute = async (session) => {
+        const results = [];
+        for (const operation of batch) {
+          const filter = { ...operation.filter };
+          let update = operation.update;
+          if (this.leaseGuard) {
+            const clauses = Array.isArray(filter.$and) ? [...filter.$and] : [];
+            delete filter.$and;
+            clauses.push({
+              $or: [
+                { gpsFenceToken: { $exists: false } },
+                { gpsFenceToken: { $lte: this.fencingToken } },
+              ],
+            });
+            filter.$and = clauses;
+            update = {
+              ...operation.update,
+              $max: {
+                ...(operation.update.$max || {}),
+                gpsFenceToken: this.fencingToken,
+              },
+            };
+          }
+          const options = {
+            ...(operation.options || {}),
+            ...(session ? { session } : {}),
+          };
+          const result = await operation.model[operation.method](
+            filter,
+            update,
+            options,
+          );
+          if (
+            operation.staleOnNoMatch &&
+            result?.matchedCount === 0 &&
+            result?.upsertedCount === 0
+          ) {
+            results.push({ operation, result, stale: true });
+            continue;
+          }
+          if (
+            operation.requireMatch &&
+            result?.matchedCount === 0 &&
+            result?.upsertedCount === 0
+          ) {
+            throw new Error("GPS write was rejected by its document fence.");
+          }
+          results.push({ operation, result });
+        }
+        return results;
+      };
+
+      if (this.leaseGuard) {
+        return this.leaseGuard.runTransaction(execute, {
+          expectedConfigVersion,
+        });
+      }
+      return execute(null);
+    };
+
+    const persistBatches = async () => {
+      const recordCommitted = (operation) => {
+        committed.push(operation);
+        if (operation.providerAccepted) {
+          this.lastSuccessfulGpsUpdate =
+            operation.providerLastSuccessfulUpdate.toISOString();
+          this.lastProviderTimestamp = operation.providerTimestamp.toISOString();
+        }
+      };
+      for (let offset = 0; offset < operations.length; offset += batchSize) {
+        const batch = operations.slice(offset, offset + batchSize);
+        try {
+          const results = await executeBatch(batch);
+          for (const entry of results) {
+            if (entry.stale) {
+              rejected.push(entry.operation);
+            } else {
+              recordCommitted(entry.operation);
+            }
+          }
+        } catch (error) {
+          if (error.gpsLeaseError) {
+            this.notifyOwnershipFailure(error);
+            throw error;
+          }
+          if (error.gpsConfigurationError) throw error;
+          if (
+            batch.length === 1 &&
+            batch[0].staleOnNoMatch &&
+            isDuplicateKeyError(error)
+          ) {
+            rejected.push(batch[0]);
+            continue;
+          }
+          if (batch.length > 1) {
+            for (const operation of batch) {
+              try {
+                const [entry] = await executeBatch([operation]);
+                if (entry.stale) rejected.push(entry.operation);
+                else recordCommitted(entry.operation);
+              } catch (individualError) {
+                if (individualError.gpsLeaseError) {
+                  this.notifyOwnershipFailure(individualError);
+                  throw individualError;
+                }
+                if (individualError.gpsConfigurationError) throw individualError;
+                if (
+                  operation.staleOnNoMatch &&
+                  isDuplicateKeyError(individualError)
+                ) {
+                  rejected.push(operation);
+                } else {
+                  failed.push({ operation, error: individualError });
+                }
+              }
+            }
+          } else {
+            failed.push({ operation: batch[0], error });
+          }
+        }
+      }
+    };
+
+    if (this.leaseGuard) {
+      await persistBatches();
+    } else {
+      await runSingleInstanceGpsPersistence(expectedConfigVersion, persistBatches);
+    }
+    return { committed, failed, rejected };
   }
 
   getStatus() {
@@ -143,9 +382,13 @@ class GpsSyncWorker {
       syncIntervalMs: this.syncIntervalMs,
       activeCycleId: this.activeCycleId,
       skippedTimerTicks: this.skippedTimerTicks,
+      distributedLease: Boolean(this.leaseGuard),
+      fencingToken: this.fencingToken || null,
       lastCycle: this.lastCycleMetrics
         ? { ...this.lastCycleMetrics }
         : null,
+      lastSuccessfulGpsUpdate: this.lastSuccessfulGpsUpdate,
+      lastProviderTimestamp: this.lastProviderTimestamp,
     };
   }
 
@@ -202,7 +445,7 @@ class GpsSyncWorker {
       });
       return;
     }
-    if (this.stopping || this.stopped) {
+    if (this.stopping || this.stopped || this.ownershipLost) {
       logGpsEvent("GPS_CYCLE_SKIPPED", {
         reason: this.stopping ? "WORKER_STOPPING" : "WORKER_STOPPED",
         activeCycleId: this.activeCycleId,
@@ -242,10 +485,15 @@ class GpsSyncWorker {
       assignedStudentCount: null,
       normalizedProviderRecordCount: null,
       successfulWrites: 0,
+      acceptedProviderUpdates: 0,
+      staleProviderUpdates: 0,
+      duplicateProviderUpdates: 0,
+      missingProviderTimestampUpdates: 0,
       failedWrites: 0,
       processingFailures: 0,
       skippedTimerTicks: 0,
       providerFailures: 0,
+      providerRequestSkipped: false,
       databaseReadFailures: 0,
       failureStage: null,
       failureName: null,
@@ -270,33 +518,110 @@ class GpsSyncWorker {
       }
     };
 
+    let expectedConfigVersion;
     try {
-      let locationMap = null;
+      if (this.leaseGuard) {
+        try {
+          expectedConfigVersion = await this.leaseGuard.getConfigurationVersion();
+        } catch (error) {
+          error.gpsLeaseError = true;
+          this.notifyOwnershipFailure(error);
+          throw error;
+        }
+      } else {
+        expectedConfigVersion =
+          await captureSingleInstanceGpsConfigurationVersion();
+      }
+      const activeGpsDevices = this.GpsDevice
+        ? await timedRead("gpsDeviceQueryDurationMs", () =>
+            this.GpsDevice.find({ is_active: true })
+              .select(
+                "deviceId source bus_id lastSuccessfulUpdate providerTimestamp",
+              )
+              .lean(),
+          )
+        : [];
+      const realGpsDevices = activeGpsDevices.filter(
+        (device) => device.source === "REAL",
+      );
+      const registryStrict =
+        process.env.GPS_DEVICE_REGISTRY_MODE === "strict";
+      metrics.providerRequestSkipped =
+        registryStrict && realGpsDevices.length === 0;
+      if (realGpsDevices.length) {
+        await this.persistGpsOperations([
+          {
+            model: this.GpsDevice,
+            method: "updateMany",
+            filter: { _id: { $in: realGpsDevices.map((device) => device._id) } },
+            update: {
+            $set: {
+              lastAttemptedUpdate: new Date(),
+              healthStatus: "PENDING",
+              lastErrorCode: null,
+            },
+          },
+          },
+        ], expectedConfigVersion);
+      }
+      let locationMap = metrics.providerRequestSkipped
+        ? new Map()
+        : null;
       let providerRequestFailed = false;
       const providerStarted = performance.now();
-      try {
-        locationMap = await this.gpsService.getAllCurrentLocations({
-          timeoutMs: this.timeoutPerAttemptMs,
-        });
-      } catch (error) {
-        providerRequestFailed = true;
-        metrics.providerFailures++;
-        const safeError = getSafeError(error);
-        metrics.failureStage = "PROVIDER_REQUEST";
-        metrics.failureName = safeError.name;
-        metrics.failureCode = safeError.code;
-        logGpsEvent("GPS_PROVIDER_REQUEST_FAILED", {
-          cycleId,
-          ...safeError,
-        });
-      } finally {
-        metrics.providerDurationMs = elapsedMs(providerStarted);
+      if (!locationMap) {
+        await this.assertLeaseOwnership();
+        const abortController = this.leaseGuard ? new AbortController() : null;
+        this.providerAbortController = abortController;
+        try {
+          locationMap = await this.gpsService.getAllCurrentLocations({
+            timeoutMs: this.timeoutPerAttemptMs,
+            ...(abortController ? { signal: abortController.signal } : {}),
+          });
+        } catch (error) {
+          if (this.ownershipLost || error.gpsLeaseError) {
+            error.gpsLeaseError = true;
+            throw error;
+          }
+          providerRequestFailed = true;
+          metrics.providerFailures++;
+          const safeError = getSafeError(error);
+          metrics.failureStage = "PROVIDER_REQUEST";
+          metrics.failureName = safeError.name;
+          metrics.failureCode = safeError.code;
+          logGpsEvent("GPS_PROVIDER_REQUEST_FAILED", {
+            cycleId,
+            ...safeError,
+          });
+        }
+        if (this.providerAbortController === abortController) {
+          this.providerAbortController = null;
+        }
+        await this.assertLeaseOwnership();
       }
+      metrics.providerDurationMs = elapsedMs(providerStarted);
       if (locationMap == null) {
         if (!providerRequestFailed) {
           metrics.providerFailures++;
           metrics.failureStage = "PROVIDER_RESPONSE";
           logGpsEvent("GPS_PROVIDER_RESPONSE_UNUSABLE", { cycleId });
+        }
+        if (realGpsDevices.length) {
+          await this.persistGpsOperations([
+            {
+              model: this.GpsDevice,
+              method: "updateMany",
+              filter: { _id: { $in: realGpsDevices.map((device) => device._id) } },
+              update: {
+              $set: {
+                healthStatus: "ERROR",
+                lastErrorCode: providerRequestFailed
+                  ? "PROVIDER_REQUEST_FAILED"
+                  : "PROVIDER_RESPONSE_INVALID",
+              },
+            },
+            },
+          ], expectedConfigVersion);
         }
         metrics.status = "COMPLETED_WITH_ERRORS";
         return;
@@ -332,6 +657,100 @@ class GpsSyncWorker {
       metrics.activeBusCount = buses.length;
       metrics.assignedStudentCount = assignedUsers.length;
       const usersByBus = buildUsersByBus(assignedUsers);
+      const devicesByBus = new Map(
+        activeGpsDevices.map((device) => [String(device.bus_id), device]),
+      );
+      const now = new Date();
+      const gpsWriteOperations = [];
+      const rejectedProviderDevices = new Set();
+      const rejectProviderUpdate = (providerLocation, reason) => {
+        const key = providerLocation?.deviceId || providerLocation?.regNo;
+        if (key && rejectedProviderDevices.has(String(key))) return;
+        if (key) rejectedProviderDevices.add(String(key));
+        if (reason === "MISSING_OR_INVALID_PROVIDER_TIMESTAMP") {
+          metrics.missingProviderTimestampUpdates++;
+        } else if (reason === "DUPLICATE_PROVIDER_TIMESTAMP") {
+          metrics.duplicateProviderUpdates++;
+        } else {
+          metrics.staleProviderUpdates++;
+        }
+        metrics.processingFailures++;
+        logGpsEvent("GPS_PROVIDER_UPDATE_REJECTED", {
+          cycleId,
+          reason,
+        });
+      };
+
+      for (const device of realGpsDevices) {
+        const providerLocation = locationMap.get(String(device.deviceId));
+        if (!providerLocation) {
+          gpsWriteOperations.push({
+            model: this.GpsDevice,
+            method: "updateOne",
+            filter: { _id: device._id, is_active: true },
+            update: {
+              $set: {
+                healthStatus: "STALE",
+                lastErrorCode: "DEVICE_NOT_IN_PROVIDER_RESPONSE",
+              },
+            },
+          });
+          continue;
+        }
+        const providerTimestamp = providerLocation.providerTimestamp
+          ? new Date(providerLocation.providerTimestamp)
+          : null;
+        const providerTime = providerTimestamp?.getTime();
+        const previousProviderTime = device.providerTimestamp
+          ? new Date(device.providerTimestamp).getTime()
+          : NaN;
+        let rejectionReason = null;
+        if (!Number.isFinite(providerTime)) {
+          rejectionReason = "MISSING_OR_INVALID_PROVIDER_TIMESTAMP";
+        } else if (providerTime > now.getTime() + 5 * 60 * 1000) {
+          rejectionReason = "FUTURE_PROVIDER_TIMESTAMP";
+        } else if (now.getTime() - providerTime > this.staleThresholdMs) {
+          rejectionReason = "STALE_PROVIDER_TIMESTAMP";
+        } else if (
+          Number.isFinite(previousProviderTime) &&
+          providerTime <= previousProviderTime
+        ) {
+          rejectionReason =
+            providerTime === previousProviderTime
+              ? "DUPLICATE_PROVIDER_TIMESTAMP"
+              : "OUT_OF_ORDER_PROVIDER_TIMESTAMP";
+        }
+        if (rejectionReason) {
+          rejectProviderUpdate(providerLocation, rejectionReason);
+          gpsWriteOperations.push({
+            model: this.GpsDevice,
+            method: "updateOne",
+            filter: { _id: device._id, is_active: true },
+            update: {
+              $set: {
+                healthStatus: "STALE",
+                lastErrorCode: "STALE_PROVIDER_UPDATE",
+              },
+            },
+          });
+          continue;
+        }
+        gpsWriteOperations.push({
+          model: this.GpsDevice,
+          method: "updateOne",
+          filter: { _id: device._id, is_active: true },
+          update: {
+            $set: {
+              healthStatus: "HEALTHY",
+              lastErrorCode: null,
+              lastSuccessfulUpdate: now,
+              lastLatitude: providerLocation.latitude,
+              lastLongitude: providerLocation.longitude,
+              ...(providerTimestamp ? { providerTimestamp } : {}),
+            },
+          },
+        });
+      }
 
       let existingLocations = [];
       if (buses.length) {
@@ -340,7 +759,7 @@ class GpsSyncWorker {
             bus_id: { $in: buses.map((bus) => bus._id) },
           })
             .select(
-              "bus_id user_id latitude longitude speed is_online source lastSuccessfulGpsUpdate lastUpdated updatedAt",
+              "bus_id user_id latitude longitude speed is_online source gpsFenceToken providerTimestamp lastSuccessfulGpsUpdate lastUpdated publicationPreviewNumber updatedAt",
             )
             .lean(),
         );
@@ -354,16 +773,46 @@ class GpsSyncWorker {
         ]),
       );
 
-      const now = new Date();
       for (const bus of buses) {
         const busId = bus._id;
         const previousLocation = locationsByBus.get(String(busId));
-        const providerLocation = getBusLocation(bus, locationMap);
+        const registeredDevice = devicesByBus.get(String(busId));
+        if (registryStrict && !registeredDevice) continue;
+        const providerLocation = getBusLocation(bus, locationMap, registeredDevice);
         let writeAttempted = false;
+        let locationFilter = { bus_id: busId };
+        let staleOnNoMatch = false;
 
         try {
           let update;
           if (providerLocation) {
+            const providerTimestamp = providerLocation.providerTimestamp
+              ? new Date(providerLocation.providerTimestamp)
+              : null;
+            const providerTime = providerTimestamp?.getTime();
+            const previousProviderTime = previousLocation?.providerTimestamp
+              ? new Date(previousLocation.providerTimestamp).getTime()
+              : NaN;
+            let rejectionReason = null;
+            if (!Number.isFinite(providerTime)) {
+              rejectionReason = "MISSING_OR_INVALID_PROVIDER_TIMESTAMP";
+            } else if (providerTime > now.getTime() + 5 * 60 * 1000) {
+              rejectionReason = "FUTURE_PROVIDER_TIMESTAMP";
+            } else if (now.getTime() - providerTime > this.staleThresholdMs) {
+              rejectionReason = "STALE_PROVIDER_TIMESTAMP";
+            } else if (
+              Number.isFinite(previousProviderTime) &&
+              providerTime <= previousProviderTime
+            ) {
+              rejectionReason =
+                providerTime === previousProviderTime
+                  ? "DUPLICATE_PROVIDER_TIMESTAMP"
+                  : "OUT_OF_ORDER_PROVIDER_TIMESTAMP";
+            }
+            if (rejectionReason) {
+              rejectProviderUpdate(providerLocation, rejectionReason);
+              continue;
+            }
             const previousTimestamp = previousLocation?.lastSuccessfulGpsUpdate
               ? new Date(previousLocation.lastSuccessfulGpsUpdate).getTime()
               : NaN;
@@ -391,48 +840,88 @@ class GpsSyncWorker {
               is_online: true,
               lastSuccessfulGpsUpdate: now,
               lastUpdated: now,
+              ...(providerTimestamp ? { providerTimestamp } : {}),
             };
+            const newerTimestampFilter =
+              isProviderTimestampNewerExpression(providerTimestamp);
+            metrics.acceptedProviderUpdates++;
+            locationFilter = {
+              bus_id: busId,
+              ...newerTimestampFilter,
+            };
+            staleOnNoMatch = true;
           } else {
             const lastSuccess = previousLocation?.lastSuccessfulGpsUpdate
               ? new Date(previousLocation.lastSuccessfulGpsUpdate).getTime()
               : NaN;
             const shouldBeOnline =
+              previousLocation?.is_online === true &&
               Number.isFinite(lastSuccess) &&
               now.getTime() - lastSuccess <= this.staleThresholdMs;
             update = {
               is_online: shouldBeOnline,
               lastUpdated: now,
+              ...(registeredDevice?.source === "SIMULATED"
+                ? { source: "simulated" }
+                : {}),
             };
           }
 
-          const currentLocation = {
-            ...previousLocation,
-            ...update,
-            bus_id: busId,
-            source: previousLocation ? previousLocation.source : "gps",
-            updatedAt: now,
-          };
-          const writeStarted = performance.now();
-          writeAttempted = true;
-          try {
-            await this.BusLiveLocation.updateOne(
-              { bus_id: busId },
-              { $set: update },
-              { upsert: true },
-            );
-            metrics.successfulWrites++;
-          } finally {
-            metrics.locationWriteDurationMs += elapsedMs(writeStarted);
-          }
-          try {
-            this.emitLocation(bus, currentLocation, usersByBus, now);
-          } catch (error) {
-            logGpsEvent("GPS_LOCATION_EVENT_FAILED", {
-              cycleId,
-              ...getSafeError(error),
+          const publicationRooms = getLocationPublicationRooms(
+            bus,
+            usersByBus,
+            previousLocation || {},
+          );
+          const publicationStateChanged =
+            !previousLocation ||
+            previousLocation.is_online !== update.is_online ||
+            (update.source && previousLocation.source !== update.source) ||
+            (previousLocation.publicationPreviewNumber ?? null) !==
+              (bus.preview_number == null ? null : String(bus.preview_number));
+          const shouldPublish = Boolean(providerLocation || publicationStateChanged);
+          const set = { ...update };
+          if (shouldPublish) {
+            Object.assign(set, {
+              publicationPending: true,
+              publicationRooms,
+              publicationPreviewNumber: bus.preview_number ?? null,
+              publicationNextAttemptAt: null,
+              publicationRetryExhausted: false,
+              publicationAttempts: 0,
+              publicationClaimId: null,
+              publicationClaimUntil: null,
+              publicationCreatedAt: now,
             });
           }
+          const filter = locationFilter || { bus_id: busId };
+          writeAttempted = true;
+          gpsWriteOperations.push({
+            model: this.BusLiveLocation,
+            method: "updateOne",
+            filter,
+            update: {
+              $setOnInsert: {
+                bus_id: busId,
+                publishedVersion: 0n,
+              },
+              ...(shouldPublish ? { $inc: { locationVersion: 1n } } : {}),
+              $set: set,
+            },
+            options: { upsert: !previousLocation },
+            requireMatch: true,
+            staleOnNoMatch,
+            providerAccepted: Boolean(providerLocation),
+            ...(providerLocation
+              ? {
+                  providerTimestamp: new Date(
+                    providerLocation.providerTimestamp,
+                  ),
+                  providerLastSuccessfulUpdate: now,
+                }
+              : {}),
+          });
         } catch (error) {
+          if (error.gpsLeaseError) throw error;
           if (writeAttempted) {
             metrics.failedWrites++;
             logGpsEvent("GPS_LOCATION_WRITE_FAILED", {
@@ -448,6 +937,37 @@ class GpsSyncWorker {
           }
         }
       }
+      const writeStarted = performance.now();
+      const writeResults = await this.persistGpsOperations(
+        gpsWriteOperations,
+        expectedConfigVersion,
+      );
+      metrics.locationWriteDurationMs += elapsedMs(writeStarted);
+      metrics.successfulWrites = writeResults.committed.filter(
+        (operation) => operation.model === this.BusLiveLocation,
+      ).length;
+      metrics.failedWrites = writeResults.failed.filter(
+        ({ operation }) => operation.model === this.BusLiveLocation,
+      ).length;
+      metrics.staleProviderUpdates += writeResults.rejected.filter(
+        (operation) => operation.model === this.BusLiveLocation,
+      ).length;
+      for (const operation of writeResults.rejected) {
+        logGpsEvent("GPS_PROVIDER_UPDATE_REJECTED", {
+          cycleId,
+          reason: operation.staleOnNoMatch
+            ? "CONCURRENTLY_SUPERSEDED"
+            : "WRITE_REJECTED",
+        });
+      }
+      for (const { operation, error } of writeResults.failed) {
+        logGpsEvent(
+          operation.model === this.BusLiveLocation
+            ? "GPS_LOCATION_WRITE_FAILED"
+            : "GPS_DEVICE_WRITE_FAILED",
+          { cycleId, ...getSafeError(error) },
+        );
+      }
       metrics.status =
         metrics.providerFailures ||
         metrics.failedWrites ||
@@ -455,12 +975,18 @@ class GpsSyncWorker {
           ? "COMPLETED_WITH_ERRORS"
           : "COMPLETED";
     } catch (error) {
+      if (error.gpsConfigurationError) {
+        metrics.status = "SKIPPED_CONFIGURATION_CHANGE";
+        return;
+      }
+      if (error.gpsLeaseError) this.notifyOwnershipFailure(error);
       metrics.failureStage ||= "CYCLE";
       const safeError = getSafeError(error);
       metrics.failureName ||= safeError.name;
       metrics.failureCode ??= safeError.code;
       throw error;
     } finally {
+      this.providerAbortController = null;
       metrics.completedAt = new Date().toISOString();
       metrics.durationMs = elapsedMs(cycleStarted);
       metrics.skippedTimerTicks = this.skippedTimerTicks;
@@ -469,34 +995,9 @@ class GpsSyncWorker {
     }
   }
 
-  emitLocation(bus, location, usersByBus, now) {
-    const io = this.socketGetter();
-    if (!io) return;
-
-    const rooms = new Set();
-    if (bus.preview_number != null) {
-      rooms.add(`preview_${String(bus.preview_number)}`);
-    }
-    const assignedUserIds =
-      usersByBus.get(String(bus.bus_no || "").trim().toUpperCase()) ||
-      new Set();
-    for (const userId of assignedUserIds) rooms.add(`user_${userId}`);
-    if (location.user_id) rooms.add(`user_${String(location.user_id)}`);
-    if (!rooms.size) return;
-
-    const payload = getLocationPayload(
-      bus,
-      location,
-      now,
-      this.staleThresholdMs,
-    );
-    let broadcaster = io;
-    for (const room of rooms) broadcaster = broadcaster.to(room);
-    broadcaster.emit("locationUpdate", payload);
-  }
 }
 
-const gpsSyncWorker = new GpsSyncWorker();
+const gpsSyncWorker = new GpsSyncWorker({ GpsDeviceModel: GpsDevice });
 gpsSyncWorker.GpsSyncWorker = GpsSyncWorker;
 gpsSyncWorker.getBusLocation = getBusLocation;
 gpsSyncWorker.buildUsersByBus = buildUsersByBus;
