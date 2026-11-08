@@ -25,9 +25,31 @@ test("provider normalization retains provider event time and does not synthesize
   ]);
 
   assert.equal(locations.get("device-1").providerTimestamp, timestamp);
+  assert.equal(locations.get("device-1").providerTimestampField, "timestamp");
+  assert.equal(
+    locations.get("device-1").providerTimestampValueType,
+    "string",
+  );
   assert.equal(locations.get("device-2").providerTimestamp, null);
   assert.equal(locations.get("device-3").providerTimestamp, null);
   assert.equal("timestamp" in locations.get("device-1"), false);
+});
+
+test("provider timestamp diagnostics retain the selected field and original value type", () => {
+  const locations = normalizeLocationResponse([
+    providerRecord({
+      isoDate: 1_799_999_000_000,
+      timestamp: "2026-11-07T08:00:00.000Z",
+    }),
+  ]);
+  const location = locations.get("device-1");
+
+  assert.equal(location.providerTimestampField, "isoDate");
+  assert.equal(location.providerTimestampValueType, "number");
+  assert.equal(
+    location.providerTimestamp,
+    new Date(1_799_999_000_000).toISOString(),
+  );
 });
 
 test("duplicate provider records select the newest provider time independent of list order", () => {

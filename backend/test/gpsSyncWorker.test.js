@@ -404,6 +404,70 @@ test("distributed fencing is applied to every GPS device and live-location write
     }
   });
 
+  test("stale provider timestamps emit sanitized timestamp diagnostics", async () => {
+    const providerTimestamp = new Date(Date.now() - 10 * 60 * 1000);
+    const storedWatermark = new Date(Date.now() - 5 * 60 * 1000);
+    const records = [];
+    const originalLog = console.log;
+    console.log = (line) => records.push(JSON.parse(line));
+    const { worker } = createWorker({
+      buses: [{ _id: "bus-1", bus_no: "BUS-1", gps_device_id: "device-1" }],
+      locations: [{
+        bus_id: "bus-1",
+        providerTimestamp: storedWatermark,
+        lastSuccessfulGpsUpdate: storedWatermark,
+      }],
+      provider: async () => new Map([[
+        "device-1",
+        {
+          deviceId: "sensitive-device-id",
+          latitude: 10,
+          longitude: 77,
+          speed: 1,
+          providerTimestamp: providerTimestamp.toISOString(),
+          providerTimestampField: "isoDate",
+          providerTimestampValueType: "string",
+        },
+      ]]),
+    });
+
+    try {
+      await worker.runCycle();
+    } finally {
+      console.log = originalLog;
+    }
+
+    const diagnostic = records.find(
+      (record) =>
+        record.event === "GPS_STALE_PROVIDER_TIMESTAMP_DIAGNOSTIC",
+    );
+    assert.ok(diagnostic);
+    assert.equal(diagnostic.timestampField, "isoDate");
+    assert.equal(diagnostic.originalTimestampValueType, "string");
+    assert.equal(
+      diagnostic.providerTimestamp,
+      providerTimestamp.toISOString(),
+    );
+    assert.equal(typeof diagnostic.serverTime, "string");
+    assert.ok(diagnostic.timestampAgeMs > diagnostic.staleThresholdMs);
+    assert.equal(diagnostic.staleThresholdMs, 180_000);
+    assert.equal(
+      diagnostic.storedWatermarkTimestamp,
+      storedWatermark.toISOString(),
+    );
+    assert.deepEqual(Object.keys(diagnostic).sort(), [
+      "event",
+      "originalTimestampValueType",
+      "providerTimestamp",
+      "serverTime",
+      "staleThresholdMs",
+      "storedWatermarkTimestamp",
+      "timestampAgeMs",
+      "timestampField",
+    ]);
+    assert.equal(JSON.stringify(diagnostic).includes("sensitive-device-id"), false);
+  });
+
   test("atomic provider timestamp predicate rejects a write superseded after the worker read", async () => {
     const previousTimestamp = new Date(Date.now() - 10_000);
     const incomingTimestamp = new Date(previousTimestamp.getTime() + 1_000);

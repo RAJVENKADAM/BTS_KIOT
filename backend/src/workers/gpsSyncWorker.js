@@ -21,6 +21,30 @@ function logGpsEvent(event, details = {}) {
   }
 }
 
+function logStaleTimestampDiagnostic(
+  providerLocation,
+  serverTime,
+  staleThresholdMs,
+  watermark,
+) {
+  const providerTime = Date.parse(providerLocation.providerTimestamp);
+  const watermarkTime =
+    watermark == null ? NaN : new Date(watermark).getTime();
+
+  logGpsEvent("GPS_STALE_PROVIDER_TIMESTAMP_DIAGNOSTIC", {
+    timestampField: providerLocation.providerTimestampField ?? null,
+    originalTimestampValueType:
+      providerLocation.providerTimestampValueType ?? "unknown",
+    providerTimestamp: new Date(providerTime).toISOString(),
+    serverTime: serverTime.toISOString(),
+    timestampAgeMs: serverTime.getTime() - providerTime,
+    staleThresholdMs,
+    storedWatermarkTimestamp: Number.isFinite(watermarkTime)
+      ? new Date(watermarkTime).toISOString()
+      : null,
+  });
+}
+
 function getSafeError(error) {
   return {
     name: typeof error?.name === "string" ? error.name : "Error",
@@ -721,6 +745,14 @@ class GpsSyncWorker {
               : "OUT_OF_ORDER_PROVIDER_TIMESTAMP";
         }
         if (rejectionReason) {
+          if (rejectionReason === "STALE_PROVIDER_TIMESTAMP") {
+            logStaleTimestampDiagnostic(
+              providerLocation,
+              now,
+              this.staleThresholdMs,
+              device.providerTimestamp,
+            );
+          }
           rejectProviderUpdate(providerLocation, rejectionReason);
           gpsWriteOperations.push({
             model: this.GpsDevice,
@@ -810,6 +842,14 @@ class GpsSyncWorker {
                   : "OUT_OF_ORDER_PROVIDER_TIMESTAMP";
             }
             if (rejectionReason) {
+              if (rejectionReason === "STALE_PROVIDER_TIMESTAMP") {
+                logStaleTimestampDiagnostic(
+                  providerLocation,
+                  now,
+                  this.staleThresholdMs,
+                  previousLocation?.providerTimestamp,
+                );
+              }
               rejectProviderUpdate(providerLocation, rejectionReason);
               continue;
             }

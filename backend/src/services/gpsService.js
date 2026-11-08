@@ -79,14 +79,22 @@ function normalizeLocationResponse(payload) {
       "LON",
     ]);
     const speedRaw = pick(item, ["speed", "spd", "Speed"]);
-    const timestampRaw = pick(item, [
+    const timestampFields = [
       "isoDate",
       "timestamp",
       "time",
       "providerTimestamp",
       "date",
       "ts",
-    ]);
+    ];
+    const timestampField = timestampFields.find(
+      (key) =>
+        item?.[key] !== undefined &&
+        item?.[key] !== null &&
+        item?.[key] !== "",
+    );
+    const timestampRaw =
+      timestampField === undefined ? undefined : item[timestampField];
 
     const latitude = latitudeRaw !== undefined ? Number(latitudeRaw) : NaN;
     const longitude =
@@ -133,6 +141,8 @@ function normalizeLocationResponse(payload) {
       speed,
       source: "gps",
       providerTimestamp,
+      providerTimestampField: timestampField ?? null,
+      providerTimestampValueType: typeof timestampRaw,
     };
 
     if (deviceId) addLocation(deviceId, entry);
