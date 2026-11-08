@@ -16,8 +16,12 @@
       "env": {
         "HOST": "127.0.0.1",
         "PORT": "5081",
+        "DOTENV_CONFIG_PATH": ".gitignore",
         "JWT_SECRET": "runtime-validation-only-secret-key-32-chars",
-        "MONGODB_URI": "mongodb://127.0.0.1:27017/bts_runtime_validation"
+        "MONGODB_URI": "mongodb://127.0.0.1:27017/bts_runtime_validation",
+        "SOCKET_IO_MODE": "single-instance",
+        "GPS_TOKEN": "",
+        "GPS_EMAIL": ""
       },
       "url": "http://127.0.0.1:5081/health",
       "verificationMethod": "http-status",
