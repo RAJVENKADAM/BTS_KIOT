@@ -23,6 +23,7 @@ async function withNonTestEnvironment(action) {
 function createRuntimeFixture({
   socketReady = Promise.resolve(),
   env = { NODE_ENV: "test", SOCKET_IO_MODE: "single-instance" },
+  configureSocketCluster,
 } = {}) {
   const operations = [];
   const server = {
@@ -77,10 +78,10 @@ function createRuntimeFixture({
         operations.push("register-socket-handlers");
       },
       jwt: {},
-      configureSocketCluster() {
+      configureSocketCluster: configureSocketCluster || (() => {
         operations.push("construct-cluster");
         return cluster;
-      },
+      }),
       listen: async () => {
         operations.push("listen");
         server.listening = true;
@@ -159,4 +160,22 @@ test("Redis startup failure rejects startup and closes initialized resources", a
   assert.ok(fixture.operations.includes("stop-worker-scheduling"));
   assert.ok(fixture.operations.includes("close-sockets-and-redis"));
   assert.ok(fixture.operations.includes("close-database"));
+});
+
+test("runtime startup errors identify the failing operation after Socket.IO registration", async () => {
+  const failure = new Error("SOCKET_IO_MODE is not configured");
+  const fixture = createRuntimeFixture({
+    env: { NODE_ENV: "production" },
+    configureSocketCluster() {
+      throw failure;
+    },
+  });
+
+  await assert.rejects(fixture.runtime.start(), (error) => {
+    assert.equal(error, failure);
+    assert.equal(error.startupStage, "Socket.IO shared-transport configuration");
+    return true;
+  });
+  assert.ok(fixture.operations.includes("set-socket"));
+  assert.equal(fixture.operations.includes("listen"), false);
 });

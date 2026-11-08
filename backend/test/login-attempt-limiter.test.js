@@ -7,9 +7,19 @@ const {
   createLoginAttemptLimiter,
 } = require("../src/utils/loginAttemptLimiter");
 
-function createFakeMongo({ indexes = true, transactionError = null } = {}) {
+function createFakeMongo({
+  indexes = true,
+  transactionError = null,
+  listIndexesError = null,
+  upsertError = null,
+  findOneError = null,
+  startSessionError = null,
+  transactionOperation = null,
+  abortError = null,
+} = {}) {
   let documents = new Map();
   let transactionTail = Promise.resolve();
+  let abortCount = 0;
   const indexList = indexes
     ? [
         { name: "_id_", key: { _id: 1 } },
@@ -22,14 +32,21 @@ function createFakeMongo({ indexes = true, transactionError = null } = {}) {
     : [{ name: "_id_", key: { _id: 1 } }];
 
   const collection = {
-    listIndexes: () => ({ toArray: async () => indexList }),
+    listIndexes: () => ({
+      toArray: async () => {
+        if (listIndexesError) throw listIndexesError;
+        return indexList;
+      },
+    }),
     updateOne: async ({ _id }, update, { upsert } = {}) => {
+      if (upsertError) throw upsertError;
       if (!documents.has(_id) && upsert) {
         documents.set(_id, structuredClone(update.$setOnInsert));
       }
       return { acknowledged: true };
     },
     findOne: async ({ _id }, { session } = {}) => {
+      if (findOneError) throw findOneError;
       const source = session?.documents || documents;
       const document = source.get(_id);
       return document ? structuredClone(document) : null;
@@ -45,37 +62,50 @@ function createFakeMongo({ indexes = true, transactionError = null } = {}) {
   };
   const mongo = {
     connection: { readyState: 1 },
-    startSession: async () => ({
-      documents: null,
-      withTransaction: async function (operation) {
-        if (transactionError) throw transactionError;
-        let release;
-        const previous = transactionTail;
-        transactionTail = new Promise((resolve) => {
-          release = resolve;
-        });
-        await previous;
-        this.documents = new Map(
-          [...documents].map(([key, value]) => [key, structuredClone(value)]),
-        );
-        try {
-          const result = await operation(this);
-          documents = this.documents;
-          return result;
-        } finally {
-          this.documents = null;
-          release();
-        }
-      },
-      abortTransaction: async () => {},
-      endSession: async () => {},
-    }),
+    startSession: async () => {
+      if (startSessionError) throw startSessionError;
+      return {
+        documents: null,
+        withTransaction: async function (operation) {
+          if (transactionError) throw transactionError;
+          if (transactionOperation) {
+            return transactionOperation(operation, this);
+          }
+          let release;
+          const previous = transactionTail;
+          transactionTail = new Promise((resolve) => {
+            release = resolve;
+          });
+          await previous;
+          this.documents = new Map(
+            [...documents].map(([key, value]) => [key, structuredClone(value)]),
+          );
+          try {
+            const result = await operation(this);
+            documents = this.documents;
+            return result;
+          } catch (error) {
+            await this.abortTransaction();
+            throw error;
+          } finally {
+            this.documents = null;
+            release();
+          }
+        },
+        abortTransaction: async () => {
+          abortCount += 1;
+          if (abortError) throw abortError;
+        },
+        endSession: async () => {},
+      };
+    },
   };
 
   return {
     collection,
     mongo,
     documents: () => documents,
+    getAbortCount: () => abortCount,
   };
 }
 
@@ -88,7 +118,7 @@ function createLimiter(fake, options = {}) {
     windowMs: options.windowMs || 900_000,
     accountLimit: options.accountLimit || 10,
     pendingReservationTtlMs: options.pendingReservationTtlMs || 120_000,
-    transactionTimeoutMs: 100,
+    transactionTimeoutMs: options.transactionTimeoutMs ?? 100,
     indexCheckIntervalMs: 60_000,
   });
 }
@@ -292,8 +322,235 @@ test("missing TTL index, disconnected MongoDB, and unsupported transactions fail
   await assert.rejects(
     unsupported.reserveLoginAttempt("person@example.edu", { ip: "192.0.2.1" }),
     (error) =>
-      error.status === 503 && error.code === "LOGIN_LIMITER_UNAVAILABLE",
+      error.status === 503 &&
+      error.code === "LOGIN_LIMITER_UNAVAILABLE" &&
+      error.failureStage === "LOGIN_LIMITER_TRANSACTION_FAILED" &&
+      error.cause.message === "Transaction numbers are only allowed",
   );
+});
+
+test("TTL verification rejects missing, extra-key, and incorrect-expiration indexes", async (t) => {
+  const invalidIndexes = [
+    { name: INDEX_NAME, key: { expiresAt: 1 } },
+    {
+      name: INDEX_NAME,
+      key: { expiresAt: 1, account: 1 },
+      expireAfterSeconds: 0,
+    },
+    {
+      name: INDEX_NAME,
+      key: { expiresAt: 1 },
+      expireAfterSeconds: 60,
+    },
+  ];
+  for (const [index, ttlIndex] of invalidIndexes.entries()) {
+    await t.test(`invalid index ${index + 1}`, async () => {
+      const fake = createFakeMongo();
+      fake.collection.listIndexes = () => ({
+        toArray: async () => [{ name: "_id_", key: { _id: 1 } }, ttlIndex],
+      });
+      const limiter = createLimiter(fake);
+      await assert.rejects(
+        limiter.reserveLoginAttempt("index@example.edu"),
+        (error) =>
+          error.failureStage === "LOGIN_LIMITER_INDEX_CHECK_FAILED" &&
+          error.cause.code === "LOGIN_LIMITER_TTL_INDEX_INVALID",
+      );
+    });
+  }
+});
+
+test("index inspection failure preserves MongoDB error metadata and fails closed", async () => {
+  const mongoError = Object.assign(
+    new Error("not authorized to list indexes"),
+    { code: 13, codeName: "Unauthorized" },
+  );
+  const limiter = createLimiter(createFakeMongo({ listIndexesError: mongoError }));
+  await assert.rejects(
+    limiter.reserveLoginAttempt("index-failure@example.edu"),
+    (error) =>
+      error.status === 503 &&
+      error.failureStage === "LOGIN_LIMITER_INDEX_CHECK_FAILED" &&
+      error.cause === mongoError &&
+      error.cause.code === 13 &&
+      error.cause.codeName === "Unauthorized",
+  );
+});
+
+test("bucket upsert failures preserve cause and stage", async () => {
+  const mongoError = Object.assign(new Error("bucket write denied"), {
+    code: 13,
+    codeName: "Unauthorized",
+  });
+  const limiter = createLimiter(createFakeMongo({ upsertError: mongoError }));
+  await assert.rejects(
+    limiter.reserveLoginAttempt("upsert-failure@example.edu"),
+    (error) =>
+      error.status === 503 &&
+      error.failureStage === "LOGIN_LIMITER_BUCKET_UPSERT_FAILED" &&
+      error.cause === mongoError,
+  );
+});
+
+test("transaction start failures are diagnosed as transaction failures", async () => {
+  const mongoError = Object.assign(new Error("session start rejected"), {
+    code: 20,
+    codeName: "IllegalOperation",
+  });
+  const limiter = createLimiter(
+    createFakeMongo({ startSessionError: mongoError }),
+  );
+  await assert.rejects(
+    limiter.reserveLoginAttempt("session-failure@example.edu"),
+    (error) =>
+      error.failureStage === "LOGIN_LIMITER_TRANSACTION_FAILED" &&
+      error.cause === mongoError &&
+      error.cause.codeName === "IllegalOperation",
+  );
+});
+
+test("transaction permission rejection retains its cause and metadata", async () => {
+  const mongoError = Object.assign(
+    new Error("not authorized to execute transaction"),
+    { code: 13, codeName: "Unauthorized", errorLabels: ["TransientTransactionError"] },
+  );
+  const limiter = createLimiter(createFakeMongo({ transactionError: mongoError }));
+  await assert.rejects(
+    limiter.reserveLoginAttempt("transaction-permission@example.edu"),
+    (error) =>
+      error.failureStage === "LOGIN_LIMITER_TRANSACTION_FAILED" &&
+      error.cause === mongoError &&
+      error.cause.code === 13 &&
+      error.cause.errorLabels.includes("TransientTransactionError"),
+  );
+});
+
+test("transaction operation failure aborts and preserves the original error", async () => {
+  const mongoError = Object.assign(new Error("bucket read failed"), {
+    code: 91,
+    codeName: "ShutdownInProgress",
+  });
+  const fake = createFakeMongo({ findOneError: mongoError });
+  const limiter = createLimiter(fake);
+  await assert.rejects(
+    limiter.reserveLoginAttempt("transaction-abort@example.edu"),
+    (error) =>
+      error.status === 503 &&
+      error.failureStage === "LOGIN_LIMITER_TRANSACTION_FAILED" &&
+      error.cause === mongoError,
+  );
+  assert.equal(fake.getAbortCount(), 1);
+});
+
+test("transaction timeout fails closed and aborts the MongoDB session", async () => {
+  const fake = createFakeMongo({
+    transactionOperation: () => new Promise(() => {}),
+  });
+  const limiter = createLimiter(fake, { transactionTimeoutMs: 5 });
+  await assert.rejects(
+    limiter.reserveLoginAttempt("transaction-timeout@example.edu"),
+    (error) =>
+      error.status === 503 &&
+      error.failureStage === "LOGIN_LIMITER_TRANSACTION_TIMEOUT" &&
+      error.cause.code === "LOGIN_LIMITER_TRANSACTION_TIMEOUT",
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fake.getAbortCount(), 1);
+});
+
+test("timeout abort failures are safely diagnosed without changing the 503", async () => {
+  const originalError = console.error;
+  const entries = [];
+  console.error = (...args) => entries.push(args);
+  const abortError = Object.assign(new Error("abort failed"), {
+    code: 91,
+    codeName: "ShutdownInProgress",
+  });
+  try {
+    const fake = createFakeMongo({
+      transactionOperation: () => new Promise(() => {}),
+      abortError,
+    });
+    const limiter = createLimiter(fake, { transactionTimeoutMs: 5 });
+    await assert.rejects(
+      limiter.reserveLoginAttempt("abort-failure@example.edu"),
+      (error) =>
+        error.status === 503 &&
+        error.failureStage === "LOGIN_LIMITER_TRANSACTION_TIMEOUT",
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(
+      entries.some(
+        ([, details]) =>
+          details.stage === "LOGIN_LIMITER_TRANSACTION_ABORT_FAILED" &&
+          details.code === 91 &&
+          details.codeName === "ShutdownInProgress",
+      ),
+    );
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test("limiter diagnostics redact MongoDB URIs and account identifiers", async () => {
+  const originalError = console.error;
+  const originalUri = process.env.MONGODB_URI;
+  const originalSecret = process.env.JWT_SECRET;
+  const uri = "mongodb+srv://operator:password@private.example.test/db";
+  const secret = "limiter-diagnostic-secret";
+  const email = "private.student@example.edu";
+  const entries = [];
+  process.env.MONGODB_URI = uri;
+  process.env.JWT_SECRET = secret;
+  console.error = (...args) => entries.push(args);
+  try {
+    const mongoError = Object.assign(
+      new Error(`denied ${uri} for ${email}; secret=${secret}`),
+      { code: 13, codeName: "Unauthorized", errorLabels: ["TransientTransactionError"] },
+    );
+    const limiter = createLimiter(
+      createFakeMongo({ listIndexesError: mongoError }),
+    );
+    await assert.rejects(limiter.reserveLoginAttempt(email));
+  } finally {
+    console.error = originalError;
+    if (originalUri === undefined) delete process.env.MONGODB_URI;
+    else process.env.MONGODB_URI = originalUri;
+    if (originalSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = originalSecret;
+  }
+  const serialized = JSON.stringify(entries);
+  assert.match(serialized, /LOGIN_LIMITER_INDEX_CHECK_FAILED/);
+  assert.match(serialized, /Unauthorized/);
+  assert.equal(serialized.includes(uri), false);
+  assert.equal(serialized.includes("password"), false);
+  assert.equal(serialized.includes(email), false);
+  assert.equal(serialized.includes(secret), false);
+});
+
+test("single-instance login limiting succeeds without Redis configuration", async () => {
+  const previousMode = process.env.SOCKET_IO_MODE;
+  const previousRedisUrl = process.env.REDIS_URL;
+  const previousSocketRedisUrl = process.env.SOCKET_IO_REDIS_URL;
+  process.env.SOCKET_IO_MODE = "single-instance";
+  delete process.env.REDIS_URL;
+  delete process.env.SOCKET_IO_REDIS_URL;
+  try {
+    const limiter = createLimiter(createFakeMongo());
+    const result = await limiter.reserveLoginAttempt("no-redis@example.edu");
+    assert.equal(result.allowed, true);
+    assert.equal(result.source, "account");
+  } finally {
+    if (previousMode === undefined) delete process.env.SOCKET_IO_MODE;
+    else process.env.SOCKET_IO_MODE = previousMode;
+    if (previousRedisUrl === undefined) delete process.env.REDIS_URL;
+    else process.env.REDIS_URL = previousRedisUrl;
+    if (previousSocketRedisUrl === undefined) {
+      delete process.env.SOCKET_IO_REDIS_URL;
+    } else {
+      process.env.SOCKET_IO_REDIS_URL = previousSocketRedisUrl;
+    }
+  }
 });
 
 test("pending reservations expire and report the correct retry delay", async () => {

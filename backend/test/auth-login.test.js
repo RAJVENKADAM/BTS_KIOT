@@ -236,7 +236,16 @@ test('missing credentials are rejected and nonexistent users receive the generic
 test('login fails closed with a safe retryable response when shared limiter storage fails', async () => {
   const originalReserve = limiter.reserveLoginAttempt;
   const originalFindOne = User.findOne;
+  const email = 'limiter-failure-auth-test@example.edu';
+  const user = makeUser(email);
+  const originalComparePassword = user.comparePassword;
   let accountLookupCount = 0;
+  let passwordVerificationCount = 0;
+  user.comparePassword = async (...args) => {
+    passwordVerificationCount += 1;
+    return originalComparePassword(...args);
+  };
+  users.set(email, user);
   limiter.reserveLoginAttempt = async () => {
     const error = new Error('private MongoDB transaction detail');
     error.status = 503;
@@ -252,7 +261,7 @@ test('login fails closed with a safe retryable response when shared limiter stor
   let response;
   try {
     response = await attemptLogin(
-      'limiter-failure-auth-test@example.edu',
+      email,
       'correct-password',
     );
   } finally {
@@ -264,6 +273,7 @@ test('login fails closed with a safe retryable response when shared limiter stor
   assert.equal(response.body.code, 'LOGIN_LIMITER_UNAVAILABLE');
   assert.equal(response.headers['Retry-After'], '2');
   assert.equal(accountLookupCount, 0);
+  assert.equal(passwordVerificationCount, 0);
   assert.equal(
     JSON.stringify(response.body).includes('private MongoDB transaction detail'),
     false,

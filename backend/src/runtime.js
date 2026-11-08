@@ -1,6 +1,7 @@
 "use strict";
 
 const http = require("node:http");
+const { attachStartupStage } = require("./utils/safeErrorLog");
 
 function createRuntime({ env = process.env, port, host, dependencies = {} } = {}) {
   let io = null;
@@ -53,6 +54,7 @@ function createRuntime({ env = process.env, port, host, dependencies = {} } = {}
   let shutdownPromise = null;
   let backgroundStartupPromise = null;
   let runtimeMetrics = null;
+  let startupStage = "Socket.IO server construction";
   let stopping = false;
   let httpDrainStarted = false;
   let listenPromise = null;
@@ -85,6 +87,7 @@ function createRuntime({ env = process.env, port, host, dependencies = {} } = {}
       "http://127.0.0.1:8765",
     ];
 
+    startupStage = "Socket.IO server construction";
     io = createSocketServer(server, {
       path: "/socket.io",
       cors: {
@@ -94,10 +97,14 @@ function createRuntime({ env = process.env, port, host, dependencies = {} } = {}
         credentials: true,
       },
     });
+    startupStage = "Socket authentication setup";
     io.use(createSocketAuthentication(jwt, () => env.JWT_SECRET));
+    startupStage = "Socket.IO global registration";
     setIO(io);
+    startupStage = "Socket event-handler registration";
     registerTrackSocketHandlers({ io });
 
+    startupStage = "Socket.IO shared-transport configuration";
     const configureSocketCluster =
       dependencies.configureSocketCluster ||
       require("./config/sharedServices").configureSocketCluster;
@@ -151,7 +158,9 @@ function createRuntime({ env = process.env, port, host, dependencies = {} } = {}
 
     startPromise = (async () => {
       try {
+        startupStage = "Socket.IO initialization";
         initializeSocket();
+        startupStage = "Socket.IO shared-transport readiness";
         await Promise.race([
           socketCluster.ready,
           startupCancelled.then(() => {
@@ -159,6 +168,7 @@ function createRuntime({ env = process.env, port, host, dependencies = {} } = {}
           }),
         ]);
         if (stopping) throw new Error("Runtime startup was cancelled by shutdown.");
+        startupStage = "HTTP server listen";
         await listen();
         listening = true;
         if (stopping) throw new Error("Runtime startup was cancelled by shutdown.");
@@ -173,6 +183,7 @@ function createRuntime({ env = process.env, port, host, dependencies = {} } = {}
             Boolean(env.NODE_TEST_CONTEXT) ||
             Boolean(process.env.NODE_TEST_CONTEXT));
         if (!testEnvironment) {
+          startupStage = "runtime metrics initialization";
           const createRuntimeMetrics =
             dependencies.createRuntimeMetrics ||
             require("./services/runtimeMetrics").createRuntimeMetrics;
@@ -199,7 +210,12 @@ function createRuntime({ env = process.env, port, host, dependencies = {} } = {}
               const logSafeError =
                 dependencies.logSafeError ||
                 require("./utils/safeErrorLog").logSafeError;
-              logSafeError("Starting DB-dependent services failed", error);
+              logSafeError(
+                "Starting DB-dependent services failed",
+                attachStartupStage(error, "DB-dependent services startup"),
+                undefined,
+                { includeDiagnostics: true },
+              );
             });
         }
         return { app, server, io, socketCluster, shutdown };
@@ -214,7 +230,7 @@ function createRuntime({ env = process.env, port, host, dependencies = {} } = {}
             logSafeError("Cleaning up after server startup failure failed", shutdownError);
           }
         }
-        throw error;
+        throw attachStartupStage(error, startupStage);
       } finally {
         if (!listening && !shutdownPromise) startPromise = null;
       }

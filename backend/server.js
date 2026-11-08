@@ -1,5 +1,7 @@
 "use strict";
 
+const { attachStartupStage } = require("./src/utils/safeErrorLog");
+
 function validateProductionConfiguration(env) {
   if (env.NODE_ENV !== "production") return;
   const missing = ["JWT_SECRET", "MONGODB_URI"].filter(
@@ -19,11 +21,18 @@ function validateProductionConfiguration(env) {
 
 async function startServer(options = {}) {
   const env = options.env || process.env;
-  validateProductionConfiguration(env);
-  const { createRuntime } = require("./src/runtime");
-  const runtime = createRuntime({ ...options, env });
-  await runtime.start();
-  return runtime;
+  let startupStage = "production configuration validation";
+  try {
+    validateProductionConfiguration(env);
+    startupStage = "runtime construction";
+    const { createRuntime } = require("./src/runtime");
+    const runtime = createRuntime({ ...options, env });
+    startupStage = "runtime startup";
+    await runtime.start();
+    return runtime;
+  } catch (error) {
+    throw attachStartupStage(error, startupStage);
+  }
 }
 
 async function main() {
@@ -66,6 +75,8 @@ if (require.main === module) {
     require("./src/utils/safeErrorLog").logSafeError(
       "Server startup failed",
       error,
+      undefined,
+      { includeDiagnostics: true },
     );
     process.exitCode = 1;
   });

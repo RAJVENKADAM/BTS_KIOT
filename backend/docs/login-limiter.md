@@ -1,5 +1,10 @@
 # Shared login attempt limiting
 
+The commands in this document's database prerequisite section are staging-only.
+For production diagnosis and the guarded GPS ownership procedure, see
+[`production-recovery.md`](./production-recovery.md). Never use the staging
+migration or initializer against production.
+
 The login controller uses MongoDB-backed per-account reservations; it does not
 throttle by `req.ip`. Account buckets count pending reservations and completed
 failures together against the account limit. Reservations and failures are

@@ -1,7 +1,7 @@
 const { createHmac, randomUUID } = require("node:crypto");
 const mongoose = require("mongoose");
 const LoginAttemptBucket = require("../models/LoginAttemptBucket");
-const { logSafeError } = require("./safeErrorLog");
+const { sanitizeDiagnosticText } = require("./safeErrorLog");
 
 const INDEX_NAME = "ttl_expires_at";
 const DEFAULT_WINDOW_MS = 15 * 60 * 1000;
@@ -41,18 +41,82 @@ const LIMITER_CONFIG = Object.freeze({
   ),
 });
 
-function limiterUnavailable(cause) {
-  const error = new Error("Login protection is temporarily unavailable");
+function getDiagnosticError(error) {
+  let current = error;
+  for (let depth = 0; depth < 5; depth += 1) {
+    if (
+      !current?.cause ||
+      typeof current.cause !== "object" ||
+      current.cause === current
+    ) {
+      break;
+    }
+    current = current.cause;
+  }
+  return current;
+}
+
+function logLimiterFailure(stage, error) {
+  const diagnostic = getDiagnosticError(error);
+  const rawMessage =
+    typeof diagnostic?.message === "string" ? diagnostic.message : "";
+  const message = sanitizeDiagnosticText(rawMessage)
+    ?.replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[REDACTED_ACCOUNT]")
+    ?.replace(/account:[a-f0-9]{64}/gi, "account:[REDACTED]")
+    ?.slice(0, 1_000);
+  const labels = Array.isArray(diagnostic?.errorLabels)
+    ? [...new Set(
+        diagnostic.errorLabels.filter(
+          (label) =>
+            typeof label === "string" &&
+            /^[A-Za-z][A-Za-z0-9]{0,59}$/.test(label),
+        ),
+      )].slice(0, 8)
+    : [];
+  const details = {
+    stage,
+    name:
+      typeof diagnostic?.name === "string" &&
+      /^[A-Za-z][A-Za-z0-9]{0,79}$/.test(diagnostic.name)
+        ? diagnostic.name
+        : "Error",
+    code:
+      Number.isSafeInteger(diagnostic?.code) ||
+      (typeof diagnostic?.code === "string" &&
+        /^[A-Z0-9_]{1,60}$/.test(diagnostic.code))
+        ? diagnostic.code
+        : null,
+    codeName:
+      typeof diagnostic?.codeName === "string" &&
+      /^[A-Za-z0-9_]{1,60}$/.test(diagnostic.codeName)
+        ? diagnostic.codeName
+        : null,
+    errorLabels: labels,
+    message: message || null,
+  };
+  try {
+    console.error("Login attempt limiter operation failed", details);
+  } catch {
+    // Diagnostics must not change authentication behavior.
+  }
+}
+
+function limiterUnavailable(stage, cause) {
+  const error = new Error(
+    "Login protection is temporarily unavailable",
+    cause ? { cause } : undefined,
+  );
   error.status = 503;
   error.code = "LOGIN_LIMITER_UNAVAILABLE";
   error.retryAfter = 2;
-  if (cause) logSafeError("Shared login limiter unavailable", cause);
+  error.failureStage = stage;
+  logLimiterFailure(stage, cause);
   return error;
 }
 
 function bucketId(kind, identity, secret) {
   if (typeof secret !== "string" || secret.length < 1) {
-    throw limiterUnavailable();
+    throw limiterUnavailable("LOGIN_LIMITER_CONFIGURATION_FAILED");
   }
   return `${kind}:${createHmac("sha256", secret)
     .update(identity)
@@ -61,7 +125,7 @@ function bucketId(kind, identity, secret) {
 
 function normalizeEmail(email) {
   if (typeof email !== "string" || !email.trim()) {
-    throw limiterUnavailable();
+    throw limiterUnavailable("LOGIN_LIMITER_CONFIGURATION_FAILED");
   }
   return email.trim().toLowerCase();
 }
@@ -118,7 +182,7 @@ function createLoginAttemptLimiter({
 
   const verifyTtlIndex = async () => {
     if (mongo.connection?.readyState !== 1 || !collection) {
-      throw limiterUnavailable();
+      throw limiterUnavailable("LOGIN_LIMITER_DATABASE_NOT_READY");
     }
     if (
       indexCheckPromise &&
@@ -132,16 +196,22 @@ function createLoginAttemptLimiter({
       try {
         const indexes = await collection.listIndexes().toArray();
         const ttlIndex = indexes.find((index) => index.name === INDEX_NAME);
+        const indexKeys = Object.keys(ttlIndex?.key || {});
         if (
           !ttlIndex ||
+          indexKeys.length !== 1 ||
+          indexKeys[0] !== "expiresAt" ||
           ttlIndex.key?.expiresAt !== 1 ||
           ttlIndex.expireAfterSeconds !== 0
         ) {
-          throw new Error("Required TTL index is missing or misconfigured");
+          throw Object.assign(
+            new Error("Required TTL index is missing or misconfigured"),
+            { code: "LOGIN_LIMITER_TTL_INDEX_INVALID" },
+          );
         }
       } catch (error) {
         indexCheckPromise = null;
-        throw limiterUnavailable(error);
+        throw limiterUnavailable("LOGIN_LIMITER_INDEX_CHECK_FAILED", error);
       }
     })();
     return indexCheckPromise;
@@ -166,17 +236,18 @@ function createLoginAttemptLimiter({
         if (error?.code !== 11000) throw error;
       }
     } catch (error) {
-      throw limiterUnavailable(error);
+      throw limiterUnavailable("LOGIN_LIMITER_BUCKET_UPSERT_FAILED", error);
     }
   };
 
   const withTransaction = async (keys, operation) => {
     await verifyTtlIndex();
     await ensureBucketsExist(keys);
-    const session = await mongo.startSession();
+    let session;
     let timeoutId;
     let timedOut = false;
     try {
+      session = await mongo.startSession();
       const transaction = session.withTransaction(
         () => operation(session),
         { maxCommitTimeMS: transactionTimeoutMs },
@@ -184,8 +255,29 @@ function createLoginAttemptLimiter({
       const timeout = new Promise((_, reject) => {
         timeoutId = setTimeout(() => {
           timedOut = true;
-          Promise.resolve(session.abortTransaction()).catch(() => {});
-          reject(limiterUnavailable());
+          const timeoutCause = Object.assign(
+            new Error("Login attempt limiter transaction timed out."),
+            { code: "LOGIN_LIMITER_TRANSACTION_TIMEOUT" },
+          );
+          try {
+            Promise.resolve(session.abortTransaction()).catch((error) =>
+              logLimiterFailure(
+                "LOGIN_LIMITER_TRANSACTION_ABORT_FAILED",
+                error,
+              ),
+            );
+          } catch (error) {
+            logLimiterFailure(
+              "LOGIN_LIMITER_TRANSACTION_ABORT_FAILED",
+              error,
+            );
+          }
+          reject(
+            limiterUnavailable(
+              "LOGIN_LIMITER_TRANSACTION_TIMEOUT",
+              timeoutCause,
+            ),
+          );
         }, transactionTimeoutMs);
       });
       return await Promise.race([transaction, timeout]);
@@ -193,13 +285,17 @@ function createLoginAttemptLimiter({
       if (error?.status === 503 && error?.code === "LOGIN_LIMITER_UNAVAILABLE") {
         throw error;
       }
-      throw limiterUnavailable(error);
+      throw limiterUnavailable("LOGIN_LIMITER_TRANSACTION_FAILED", error);
     } finally {
       clearTimeout(timeoutId);
-      try {
-        await session.endSession();
-      } catch (error) {
-        if (!timedOut) logSafeError("Closing login limiter session failed", error);
+      if (session) {
+        try {
+          await session.endSession();
+        } catch (error) {
+          if (!timedOut) {
+            logLimiterFailure("LOGIN_LIMITER_SESSION_CLEANUP_FAILED", error);
+          }
+        }
       }
     }
   };
