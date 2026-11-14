@@ -1,6 +1,8 @@
 "use strict";
 
 const { MongoClient, Long } = require("mongodb");
+const { ConnectionString } = require("mongodb-connection-string-url");
+const { buildMongoURI } = require("../src/config/mongodb");
 const GpsWorkerOwnership = require("../src/models/GpsWorkerOwnership");
 
 const DATABASE_NAME = "bts_db";
@@ -8,8 +10,7 @@ const STAGING_DATABASE_NAME = "bts_staging_db";
 const STAGING_MONGODB_HOST = "rajvenkadam.hm6bni0.mongodb.net";
 const COLLECTION_NAME = GpsWorkerOwnership.collection.collectionName;
 const OWNERSHIP_ID = "gps-worker";
-const CONFIRMATION_ENV =
-  "BTMS_PRODUCTION_GPS_OWNERSHIP_CONFIRMATION";
+const CONFIRMATION_ENV = "BTMS_PRODUCTION_GPS_OWNERSHIP_CONFIRMATION";
 
 class ProductionTargetError extends Error {
   constructor(message) {
@@ -22,142 +23,167 @@ function assertProductionTarget(env = process.env) {
   if (env.NODE_ENV !== "production") {
     throw new ProductionTargetError("NODE_ENV must be production.");
   }
+
   if (env.BTMS_PRODUCTION_DB_NAME !== DATABASE_NAME) {
     throw new ProductionTargetError(
       `Set BTMS_PRODUCTION_DB_NAME=${DATABASE_NAME} exactly.`,
     );
   }
 
-  const expectedHostname = String(
-    env.BTMS_PRODUCTION_MONGODB_HOST || "",
-  ).toLowerCase();
-  if (
-    !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(
-      expectedHostname,
-    )
-  ) {
-    throw new ProductionTargetError(
-      "BTMS_PRODUCTION_MONGODB_HOST must be an explicitly supplied production hostname.",
-    );
-  }
-  if (expectedHostname === STAGING_MONGODB_HOST) {
-    throw new ProductionTargetError(
-      "The known staging MongoDB hostname cannot be used for production provisioning.",
-    );
-  }
   if (!env.MONGODB_URI || !String(env.MONGODB_URI).trim()) {
     throw new ProductionTargetError(
       "MONGODB_URI is required; its value will not be displayed.",
     );
   }
 
+  // Independently supplied expected seed-list hosts.
+  const expectedHosts = String(env.BTMS_PRODUCTION_MONGODB_HOSTS || "")
+    .split(",")
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean);
+
+  const hostPattern =
+    /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}:27017$/;
+
+  if (
+    expectedHosts.length === 0 ||
+    expectedHosts.some((host) => !hostPattern.test(host)) ||
+    new Set(expectedHosts).size !== expectedHosts.length
+  ) {
+    throw new ProductionTargetError(
+      "BTMS_PRODUCTION_MONGODB_HOSTS must contain the independently verified production seed-list hosts with port 27017.",
+    );
+  }
+
+  let mongoURI;
   let uri;
+
   try {
-    uri = new URL(env.MONGODB_URI);
+    // Use exactly the same database-selection logic as BTS.
+    mongoURI = buildMongoURI({
+      ...env,
+      DB_NAME: DATABASE_NAME,
+    });
+
+    uri = new ConnectionString(mongoURI);
   } catch {
     throw new ProductionTargetError(
       "MONGODB_URI is invalid; its value will not be displayed.",
     );
   }
+
   if (
     !["mongodb:", "mongodb+srv:"].includes(uri.protocol) ||
     !uri.username ||
     !uri.password ||
-    uri.port ||
     uri.hash
   ) {
     throw new ProductionTargetError(
-      "MONGODB_URI must be an unambiguous credentialed MongoDB URI.",
+      "MONGODB_URI must be a credentialed MongoDB URI.",
+    );
+  }
+
+  const actualHosts = uri.hosts
+    .map((host) => host.toString().toLowerCase())
+    .sort();
+
+  const sortedExpectedHosts = [...expectedHosts].sort();
+
+  if (
+    actualHosts.length !== sortedExpectedHosts.length ||
+    actualHosts.some((host, index) => host !== sortedExpectedHosts[index])
+  ) {
+    throw new ProductionTargetError(
+      "MongoDB seed-list hosts do not match the independently verified production hosts.",
+    );
+  }
+
+  if (actualHosts.some((host) => host.split(":")[0] === STAGING_MONGODB_HOST)) {
+    throw new ProductionTargetError(
+      "The known staging MongoDB hostname cannot be used for production provisioning.",
     );
   }
 
   let databaseName;
+
   try {
     if (
       !uri.pathname.startsWith("/") ||
       uri.pathname.startsWith("//") ||
       uri.pathname.slice(1).includes("/")
     ) {
-      throw new Error("invalid database path");
+      throw new Error("Invalid database path.");
     }
+
     databaseName = decodeURIComponent(uri.pathname.slice(1));
   } catch {
-    throw new ProductionTargetError(
-      "MONGODB_URI must select exactly one database path.",
-    );
+    throw new ProductionTargetError("MongoDB URI database path is invalid.");
   }
+
   if (databaseName !== DATABASE_NAME) {
     throw new ProductionTargetError(
-      `MONGODB_URI must select ${DATABASE_NAME} exactly.`,
-    );
-  }
-  if (
-    uri.hostname.toLowerCase() === STAGING_MONGODB_HOST ||
-    uri.hostname.toLowerCase() !== expectedHostname
-  ) {
-    throw new ProductionTargetError(
-      "MONGODB_URI hostname does not match BTMS_PRODUCTION_MONGODB_HOST.",
+      `MongoDB URI must select ${DATABASE_NAME} exactly; staging database ${STAGING_DATABASE_NAME} is refused.`,
     );
   }
 
-  const authSources = [...uri.searchParams.entries()]
-    .filter(([name]) => name.toLowerCase() === "authsource")
-    .map(([name, value]) => ({ name, value }));
-  const expectedAuthDatabase = String(
-    env.BTMS_PRODUCTION_AUTH_DB || "",
-  ).trim();
+  const authSources = [...uri.searchParams.entries()].filter(
+    ([name]) => name.toLowerCase() === "authsource",
+  );
+
+  const expectedAuthDatabase = String(env.BTMS_PRODUCTION_AUTH_DB || "").trim();
+
   if (
     !expectedAuthDatabase ||
     /(^|[_-])staging($|[_-])/i.test(expectedAuthDatabase) ||
     authSources.length !== 1 ||
-    authSources[0].name !== "authSource" ||
-    authSources[0].value !== expectedAuthDatabase
+    authSources[0][0] !== "authSource" ||
+    authSources[0][1] !== expectedAuthDatabase
   ) {
     throw new ProductionTargetError(
-      "MONGODB_URI must contain one authSource matching BTMS_PRODUCTION_AUTH_DB; staging authentication targets are refused.",
+      "MONGODB_URI must contain exactly one canonical authSource matching BTMS_PRODUCTION_AUTH_DB.",
     );
   }
 
-  const expectedConfirmation =
-    `initialize:${DATABASE_NAME}@${expectedHostname}`;
-  if (
-    env[CONFIRMATION_ENV] !== expectedConfirmation
-  ) {
+  const expectedConfirmation = `initialize:${DATABASE_NAME}@${sortedExpectedHosts.join(",")}`;
+
+  if (env[CONFIRMATION_ENV] !== expectedConfirmation) {
     throw new ProductionTargetError(
-      `${CONFIRMATION_ENV} must explicitly confirm this operation and database target.`,
+      `${CONFIRMATION_ENV} must explicitly confirm this database and seed-list target.`,
     );
   }
 
-  return { databaseName };
+  return {
+    databaseName,
+    mongoURI,
+  };
 }
 
 function isValidInactiveOwnershipRecord(document) {
   const isNonnegativeLong = (value) =>
-    value?._bsontype === "Long" &&
-    value.greaterThanOrEqual(Long.ZERO);
+    value?._bsontype === "Long" && value.greaterThanOrEqual(Long.ZERO);
   const isFiniteDate = (value) =>
     value instanceof Date && Number.isFinite(value.getTime());
 
   return Boolean(
     document &&
-      document._id === OWNERSHIP_ID &&
-      isNonnegativeLong(document.token) &&
-      document.ownerId === null &&
-      document.state === "inactive" &&
-      isFiniteDate(document.leaseExpiresAt) &&
-      isNonnegativeLong(document.writeVersion) &&
-      isNonnegativeLong(document.configVersion) &&
-      isFiniteDate(document.updatedAt),
+    document._id === OWNERSHIP_ID &&
+    isNonnegativeLong(document.token) &&
+    document.ownerId === null &&
+    document.state === "inactive" &&
+    isFiniteDate(document.leaseExpiresAt) &&
+    isNonnegativeLong(document.writeVersion) &&
+    isNonnegativeLong(document.configVersion) &&
+    isFiniteDate(document.updatedAt),
   );
 }
 
 function isInitialOwnershipRecord(document) {
   return Boolean(
     isValidInactiveOwnershipRecord(document) &&
-      document.token.equals(Long.ZERO) &&
-      document.leaseExpiresAt.getTime() === 0 &&
-      document.writeVersion.equals(Long.ZERO) &&
-      document.configVersion.equals(Long.ZERO),
+    document.token.equals(Long.ZERO) &&
+    document.leaseExpiresAt.getTime() === 0 &&
+    document.writeVersion.equals(Long.ZERO) &&
+    document.configVersion.equals(Long.ZERO),
   );
 }
 
@@ -176,9 +202,11 @@ function assertValidInactiveRecord(document, context) {
 
 async function ensureCollection(database) {
   const exists = async () =>
-    (await database
-      .listCollections({ name: COLLECTION_NAME }, { nameOnly: true })
-      .toArray()).length > 0;
+    (
+      await database
+        .listCollections({ name: COLLECTION_NAME }, { nameOnly: true })
+        .toArray()
+    ).length > 0;
   if (await exists()) return false;
 
   try {
@@ -200,8 +228,8 @@ async function initializeProductionGpsWorkerOwnership({
   MongoClientClass = MongoClient,
   logger = console,
 } = {}) {
-  const { databaseName } = assertProductionTarget(env);
-  const client = new MongoClientClass(env.MONGODB_URI, {
+  const { databaseName, mongoURI } = assertProductionTarget(env);
+  const client = new MongoClientClass(mongoURI, {
     maxPoolSize: 2,
     minPoolSize: 0,
     serverSelectionTimeoutMS: 10_000,
@@ -219,7 +247,9 @@ async function initializeProductionGpsWorkerOwnership({
     const existing = await collection.findOne({ _id: OWNERSHIP_ID });
     if (existing) {
       assertValidInactiveRecord(existing, "record");
-      logger.info("GPS worker ownership is already provisioned; no changes made.");
+      logger.info(
+        "GPS worker ownership is already provisioned; no changes made.",
+      );
       return {
         collectionCreated,
         recordCreated: false,
@@ -247,7 +277,10 @@ async function initializeProductionGpsWorkerOwnership({
       const concurrentRecord = await collection.findOne({
         _id: OWNERSHIP_ID,
       });
-      assertValidInactiveRecord(concurrentRecord, "record created concurrently");
+      assertValidInactiveRecord(
+        concurrentRecord,
+        "record created concurrently",
+      );
       logger.info(
         "GPS worker ownership was provisioned concurrently; no existing state was changed.",
       );

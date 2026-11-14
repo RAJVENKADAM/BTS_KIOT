@@ -11,19 +11,22 @@ const {
   initializeProductionGpsWorkerOwnership,
 } = require("../scripts/initialize-production-gps-worker-ownership");
 
-const productionHostname = "production.example.mongodb.net";
+const productionHosts = [
+  "prod-00-00.example.mongodb.net:27017",
+  "prod-00-01.example.mongodb.net:27017",
+  "prod-00-02.example.mongodb.net:27017",
+];
 
 function productionEnv(overrides = {}) {
-  const uri = new URL(
-    `mongodb+srv://operator:password@${productionHostname}/${DATABASE_NAME}?authSource=admin`,
-  );
+  const sortedHosts = [...productionHosts].sort();
+
   return {
     NODE_ENV: "production",
     BTMS_PRODUCTION_DB_NAME: DATABASE_NAME,
-    BTMS_PRODUCTION_MONGODB_HOST: productionHostname,
+    BTMS_PRODUCTION_MONGODB_HOSTS: productionHosts.join(","),
     BTMS_PRODUCTION_AUTH_DB: "admin",
-    [CONFIRMATION_ENV]: `initialize:${DATABASE_NAME}@${productionHostname}`,
-    MONGODB_URI: uri.toString(),
+    [CONFIRMATION_ENV]: `initialize:${DATABASE_NAME}@${sortedHosts.join(",")}`,
+    MONGODB_URI: `mongodb://operator:password@${productionHosts.join(",")}/${DATABASE_NAME}?authSource=admin`,
     ...overrides,
   };
 }
@@ -115,13 +118,16 @@ const quietLogger = { info() {} };
 
 test("creates missing collection and inserts exact inactive state with majority write concern", async () => {
   const fixture = createProvisioner({ collectionExists: false });
+  const env = productionEnv();
   const result = await initializeProductionGpsWorkerOwnership({
-    env: productionEnv(),
+    env,
     MongoClientClass: fixture.MockClient,
     logger: quietLogger,
   });
   const insert = fixture.calls.find(([operation]) => operation === "insertOne");
+  const client = fixture.calls.find(([operation]) => operation === "construct");
 
+  assert.equal(client[1], env.MONGODB_URI);
   assert.deepEqual(result, {
     collectionCreated: true,
     recordCreated: true,
@@ -140,6 +146,29 @@ test("creates missing collection and inserts exact inactive state with majority 
   assert.ok(insert[1].updatedAt instanceof Date);
   assert.deepEqual(insert[2], { writeConcern: { w: "majority" } });
   assert.ok(fixture.calls.some(([operation]) => operation === "findOne"));
+});
+
+test("uses the application URI builder to select the production database", async () => {
+  const env = productionEnv({
+    DB_NAME: "bts_staging_db",
+    MONGODB_URI: productionEnv().MONGODB_URI.replace(
+      `/${DATABASE_NAME}?`,
+      "/?",
+    ),
+  });
+  const fixture = createProvisioner();
+
+  await initializeProductionGpsWorkerOwnership({
+    env,
+    MongoClientClass: fixture.MockClient,
+    logger: quietLogger,
+  });
+
+  const client = fixture.calls.find(([operation]) => operation === "construct");
+  assert.equal(
+    client[1],
+    env.MONGODB_URI.replace("/?", `/${DATABASE_NAME}?`),
+  );
 });
 
 test("initializes an existing empty ownership collection", async () => {
@@ -215,22 +244,27 @@ for (const [name, mutate, message] of [
     "wrong hostname",
     (env) => {
       env.MONGODB_URI = env.MONGODB_URI.replace(
-        productionHostname,
-        "other.example.mongodb.net",
+        productionHosts[0],
+        "other.example.mongodb.net:27017",
       );
     },
-    /hostname does not match/,
+    /seed-list hosts do not match/,
   ],
   [
     "known staging hostname",
     (env) => {
-      const stagingHostname = "rajvenkadam.hm6bni0.mongodb.net";
-      env.BTMS_PRODUCTION_MONGODB_HOST = stagingHostname;
+      const stagingHost = "rajvenkadam.hm6bni0.mongodb.net:27017";
+
+      const hosts = [stagingHost, productionHosts[1], productionHosts[2]];
+
+      env.BTMS_PRODUCTION_MONGODB_HOSTS = hosts.join(",");
       env.MONGODB_URI = env.MONGODB_URI.replace(
-        productionHostname,
-        stagingHostname,
+        productionHosts[0],
+        stagingHost,
       );
-      env[CONFIRMATION_ENV] = `initialize:${DATABASE_NAME}@${stagingHostname}`;
+
+      env[CONFIRMATION_ENV] =
+        `initialize:${DATABASE_NAME}@${[...hosts].sort().join(",")}`;
     },
     /known staging MongoDB hostname/,
   ],
@@ -244,9 +278,12 @@ for (const [name, mutate, message] of [
   [
     "invalid URI protocol",
     (env) => {
-      env.MONGODB_URI = env.MONGODB_URI.replace("mongodb+srv:", "https:");
+      env.MONGODB_URI = env.MONGODB_URI.replace(
+        /^[a-z][a-z0-9+.-]*:/i,
+        "postgresql:",
+      );
     },
-    /credentialed MongoDB URI/,
+    /MONGODB_URI is invalid/,
   ],
   [
     "conflicting authentication database",
@@ -256,7 +293,7 @@ for (const [name, mutate, message] of [
         "authSource=bts_staging_db",
       );
     },
-    /staging authentication targets are refused/,
+    /exactly one canonical authSource matching/,
   ],
   [
     "noncanonical authentication option",
@@ -266,7 +303,7 @@ for (const [name, mutate, message] of [
         "authsource=admin",
       );
     },
-    /must contain one authSource matching/,
+    /exactly one canonical authSource matching/,
   ],
 ]) {
   test(`${name} is rejected before MongoClient construction`, async () => {
@@ -276,13 +313,13 @@ for (const [name, mutate, message] of [
     assert.throws(() => assertProductionTarget(env), message);
     await assert.rejects(
       initializeProductionGpsWorkerOwnership({
-          env,
-          MongoClientClass: class {
-            constructor() {
-              constructed = true;
-            }
-          },
-        }),
+        env,
+        MongoClientClass: class {
+          constructor() {
+            constructed = true;
+          }
+        },
+      }),
       message,
     );
     assert.equal(constructed, false);
