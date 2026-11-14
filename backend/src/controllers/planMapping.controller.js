@@ -3,10 +3,11 @@ const AppSetting = require("../models/AppSetting");
 const Bus = require("../models/Bus");
 const BusRoute = require("../models/BusRoute");
 const PlanMapping = require("../models/PlanMapping");
-const Notification = require("../models/Notification");
+const AdministrativeChangeAudit = require("../models/AdministrativeChangeAudit");
 const User = require("../models/User");
 const StopMaster = require("../models/StopMaster");
 const { getIO } = require("../socket");
+const { parsePagination } = require("../utils/pagination");
 const {
   getClusterChangeNotifications,
   getInUseLocationBusIds,
@@ -14,8 +15,8 @@ const {
   loadPlanState,
 } = require("../services/planMappingService");
 const {
-  deletePlanMappingById,
-  persistPlanMappingOperations,
+  getPlanMappingVersions,
+  runPlanMappingMutation,
 } = require("../services/planMappingPersistence");
 const {
   normalizeArrivalTime,
@@ -25,6 +26,49 @@ const resolvePlanMappingStops = require("../utils/resolvePlanMappingStops");
 const { logSafeError } = require("../utils/safeErrorLog");
 
 const GLOBAL_ACTIVE_PLAN_KEY = "global_active_plan";
+
+function getExpectedVersion(req) {
+  const raw = req.body?.expectedVersion ?? req.get?.("If-Match") ?? req.headers?.["if-match"];
+  const value = typeof raw === "string" && /^"?\d+"?$/.test(raw)
+    ? Number(raw.replaceAll('"', ""))
+    : raw;
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function getExpectedBusVersion(req) {
+  const raw = req.body?.expectedBusVersion;
+  const value = typeof raw === "string" && /^\d+$/.test(raw)
+    ? Number(raw)
+    : raw;
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function getIdempotencyKey(req) {
+  const value = req.get?.("Idempotency-Key") || req.headers?.["idempotency-key"];
+  return typeof value === "string" ? value : null;
+}
+
+function respondMutationError(res, error, fallbackMessage) {
+  if (String(error?.code || "").startsWith("PLAN_MAPPING_")) {
+    return res.status(error.statusCode || 409).json({
+      success: false,
+      error: error.message,
+      code: error.code,
+    });
+  }
+  if (String(error?.code || "").startsWith("BUS_REVISION_")) {
+    return res.status(error.statusCode || 409).json({
+      success: false,
+      error: error.message,
+      code: error.code,
+    });
+  }
+  logSafeError(fallbackMessage, error);
+  return res.status(500).json({
+    success: false,
+    error: fallbackMessage,
+  });
+}
 
 function normalizePlanName(value) {
   return String(value || "").trim().toUpperCase();
@@ -41,7 +85,7 @@ async function getPlanMappingData(req, res) {
   try {
     const [buses, routes, clusters, users, activePlan] = await Promise.all([
       Bus.find({})
-        .select("_id bus_no preview_number status alteration_type combined_route_source combined_routes alteration_route_source alteration_routes")
+        .select("_id bus_no revision preview_number status alteration_type combined_route_source combined_routes alteration_route_source alteration_routes")
         .sort({ preview_number: 1, bus_no: 1 })
         .lean(),
       BusRoute.find({}).select("bus_id plan_name stopId stop_name stop_order arrival_time").lean(),
@@ -152,6 +196,7 @@ async function getPlanMappingData(req, res) {
       return {
         id,
         busNo: bus.bus_no,
+        revision: bus.revision ?? 0,
         previewNumber: bus.preview_number,
         status: bus.status,
         plans,
@@ -189,12 +234,24 @@ async function getPlanMappingData(req, res) {
       };
     });
 
+    const versions = await getPlanMappingVersions([
+      "PLAN B",
+      "PLAN C",
+      "PLAN D",
+      "GLOBAL_ACTIVE_PLAN",
+    ]);
     res.json({
       success: true,
       activePlan,
       plans: ["PLAN A", "PLAN B", "PLAN C", "PLAN D"],
       buses: busOptions,
       clusters: clusterData,
+      versions: {
+        "PLAN B": versions["PLAN B"],
+        "PLAN C": versions["PLAN C"],
+        "PLAN D": versions["PLAN D"],
+      },
+      globalPlanVersion: versions.GLOBAL_ACTIVE_PLAN,
     });
   } catch (error) {
     logSafeError("getPlanMappingData failed", error);
@@ -244,6 +301,8 @@ async function savePlanMapping(req, res) {
       getCurrentPlan(),
       loadPlanState(),
     ]);
+    const expectedVersion = getExpectedVersion(req);
+    const idempotencyKey = getIdempotencyKey(req);
     const { buses, routes, clusters: existingClusters } = assignmentState;
     const busIds = new Set(buses.map((bus) => String(bus._id)));
     const busesByIdMap = new Map(
@@ -412,85 +471,80 @@ async function savePlanMapping(req, res) {
         upsert: true,
       },
     });
-    await persistPlanMappingOperations(operations);
-    if (currentPlan === planName) {
-      const state = await loadPlanState();
-      const notifications = getPlanMappingChangeNotifications(
-        state,
-        currentPlan,
-        oldActiveClusters,
-      );
-      if (notifications.length) {
-        try {
-          await Notification.insertMany(notifications);
-        } catch (error) {
-          logSafeError("savePlanMapping notification persistence failed", error);
-          const io = getIO();
-          if (io) io.emit("bus-update", { actionType: "PLAN_MAPPING_CHANGED" });
-          return res.status(500).json({
-            success: false,
-            mappingSaved: true,
-            error: "Mapping saved, but affected users could not be notified.",
-          });
-        }
-      }
-      const io = getIO();
-      if (io) {
-        notifications.forEach((notification) => {
-          io.to(`user_${String(notification.user_id)}`).emit("notification", {
-            type: notification.type,
-            message: notification.message,
-            newPreview: notification.new_preview,
-            isBusActive: notification.is_bus_active,
-          });
-        });
-      }
-    } else if (
-      editedCluster &&
-      String(editedCluster.location_bus_id || "") !== String(locationBusId || "")
-    ) {
-      const state = await loadPlanState();
-      const updatedCluster = state.clusters.find(
-        (cluster) => String(cluster._id) === String(savedId),
-      );
-      const notifications = updatedCluster
-        ? getClusterChangeNotifications(state, updatedCluster, planName)
+    const nextCluster = {
+      _id: savedId,
+      plan_name: planName,
+      cluster_name: clusterName.trim(),
+      root_bus_id: rootBusId,
+      location_bus_id: locationBusId,
+      member_bus_ids: normalizedMembers,
+    };
+    const nextPlanClusters = [
+      ...otherClusters,
+      nextCluster,
+    ];
+    const nextState = {
+      ...assignmentState,
+      clusters: [
+        ...assignmentState.clusters.filter(
+          (cluster) => normalizePlanName(cluster.plan_name) !== planName,
+        ),
+        ...nextPlanClusters,
+      ],
+    };
+    const notifications =
+      currentPlan === planName
+        ? getPlanMappingChangeNotifications(
+            nextState,
+            currentPlan,
+            oldActiveClusters,
+          )
         : [];
-      if (notifications.length) {
-        try {
-          await Notification.insertMany(notifications);
-        } catch (error) {
-          logSafeError("savePlanMapping notification persistence failed", error);
-          const io = getIO();
-          if (io) io.emit("bus-update", { actionType: "PLAN_MAPPING_CHANGED" });
-          return res.status(500).json({
-            success: false,
-            mappingSaved: true,
-            error: "Mapping saved, but affected users could not be notified.",
-          });
-        }
-        const io = getIO();
-        if (io) {
-          notifications.forEach((notification) => {
-            io.to(`user_${String(notification.user_id)}`).emit("notification", {
-              type: notification.type,
-              message: notification.message,
-              newPreview: notification.new_preview,
-              isBusActive: notification.is_bus_active,
-            });
-          });
-        }
+    const mutation = await runPlanMappingMutation({
+      scope: planName,
+      idempotencyKey,
+      expectedVersion,
+      actorId: req.user?.id,
+      action: "plan-mapping-save",
+      request: {
+        clusterId: clusterId || null,
+        planName,
+        clusterName: clusterName.trim(),
+        rootBusId: String(rootBusId),
+        locationBusId,
+        memberBusIds: normalizedMembers,
+        expectedVersion,
+      },
+      previousState: assignmentState.clusters
+        .filter((cluster) => normalizePlanName(cluster.plan_name) === planName),
+      newState: nextPlanClusters,
+      recipients: notifications.map((notification) => ({
+        user_id: notification.user_id,
+        notification,
+      })),
+      mutate: (session) =>
+        PlanMapping.bulkWrite(operations, {
+          ordered: true,
+          ...(session ? { session } : {}),
+        }),
+    });
+    const io = getIO();
+    if (io) {
+      try {
+        io.emit("bus-update", { actionType: "PLAN_MAPPING_CHANGED" });
+      } catch (error) {
+        logSafeError("Plan mapping websocket broadcast deferred", error);
       }
     }
-    const io = getIO();
-    if (io) io.emit("bus-update", { actionType: "PLAN_MAPPING_CHANGED" });
-    res.json({ success: true, clusterId: String(savedId) });
-  } catch (error) {
-    logSafeError("savePlanMapping failed", error);
-    res.status(500).json({
-      success: false,
-      error: "Could not save this plan mapping.",
+    res.json({
+      success: true,
+      clusterId: String(savedId),
+      version: mutation.version,
+      duplicate: mutation.duplicate,
+      notifiedUsers: notifications.length,
     });
+  } catch (error) {
+    respondMutationError(res, error, "Could not save this plan mapping.");
   }
 }
 
@@ -561,12 +615,20 @@ async function updatePlanMappingRoutes(req, res) {
     if (!rootBus) {
       return res.status(404).json({ success: false, error: "Root bus not found." });
     }
+    const expectedBusVersion = getExpectedBusVersion(req);
+    if (expectedBusVersion === null) {
+      return res.status(428).json({
+        success: false,
+        error: "Provide the current root bus revision.",
+        code: "BUS_REVISION_REQUIRED",
+      });
+    }
     const planName = normalizePlanName(cluster.plan_name);
     const existingRows = await BusRoute.find({
       bus_id: rootBus._id,
       plan_name: planName,
     })
-      .select("_id")
+      .select("_id stopId stop_name stop_order arrival_time")
       .lean();
     const embeddedCombined = (rootBus.combined_routes || []).some(
       (route) => normalizePlanName(route.plan_name) === planName,
@@ -583,16 +645,9 @@ async function updatePlanMappingRoutes(req, res) {
       });
     }
 
-    if (existingRows.length) {
-      await BusRoute.deleteMany({ bus_id: rootBus._id, plan_name: planName });
-      await BusRoute.insertMany(
-        normalizedStops.map((stop) => ({
-          bus_id: rootBus._id,
-          plan_name: planName,
-          ...stop,
-        })),
-      );
-    }
+    const previousRows = existingRows;
+    const oldCombinedRoutes = rootBus.combined_routes;
+    const oldAlterationRoutes = rootBus.alteration_routes;
     if (embeddedCombined) {
       rootBus.combined_routes = [
         ...(rootBus.combined_routes || []).filter(
@@ -615,8 +670,6 @@ async function updatePlanMappingRoutes(req, res) {
         })),
       ];
     }
-    if (embeddedCombined || embeddedAlteration) await rootBus.save();
-
     const state = await loadPlanState();
     const notifications = getClusterChangeNotifications(
       state,
@@ -624,50 +677,121 @@ async function updatePlanMappingRoutes(req, res) {
       planName,
       true,
     );
-    if (notifications.length) {
+    const currentPlan = await getCurrentPlan();
+    const affectedNotifications = currentPlan === planName ? notifications : [];
+    const expectedVersion = getExpectedVersion(req);
+    const mutation = await runPlanMappingMutation({
+      scope: planName,
+      idempotencyKey: getIdempotencyKey(req),
+      expectedVersion,
+      actorId: req.user?.id,
+      action: "plan-mapping-routes-update",
+      request: {
+        clusterId: String(cluster._id),
+        planName,
+        stops: normalizedStops,
+        expectedVersion,
+        expectedBusVersion,
+      },
+      previousState: {
+        clusterId: String(cluster._id),
+        routes: previousRows,
+        combinedRoutes: oldCombinedRoutes,
+        alterationRoutes: oldAlterationRoutes,
+        rootBusRevision: rootBus.revision ?? 0,
+      },
+      newState: {
+        clusterId: String(cluster._id),
+        routes: normalizedStops,
+        rootBusRevision: (rootBus.revision ?? 0) + 1,
+      },
+      recipients: affectedNotifications.map((notification) => ({
+        user_id: notification.user_id,
+        notification,
+      })),
+      mutate: async (session) => {
+        const options = session ? { session } : {};
+        const revisionFilter = expectedBusVersion === 0
+          ? {
+              $or: [
+                { revision: 0 },
+                { revision: { $exists: false } },
+              ],
+            }
+          : { revision: expectedBusVersion };
+        const busUpdate = {};
+        if (embeddedCombined) busUpdate.combined_routes = rootBus.combined_routes;
+        if (embeddedAlteration) busUpdate.alteration_routes = rootBus.alteration_routes;
+        const updatedRootBus = await Bus.findOneAndUpdate(
+          {
+            $and: [
+              { _id: rootBus._id },
+              revisionFilter,
+            ],
+          },
+          {
+            ...(Object.keys(busUpdate).length ? { $set: busUpdate } : {}),
+            $inc: { revision: 1 },
+          },
+          {
+            new: true,
+            runValidators: true,
+            ...options,
+          },
+        ).lean();
+        if (!updatedRootBus) {
+          const error = new Error(
+            "The root bus changed. Reload plan mappings before editing this route.",
+          );
+          error.code = "BUS_REVISION_CONFLICT";
+          error.statusCode = 409;
+          throw error;
+        }
+        if (existingRows.length) {
+          await BusRoute.deleteMany(
+            { bus_id: rootBus._id, plan_name: planName },
+            options,
+          );
+          await BusRoute.insertMany(
+            normalizedStops.map((stop) => ({
+              bus_id: rootBus._id,
+              plan_name: planName,
+              ...stop,
+            })),
+            options,
+          );
+        }
+        return {
+          response: {
+            stops: normalizedStops.map((stop) => ({
+              stopName: stop.stop_name,
+              stopId: stop.stopId,
+              stopOrder: stop.stop_order,
+              arrivalTime: stop.arrival_time,
+            })),
+            notifiedUsers: affectedNotifications.length,
+            busRevision: updatedRootBus.revision,
+          },
+        };
+      },
+    });
+    const io = getIO();
+    if (io) {
       try {
-        await Notification.insertMany(notifications);
+        io.emit("bus-update", { actionType: "PLAN_MAPPING_CHANGED" });
       } catch (error) {
-        logSafeError("updatePlanMappingRoutes notification persistence failed", error);
-        const io = getIO();
-        if (io) io.emit("bus-update", { actionType: "PLAN_MAPPING_CHANGED" });
-        return res.status(500).json({
-          success: false,
-          routeUpdated: true,
-          error: "Route updated, but affected users could not be notified.",
-        });
-      }
-      const io = getIO();
-      if (io) {
-        notifications.forEach((notification) => {
-          io.to(`user_${String(notification.user_id)}`).emit("notification", {
-            type: notification.type,
-            message: notification.message,
-            newPreview: notification.new_preview,
-            isBusActive: true,
-          });
-        });
+        logSafeError("Plan mapping websocket broadcast deferred", error);
       }
     }
-    const io = getIO();
-    if (io) io.emit("bus-update", { actionType: "PLAN_MAPPING_CHANGED" });
 
     res.json({
       success: true,
-      stops: normalizedStops.map((stop) => ({
-        stopName: stop.stop_name,
-        stopId: stop.stopId,
-        stopOrder: stop.stop_order,
-        arrivalTime: stop.arrival_time,
-      })),
-      notifiedUsers: notifications.length,
+      ...mutation.response,
+      version: mutation.version,
+      duplicate: mutation.duplicate,
     });
   } catch (error) {
-    logSafeError("updatePlanMappingRoutes failed", error);
-    res.status(500).json({
-      success: false,
-      error: "Could not update the root bus route.",
-    });
+    respondMutationError(res, error, "Could not update the root bus route.");
   }
 }
 
@@ -685,52 +809,110 @@ async function deletePlanMapping(req, res) {
       currentPlan === normalizePlanName(cluster.plan_name)
         ? await loadPlanState()
         : null;
-    await deletePlanMappingById(cluster._id);
-    if (previousState) {
-      const state = await loadPlanState();
-      const notifications = getPlanMappingChangeNotifications(
-        state,
-        currentPlan,
-        previousState.clusters,
-      );
-      if (notifications.length) {
-        try {
-          await Notification.insertMany(notifications);
-        } catch (error) {
-          logSafeError("deletePlanMapping notification persistence failed", error);
-          return res.status(500).json({
-            success: false,
-            mappingDeleted: true,
-            error: "Cluster deleted, but affected users could not be notified.",
-          });
-        }
-      }
-      const io = getIO();
-      if (io) {
-        notifications.forEach((notification) => {
-          io.to(`user_${String(notification.user_id)}`).emit("notification", {
-            type: notification.type,
-            message: notification.message,
-            newPreview: notification.new_preview,
-            isBusActive: notification.is_bus_active,
-          });
-        });
+    const planName = normalizePlanName(cluster.plan_name);
+    const planState = previousState || await loadPlanState();
+    const nextState = {
+      ...planState,
+      clusters: planState.clusters.filter(
+        (item) => String(item._id) !== String(cluster._id),
+      ),
+    };
+    const notifications =
+      currentPlan === planName
+        ? getPlanMappingChangeNotifications(
+            nextState,
+            currentPlan,
+            planState.clusters,
+          )
+        : [];
+    const mutation = await runPlanMappingMutation({
+      scope: planName,
+      idempotencyKey: getIdempotencyKey(req),
+      expectedVersion: getExpectedVersion(req),
+      actorId: req.user?.id,
+      action: "plan-mapping-delete",
+      request: {
+        clusterId: String(cluster._id),
+        planName,
+        expectedVersion: getExpectedVersion(req),
+      },
+      previousState: cluster,
+      newState: null,
+      recipients: notifications.map((notification) => ({
+        user_id: notification.user_id,
+        notification,
+      })),
+      mutate: (session) =>
+        PlanMapping.deleteOne(
+          { _id: cluster._id },
+          session ? { session } : {},
+        ),
+    });
+    const io = getIO();
+    if (io) {
+      try {
+        io.emit("bus-update", { actionType: "PLAN_MAPPING_CHANGED" });
+      } catch (error) {
+        logSafeError("Plan mapping websocket broadcast deferred", error);
       }
     }
-    const io = getIO();
-    if (io) io.emit("bus-update", { actionType: "PLAN_MAPPING_CHANGED" });
-    res.json({ success: true });
+    res.json({
+      success: true,
+      version: mutation.version,
+      duplicate: mutation.duplicate,
+      notifiedUsers: notifications.length,
+    });
   } catch (error) {
-    logSafeError("deletePlanMapping failed", error);
-    res.status(500).json({
+    respondMutationError(res, error, "Could not delete this plan mapping.");
+  }
+}
+
+async function getPlanMappingAudit(req, res) {
+  const pagination = parsePagination(req.query || {}, {
+    defaultLimit: 50,
+    maxLimit: 100,
+  });
+  if (pagination.error) {
+    return res.status(400).json({
       success: false,
-      error: "Could not delete this plan mapping.",
+      error: pagination.error,
+    });
+  }
+  try {
+    const filter = {};
+    if (typeof req.query?.scope === "string" && req.query.scope.trim()) {
+      filter.resource_id = req.query.scope.trim().toUpperCase();
+    }
+    const [items, total] = await Promise.all([
+      AdministrativeChangeAudit.find(filter)
+        .select(
+          "_id actor_id action resource_id request_id previous_state new_state createdAt",
+        )
+        .sort({ createdAt: -1, _id: -1 })
+        .skip(pagination.skip)
+        .limit(pagination.limit)
+        .lean(),
+      AdministrativeChangeAudit.countDocuments(filter),
+    ]);
+    return res.json({
+      success: true,
+      items,
+      page: pagination.page,
+      limit: pagination.limit,
+      total,
+    });
+  } catch (error) {
+    logSafeError("getPlanMappingAudit failed", error);
+    return res.status(500).json({
+      success: false,
+      error: "Could not load plan mapping audit history.",
     });
   }
 }
 
 module.exports = {
   deletePlanMapping,
+  getPlanMappingAudit,
   getPlanMappingData,
   savePlanMapping,
   updatePlanMappingRoutes,

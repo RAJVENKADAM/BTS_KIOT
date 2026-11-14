@@ -1,5 +1,5 @@
 /**
- * ExcelUploadCard — Displays an uploaded Excel file with edit/delete actions.
+ * ExcelUploadCard — Displays an uploaded Excel file and its delete action.
  */
 import React from 'react';
 import {
@@ -16,7 +16,6 @@ import Card from './UI/Card';
 
 export default function ExcelUploadCard({
   upload,
-  onEdit,
   onDelete
 }) {
   const formatDate = (dateString) => {
@@ -32,14 +31,14 @@ export default function ExcelUploadCard({
 
   const handleDelete = () => {
     Alert.alert(
-      'Delete Excel Upload',
-      `Are you sure you want to delete "${upload.file_name}"?\n\nThis will deactivate all users created from this Excel file.`,
+      'Deactivate Excel Upload',
+      `Are you sure you want to deactivate "${upload.file_name}"?\n\nThis will deactivate all users created from this Excel file.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Delete',
+          text: 'Deactivate',
           style: 'destructive',
-          onPress: () => onDelete(upload.id)
+          onPress: () => onDelete(upload)
         }
       ]
     );
@@ -64,6 +63,9 @@ export default function ExcelUploadCard({
             <MutedText style={styles.date}>
               {formatDate(upload.uploaded_at)}
             </MutedText>
+            {upload.is_active === false && (
+              <MutedText>Upload and linked users are deactivated.</MutedText>
+            )}
             {upload.import_status === 'processing' && (
               <MutedText>Import is still processing.</MutedText>
             )}
@@ -81,23 +83,14 @@ export default function ExcelUploadCard({
       </View>
 
       <View style={styles.buttonRow}>
-        <TouchableOpacity
-          style={[styles.actionBtn, styles.editBtn]}
-          onPress={() => onEdit(upload.id)}
-          activeOpacity={0.7}
-        >
-          <MaterialIcons name="edit" size={18} color={COLORS.primary} />
-          <Text style={styles.btnTextEdit}>Update</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
+        {upload.is_active !== false && <TouchableOpacity
           style={[styles.actionBtn, styles.deleteBtn]}
           onPress={handleDelete}
           activeOpacity={0.7}
         >
           <MaterialIcons name="delete" size={18} color={COLORS.error} />
-          <Text style={styles.btnTextDelete}>Delete</Text>
-        </TouchableOpacity>
+          <Text style={styles.btnTextDelete}>Deactivate</Text>
+        </TouchableOpacity>}
       </View>
     </Card>
   );
@@ -177,19 +170,9 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     borderWidth: 1,
   },
-  editBtn: {
-    backgroundColor: '#EEF2FF',
-    borderColor: '#C7D2FE',
-  },
   deleteBtn: {
     backgroundColor: '#FEE2E2',
     borderColor: '#FECACA',
-  },
-  btnTextEdit: {
-    marginLeft: 6,
-    fontSize: 13,
-    fontWeight: '700',
-    color: COLORS.primary,
   },
   btnTextDelete: {
     marginLeft: 6,

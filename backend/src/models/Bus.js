@@ -11,6 +11,11 @@ const busSchema = new mongoose.Schema(
       uppercase: true,
       set: normalizeBusNumber,
     },
+    revision: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
     bus_name: {
       type: String,
       default: null
@@ -95,8 +100,19 @@ const busSchema = new mongoose.Schema(
       default: null
     }
   },
-  { timestamps: true }
+  { timestamps: true, optimisticConcurrency: true }
 );
+
+busSchema.pre('save', function () {
+  if (
+    !this.isNew &&
+    this.modifiedPaths().some(
+      (path) => !['revision', '__v', 'updatedAt'].includes(path),
+    )
+  ) {
+    this.revision = Math.max(0, Number(this.revision) || 0) + 1;
+  }
+});
 
 busSchema.index({ altered_to_bus_id: 1, alteration_type: 1 });
 busSchema.index({ alteration_type: 1, altered_at: -1, _id: -1 });

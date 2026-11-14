@@ -1,5 +1,7 @@
 const assert = require("node:assert/strict");
 const { after, test } = require("node:test");
+const AdministrativeChangeAudit = require("../src/models/AdministrativeChangeAudit");
+const AssignmentPropagationOutbox = require("../src/models/AssignmentPropagationOutbox");
 const jwt = require("jsonwebtoken");
 const User = require("../src/models/User");
 const Notification = require("../src/models/Notification");
@@ -15,14 +17,30 @@ const { deleteExcelUpload } = require("../src/controllers/excelManagement.contro
 const { createSocketAuthentication } = require("../src/socket/authenticateSocket");
 const ownershipService = require("../src/services/gpsWorkerOwnership");
 const { mockGpsOwnershipTransactions } = require("./helpers/gpsOwnershipTransactionMock.cjs");
+const { mockMutationIdempotency } = require("./helpers/mutationIdempotencyMock.cjs");
 
 const gpsOwnershipTransactions = mockGpsOwnershipTransactions();
-after(() => gpsOwnershipTransactions.restore());
+const mutationIdempotency = mockMutationIdempotency();
+const originalAuditCreate = AdministrativeChangeAudit.create;
+const originalOutboxUpdateOne = AssignmentPropagationOutbox.updateOne;
+const outboxRecords = [];
+AdministrativeChangeAudit.create = async () => [];
+AssignmentPropagationOutbox.updateOne = async (filter, update) => {
+  outboxRecords.push({ filter, update });
+  return { upsertedCount: 1 };
+};
+after(() => {
+  gpsOwnershipTransactions.restore();
+  mutationIdempotency.restore();
+  AdministrativeChangeAudit.create = originalAuditCreate;
+  AssignmentPropagationOutbox.updateOne = originalOutboxUpdateOne;
+});
 
 const SECRET = "socket-revocation-tests-only";
 const firstId = "64a000000000000000000001";
 const secondId = "64a000000000000000000002";
 const adminId = "64a000000000000000000099";
+const uploadId = "64a000000000000000000010";
 
 function createRevocationSpy() {
   const calls = [];
@@ -53,6 +71,37 @@ function responseDouble() {
     json(payload) {
       this.payload = payload;
       return this;
+    },
+  };
+}
+
+function uploadDeleteRequest(key, expectedVersion = 0) {
+  const headers = { "idempotency-key": key };
+  return {
+    params: { id: uploadId },
+    user: { id: adminId, role: "superadmin" },
+    body: { expectedVersion },
+    headers,
+    get(name) {
+      return headers[name.toLowerCase()];
+    },
+  };
+}
+
+function queryDouble(value, onSession = () => {}) {
+  return {
+    select() {
+      return this;
+    },
+    session(session) {
+      onSession(session);
+      return this;
+    },
+    lean() {
+      return this;
+    },
+    then(resolve, reject) {
+      return Promise.resolve(value).then(resolve, reject);
     },
   };
 }
@@ -140,24 +189,31 @@ test("Redis-mode account deactivation uses the ownership transaction session", a
 test("successful bulk deletion revokes selected users but leaves other user rooms alone", async () => {
   const calls = createRevocationSpy();
   const restoreFind = setSelectedUsers([
-    { _id: firstId, role: "student", is_active: true },
-    { _id: secondId, role: "primary_admin", is_active: true },
+    { _id: firstId, role: "student", is_active: true, resourceVersion: 0 },
+    { _id: secondId, role: "primary_admin", is_active: true, resourceVersion: 0 },
   ]);
-  const originalDeleteMany = User.deleteMany;
+  const originalDeleteOne = User.deleteOne;
   const originalNotificationDeleteMany = Notification.deleteMany;
-  User.deleteMany = async () => ({ deletedCount: 2 });
+  User.deleteOne = async () => ({ deletedCount: 1 });
   Notification.deleteMany = async () => ({ deletedCount: 2 });
   const res = responseDouble();
   try {
     await deleteSelectedUsers(
-      { body: { ids: [firstId, secondId] }, user: { id: adminId } },
+      {
+        headers: { "idempotency-key": "socket-delete-0001" },
+        body: {
+          ids: [firstId, secondId],
+          expectedVersions: { [firstId]: 0, [secondId]: 0 },
+        },
+        user: { id: adminId },
+      },
       res,
     );
     assert.equal(res.statusCode, 200);
     assert.deepEqual(calls[0].rooms, [`user_${firstId}`, `user_${secondId}`]);
   } finally {
     restoreFind();
-    User.deleteMany = originalDeleteMany;
+    User.deleteOne = originalDeleteOne;
     Notification.deleteMany = originalNotificationDeleteMany;
   }
 });
@@ -165,29 +221,59 @@ test("successful bulk deletion revokes selected users but leaves other user room
 test("bulk role changes revoke only users whose role actually changed", async () => {
   const calls = createRevocationSpy();
   const restoreFind = setSelectedUsers([
-    { _id: firstId, role: "student", is_active: true },
-    { _id: secondId, role: "primary_admin", is_active: true },
+    { _id: firstId, role: "student", is_active: true, resourceVersion: 0, assignmentRevision: 0 },
+    { _id: secondId, role: "primary_admin", is_active: true, resourceVersion: 0, assignmentRevision: 0 },
   ]);
-  const originalUpdateMany = User.updateMany;
-  User.updateMany = async () => ({ modifiedCount: 1 });
+  const originalFindOneAndUpdate = User.findOneAndUpdate;
+  const writes = [];
+  User.findOneAndUpdate = (filter, update, options) => {
+    writes.push({ filter, update, options });
+    return { select: async () => ({
+      _id: filter.$and[0]._id,
+      role: update.$set.role,
+      resourceVersion: 1,
+      assignmentRevision: filter.$and.length > 2 ? 1 : 0,
+    }) };
+  };
   const res = responseDouble();
   try {
     await updateUsersRole(
-      { body: { ids: [firstId, secondId], role: "student" }, user: { id: adminId } },
+      {
+        headers: { "idempotency-key": "socket-role-0001" },
+        body: {
+          ids: [firstId, secondId],
+          role: "student",
+          expectedVersions: { [firstId]: 0, [secondId]: 0 },
+          expectedAssignmentRevisions: { [firstId]: 0, [secondId]: 0 },
+        },
+        user: { id: adminId },
+      },
       res,
     );
     assert.equal(res.statusCode, 200);
     assert.deepEqual(calls[0].rooms, [`user_${secondId}`]);
+    assert.equal(writes.length, 2);
+    for (const write of writes) {
+      assert.deepEqual(write.filter.$and[1], {
+        $or: [{ resourceVersion: 0 }, { resourceVersion: { $exists: false } }],
+      });
+      assert.deepEqual(write.update.$inc.resourceVersion, 1);
+    }
+    assert.deepEqual(writes[0].update.$inc, { resourceVersion: 1 });
+    assert.deepEqual(writes[1].update.$inc, {
+      resourceVersion: 1,
+      assignmentRevision: 1,
+    });
   } finally {
     restoreFind();
-    User.updateMany = originalUpdateMany;
+    User.findOneAndUpdate = originalFindOneAndUpdate;
   }
 });
 
 test("single-user role change revokes that user's existing socket", async () => {
   const calls = createRevocationSpy();
   const originalFindById = User.findById;
-  const originalFindByIdAndUpdate = User.findByIdAndUpdate;
+  const originalFindOneAndUpdate = User.findOneAndUpdate;
   User.findById = () => ({
     select() {
       return this;
@@ -196,39 +282,52 @@ test("single-user role change revokes that user's existing socket", async () => 
       _id: firstId,
       role: "student",
       is_active: true,
+      resourceVersion: 0,
+      assignmentRevision: 0,
     }),
   });
-  User.findByIdAndUpdate = () => ({
-    select: async () => ({
+  let write;
+  User.findOneAndUpdate = (filter, update, options) => {
+    write = { filter, update, options };
+    return { select: async () => ({
       _id: firstId,
       name: "Student",
       email: "student@example.test",
       role: "primary_admin",
       bus_no: null,
-    }),
-  });
+      resourceVersion: 1,
+      assignmentRevision: 1,
+    }) };
+  };
   const res = responseDouble();
   try {
     await updateUser(
       {
         params: { id: firstId },
-        body: { role: "primary_admin" },
+        headers: { "idempotency-key": "socket-single-role-0001" },
+        body: { role: "primary_admin", expectedVersion: 0, expectedAssignmentRevision: 0 },
         user: { id: adminId },
       },
       res,
     );
     assert.equal(res.statusCode, 200);
     assert.deepEqual(calls[0].rooms, [`user_${firstId}`]);
+    assert.deepEqual(write.filter.$and, [
+      { _id: firstId },
+      { $or: [{ resourceVersion: 0 }, { resourceVersion: { $exists: false } }] },
+      { $or: [{ assignmentRevision: 0 }, { assignmentRevision: { $exists: false } }] },
+    ]);
+    assert.deepEqual(write.update.$inc, { resourceVersion: 1, assignmentRevision: 1 });
   } finally {
     User.findById = originalFindById;
-    User.findByIdAndUpdate = originalFindByIdAndUpdate;
+    User.findOneAndUpdate = originalFindOneAndUpdate;
   }
 });
 
-test("bus assignment changes notify only the affected user's socket room", async () => {
+test("bus assignment changes are durably queued for the affected user", async () => {
   const notifications = [];
   const originalFindById = User.findById;
-  const originalFindByIdAndUpdate = User.findByIdAndUpdate;
+  const originalFindOneAndUpdate = User.findOneAndUpdate;
   User.findById = () => ({
     select() {
       return this;
@@ -238,17 +337,23 @@ test("bus assignment changes notify only the affected user's socket room", async
       role: "student",
       is_active: true,
       bus_no: "BUS-4",
+      resourceVersion: 0,
+      assignmentRevision: 0,
     }),
   });
-  User.findByIdAndUpdate = () => ({
-    select: async () => ({
+  let write;
+  User.findOneAndUpdate = (filter, update, options) => {
+    write = { filter, update, options };
+    return { select: async () => ({
       _id: firstId,
       name: "Student",
       email: "student@example.test",
       role: "student",
       bus_no: "BUS-9",
-    }),
-  });
+      resourceVersion: 1,
+      assignmentRevision: 1,
+    }) };
+  };
   setIO({
     to(room) {
       return {
@@ -263,26 +368,39 @@ test("bus assignment changes notify only the affected user's socket room", async
     await updateUser(
       {
         params: { id: firstId },
-        body: { bus_no: "BUS-9" },
+        headers: { "idempotency-key": "socket-bus-change-0001" },
+        body: {
+          bus_no: "BUS-9",
+          expectedVersion: 0,
+          expectedAssignmentRevision: 0,
+        },
         user: { id: adminId },
       },
       res,
     );
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(notifications, [
-      {
-        room: `user_${firstId}`,
-        event: "notification",
-        payload: {
-          type: "bus_reassigned",
-          message: "Your bus assignment changed to Bus BUS-9.",
-          assignmentBusNo: "BUS-9",
-        },
-      },
+    assert.deepEqual(write.filter.$and, [
+      { _id: firstId },
+      { $or: [{ resourceVersion: 0 }, { resourceVersion: { $exists: false } }] },
+      { $or: [{ assignmentRevision: 0 }, { assignmentRevision: { $exists: false } }] },
     ]);
+    assert.deepEqual(write.update.$inc, { resourceVersion: 1, assignmentRevision: 1 });
+    assert.deepEqual(notifications, []);
+    assert.equal(
+      outboxRecords.at(-1).update.$setOnInsert.operation,
+      "student-assignment-updated",
+    );
+    assert.equal(
+      String(outboxRecords.at(-1).update.$setOnInsert.recipients[0].user_id),
+      firstId,
+    );
+    assert.equal(
+      outboxRecords.at(-1).update.$setOnInsert.recipients[0].notification.type,
+      "bus_reassigned",
+    );
   } finally {
     User.findById = originalFindById;
-    User.findByIdAndUpdate = originalFindByIdAndUpdate;
+    User.findOneAndUpdate = originalFindOneAndUpdate;
     setIO(null);
   }
 });
@@ -290,53 +408,60 @@ test("bus assignment changes notify only the affected user's socket room", async
 test("failed bulk role mutation does not revoke any sockets", async () => {
   const calls = createRevocationSpy();
   const restoreFind = setSelectedUsers([
-    { _id: firstId, role: "student", is_active: true },
+    { _id: firstId, role: "student", is_active: true, resourceVersion: 0, assignmentRevision: 0 },
   ]);
-  const originalUpdateMany = User.updateMany;
-  User.updateMany = async () => {
+  const originalFindOneAndUpdate = User.findOneAndUpdate;
+  User.findOneAndUpdate = async () => {
     throw new Error("database write failed");
   };
   const res = responseDouble();
   try {
     await updateUsersRole(
-      { body: { ids: [firstId], role: "primary_admin" }, user: { id: adminId } },
+      {
+        headers: { "idempotency-key": "socket-role-fail-0001" },
+        body: {
+          ids: [firstId],
+          role: "primary_admin",
+          expectedVersions: { [firstId]: 0 },
+          expectedAssignmentRevisions: { [firstId]: 0 },
+        },
+        user: { id: adminId },
+      },
       res,
     );
     assert.equal(res.statusCode, 500);
     assert.deepEqual(calls, []);
   } finally {
     restoreFind();
-    User.updateMany = originalUpdateMany;
+    User.findOneAndUpdate = originalFindOneAndUpdate;
   }
 });
 
 test("failed bulk account deactivation does not revoke sockets", async () => {
   const calls = createRevocationSpy();
   const originalUploadFindById = ExcelUpload.findById;
+  const originalUploadFindOneAndUpdate = ExcelUpload.findOneAndUpdate;
   const originalUserFind = User.find;
-  const originalUpdateMany = User.updateMany;
-  ExcelUpload.findById = () => ({ uploaded_by: adminId });
+  ExcelUpload.findById = () =>
+    queryDouble({ uploaded_by: adminId, is_active: true, revision: 0 });
+  ExcelUpload.findOneAndUpdate = () => {
+    throw new Error("database write failed");
+  };
   User.find = () => ({
     select() {
       return this;
     },
     lean: async () => [{ _id: firstId }],
   });
-  User.updateMany = async () => {
-    throw new Error("database write failed");
-  };
   const res = responseDouble();
   try {
-    await deleteExcelUpload(
-      { params: { id: "upload-1" }, user: { id: adminId, role: "superadmin" } },
-      res,
-    );
+    await deleteExcelUpload(uploadDeleteRequest("socket-delete-fail-0001"), res);
     assert.equal(res.statusCode, 500);
     assert.deepEqual(calls, []);
   } finally {
     ExcelUpload.findById = originalUploadFindById;
+    ExcelUpload.findOneAndUpdate = originalUploadFindOneAndUpdate;
     User.find = originalUserFind;
-    User.updateMany = originalUpdateMany;
   }
 });
 
@@ -345,34 +470,45 @@ test("bulk spreadsheet deactivation revokes only linked users after the update s
   const transactionsBefore = gpsOwnershipTransactions.calls;
   const linkedUsers = [{ _id: firstId }, { _id: secondId }];
   const originalUploadFindById = ExcelUpload.findById;
-  const originalUploadDelete = ExcelUpload.deleteOne;
+  const originalUploadFindOneAndUpdate = ExcelUpload.findOneAndUpdate;
   const originalUserFind = User.find;
-  const originalUpdateMany = User.updateMany;
-  ExcelUpload.findById = () => ({
-    uploaded_by: adminId,
-  });
-  ExcelUpload.deleteOne = async () => ({ deletedCount: 1 });
+  const originalBulkWrite = User.bulkWrite;
+  ExcelUpload.findById = () =>
+    queryDouble({ uploaded_by: adminId, is_active: true, revision: 0 });
+  ExcelUpload.findOneAndUpdate = () =>
+    queryDouble({ _id: uploadId, is_active: false, revision: 1 });
   User.find = () => ({
     select() {
       return this;
     },
     lean: async () => linkedUsers,
   });
-  User.updateMany = async () => ({ modifiedCount: 2 });
+  User.bulkWrite = async (operations) => ({
+    matchedCount: operations.length,
+  });
   const res = responseDouble();
   try {
-    await deleteExcelUpload(
-      { params: { id: "upload-1" }, user: { id: adminId, role: "superadmin" } },
-      res,
-    );
+    await deleteExcelUpload(uploadDeleteRequest("socket-delete-ok-0001"), res);
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(calls[0].rooms, [`user_${firstId}`, `user_${secondId}`]);
+    assert.deepEqual(calls, [
+      { rooms: [`user_${firstId}`, `user_${secondId}`], close: true },
+    ]);
+    assert.equal(
+      outboxRecords.at(-1).update.$setOnInsert.operation,
+      'spreadsheet-users-deactivated',
+    );
+    assert.deepEqual(
+      outboxRecords.at(-1).update.$setOnInsert.recipients.map((item) =>
+        String(item.user_id),
+      ),
+      [firstId, secondId],
+    );
     assert.equal(gpsOwnershipTransactions.calls, transactionsBefore + 1);
   } finally {
     ExcelUpload.findById = originalUploadFindById;
-    ExcelUpload.deleteOne = originalUploadDelete;
+    ExcelUpload.findOneAndUpdate = originalUploadFindOneAndUpdate;
     User.find = originalUserFind;
-    User.updateMany = originalUpdateMany;
+    User.bulkWrite = originalBulkWrite;
   }
 });
 
@@ -381,53 +517,47 @@ test("Redis-mode spreadsheet deactivation uses one ownership session for all mut
   const originalTransaction = ownershipService.runGpsConfigurationTransaction;
   const originals = {
     uploadFind: ExcelUpload.findById,
-    uploadDelete: ExcelUpload.deleteOne,
+    uploadUpdate: ExcelUpload.findOneAndUpdate,
     userFind: User.find,
-    userUpdate: User.updateMany,
+    userBulkWrite: User.bulkWrite,
   };
   const session = { transaction: "gps-configuration" };
   let querySession;
   let updateOptions;
-  let deleteOptions;
+  let uploadOptions;
   process.env.SOCKET_IO_MODE = "redis";
   ownershipService.runGpsConfigurationTransaction = async (operation) =>
     operation(session);
-  ExcelUpload.findById = () => ({ uploaded_by: adminId });
-  ExcelUpload.deleteOne = async (_filter, options) => {
-    deleteOptions = options;
-    return { deletedCount: 1 };
-  };
-  User.find = () => ({
-    select() {
-      return this;
-    },
-    session(value) {
+  ExcelUpload.findById = () =>
+    queryDouble({ uploaded_by: adminId, is_active: true, revision: 0 }, (value) => {
       querySession = value;
-      return this;
-    },
-    lean: async () => [{ _id: firstId }],
-  });
-  User.updateMany = async (_filter, _update, options) => {
+    });
+  ExcelUpload.findOneAndUpdate = (_filter, _update, options) => {
+    uploadOptions = options;
+    return queryDouble({ _id: uploadId, is_active: false, revision: 1 });
+  };
+  User.find = () =>
+    queryDouble([{ _id: firstId }], (value) => {
+      querySession = value;
+    });
+  User.bulkWrite = async (_operations, options) => {
     updateOptions = options;
-    return { modifiedCount: 1 };
+    return { matchedCount: 1 };
   };
   const res = responseDouble();
 
   try {
-    await deleteExcelUpload(
-      { params: { id: "upload-1" }, user: { id: adminId, role: "superadmin" } },
-      res,
-    );
-    assert.equal(res.statusCode, 200);
+    await deleteExcelUpload(uploadDeleteRequest("socket-delete-redis-0001"), res);
+    assert.equal(res.statusCode, 200, JSON.stringify(res.payload));
     assert.equal(querySession, session);
     assert.equal(updateOptions.session, session);
-    assert.equal(deleteOptions.session, session);
+    assert.equal(uploadOptions.session, session);
   } finally {
     ownershipService.runGpsConfigurationTransaction = originalTransaction;
     ExcelUpload.findById = originals.uploadFind;
-    ExcelUpload.deleteOne = originals.uploadDelete;
+    ExcelUpload.findOneAndUpdate = originals.uploadUpdate;
     User.find = originals.userFind;
-    User.updateMany = originals.userUpdate;
+    User.bulkWrite = originals.userBulkWrite;
     if (originalMode === undefined) delete process.env.SOCKET_IO_MODE;
     else process.env.SOCKET_IO_MODE = originalMode;
   }

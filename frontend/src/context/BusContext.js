@@ -32,8 +32,17 @@ const { logSocketDiagnostic } = require("../utils/socketDiagnostics.cjs");
 
 const BusContext = createContext();
 
+const compareVersions = (left, right) => {
+  const normalize = (value) => String(value ?? "0").replace(/^0+(?=\d)/, "");
+  const a = normalize(left);
+  const b = normalize(right);
+  if (a.length !== b.length) return a.length < b.length ? -1 : 1;
+  return a === b ? 0 : a < b ? -1 : 1;
+};
+
 const initialState = {
   buses: [],
+  assignment: null,
   selectedPreviewNumber: null,
   selectedBus: null,
   currentLocation: null,
@@ -53,6 +62,84 @@ const busReducer = (state, action) => {
       return { ...state, error: action.payload, loading: false };
     case "SET_BUSES":
       return { ...state, buses: action.payload };
+    case "SET_ASSIGNMENT":
+      if (
+        state.assignment &&
+        (
+          compareVersions(
+            action.payload?.assignmentVersion,
+            state.assignment.assignmentVersion,
+          ) < 0 ||
+          (
+            compareVersions(
+              action.payload?.assignmentVersion,
+              state.assignment.assignmentVersion,
+            ) === 0 &&
+            compareVersions(
+              action.payload?.locationVersion,
+              state.assignment.locationVersion,
+            ) < 0
+          )
+        )
+      ) {
+        return state;
+      }
+      return {
+        ...state,
+        assignment: action.payload,
+        selectedBus: action.payload,
+        selectedPreviewNumber: action.payload?.previewNumber ?? null,
+        currentLocation: action.payload,
+        buses: [],
+        loading: false,
+        error: null,
+      };
+    case "UPDATE_ASSIGNED_LOCATION": {
+      const location = action.payload;
+      if (
+        !state.assignment ||
+        String(location?.previewNumber ?? "") !==
+          String(state.assignment.previewNumber ?? "")
+      ) {
+        return state;
+      }
+      if (
+        compareVersions(
+          location.locationVersion,
+          state.assignment.locationVersion,
+        ) <= 0
+      ) return state;
+      const providerTime = Date.parse(location.providerTimestamp);
+      const gpsAge = Date.now() - providerTime;
+      const fresh =
+        location.is_online === true &&
+        Number.isFinite(location.latitude) &&
+        Number.isFinite(location.longitude) &&
+        location.latitude >= -90 &&
+        location.latitude <= 90 &&
+        location.longitude >= -180 &&
+        location.longitude <= 180 &&
+        Number.isFinite(providerTime) &&
+        gpsAge <= (Number(location.gpsOfflineThresholdMs) || 180_000) &&
+        gpsAge >= -300_000;
+      const assignment = {
+        ...state.assignment,
+        ...location,
+        busNo: state.assignment.busNo,
+        previewNumber: state.assignment.previewNumber,
+        effectivePreviewNumber: state.assignment.effectivePreviewNumber,
+        latitude: fresh ? location.latitude : null,
+        longitude: fresh ? location.longitude : null,
+        gpsStatus: fresh ? "fresh" : Number.isFinite(providerTime) ? "stale" : "unavailable",
+        status: fresh ? "online" : "offline",
+      };
+      return {
+        ...state,
+        assignment,
+        selectedBus: assignment,
+        currentLocation: assignment,
+      };
+    }
     case "SET_SELECTED_BUS":
       return { ...state, selectedBus: action.payload };
     case "SET_SELECTED_PREVIEW":
@@ -79,33 +166,67 @@ export const BusProvider = ({ children }) => {
   const appStateRef = useRef(AppState.currentState || "active");
 
   const refreshBuses = useCallback(async () => {
+    const generation = ++requestGenerationRef.current;
     dispatch({ type: "SET_LOADING", payload: true });
     try {
+      if (user?.role === "student") {
+        const assignment = await fetchJson(
+          `${API_BASE_URL}/api/bus/my-assignment`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        if (generation === requestGenerationRef.current) {
+          dispatch({ type: "SET_ASSIGNMENT", payload: assignment });
+        }
+        return assignment;
+      }
       const data = await fetchJson(`${API_BASE_URL}/api/bus/get-all-buses`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      dispatch({ type: "SET_BUSES", payload: data.buses });
-      dispatch({ type: "SET_ERROR", payload: null });
-      const cacheKey = `buses_${user?.id || user?._id || "anonymous"}`;
-      await AsyncStorage.setItem(cacheKey, JSON.stringify(data.buses));
+      if (generation === requestGenerationRef.current) {
+        dispatch({ type: "SET_BUSES", payload: data.buses });
+        dispatch({ type: "SET_ERROR", payload: null });
+        const cacheKey = `buses_${user?.id || user?._id || "anonymous"}`;
+        await AsyncStorage.setItem(cacheKey, JSON.stringify(data.buses));
+      }
     } catch (error) {
-      dispatch({
-        type: "SET_ERROR",
-        payload: getErrorMessage(error, "Could not load buses."),
-      });
+      if (generation === requestGenerationRef.current) {
+        dispatch({
+          type: "SET_ERROR",
+          payload: getErrorMessage(
+            error,
+            user?.role === "student"
+              ? "Could not load your bus assignment."
+              : "Could not load buses.",
+          ),
+        });
+      }
     } finally {
-      dispatch({ type: "SET_LOADING", payload: false });
+      if (generation === requestGenerationRef.current) {
+        dispatch({ type: "SET_LOADING", payload: false });
+      }
     }
-  }, [token, user?.id, user?._id]);
+  }, [token, user?.id, user?._id, user?.role]);
 
   // Load cached buses on startup
   useEffect(() => {
-    const generation = ++requestGenerationRef.current;
-    loadBuses();
+    dispatch({ type: "RESET" });
+    if (user?.role === "student") {
+      const userKey = user?.id || user?._id || "anonymous";
+      AsyncStorage.multiRemove([
+        `buses_${userKey}`,
+        `selectedBusPreviewNumber_${userKey}`,
+      ]).catch((error) =>
+        console.error("Could not remove the legacy student fleet cache:", error),
+      );
+      refreshBuses().catch(() => {});
+    } else {
+      loadBuses();
+      refreshBuses().catch(() => {});
+    }
     return () => {
-      if (generation === requestGenerationRef.current) requestGenerationRef.current += 1;
+      requestGenerationRef.current += 1;
     };
-  }, [token]);
+  }, [token, user?.id, user?._id, user?.role, refreshBuses]);
 
   // Socket connection for real-time updates
   const [socket, setSocket] = useState(null);
@@ -140,6 +261,19 @@ export const BusProvider = ({ children }) => {
       reconnectionDelayMax: SOCKET_RECONNECTION_MAX_DELAY_MS,
       randomizationFactor: SOCKET_RECONNECTION_RANDOMIZATION_FACTOR,
     });
+
+    const handleAssignmentUpdate = (assignment) => {
+      if (user?.role === "student" && assignment) {
+        dispatch({ type: "SET_ASSIGNMENT", payload: assignment });
+      }
+    };
+    const handleAssignedLocationUpdate = (location) => {
+      if (user?.role === "student" && location && !location.error) {
+        dispatch({ type: "UPDATE_ASSIGNED_LOCATION", payload: location });
+      }
+    };
+    newSocket.on("assigned-bus-update", handleAssignmentUpdate);
+    newSocket.on("locationUpdate", handleAssignedLocationUpdate);
 
     const logDiagnostic = (event, details = {}) =>
       logSocketDiagnostic(event, newSocket, {
@@ -316,8 +450,8 @@ export const BusProvider = ({ children }) => {
     );
 
     newSocket.on("bus-update", (data) => {
-      if (data.actionType === "PLAN_CHANGED") {
-        refreshBuses();
+      if (user?.role !== "student" && data.actionType === "PLAN_CHANGED") {
+        refreshBuses().catch(() => {});
       }
     });
 
@@ -342,11 +476,14 @@ export const BusProvider = ({ children }) => {
       newSocket.removeAllListeners();
       newSocket.disconnect();
     };
-  }, [token, refreshBuses]);
+  }, [token, refreshBuses, user?.role]);
 
   const getSocket = useCallback(() => socket, [socket]);
 
   const loadBuses = async () => {
+    if (user?.role === "student") {
+      return;
+    }
     dispatch({ type: "SET_LOADING", payload: true });
     try {
       const cacheKey = `buses_${user?.id || user?._id || "anonymous"}`;
@@ -362,6 +499,11 @@ export const BusProvider = ({ children }) => {
   };
 
   const selectPreviewBus = async (previewNumber) => {
+    if (user?.role === "student") {
+      const error = "Students can only access their assigned bus.";
+      dispatch({ type: "SET_ERROR", payload: error });
+      throw new Error(error);
+    }
     dispatch({ type: "SET_LOADING", payload: true });
     try {
       await fetchJson(
@@ -395,6 +537,7 @@ export const BusProvider = ({ children }) => {
   };
 
   const selectBus = (busNo) => {
+    if (user?.role === "student") return;
     const bus = state.buses.find((b) => b.busNo === busNo);
     dispatch({ type: "SET_SELECTED_BUS", payload: bus || null });
   };
@@ -402,23 +545,6 @@ export const BusProvider = ({ children }) => {
   const updateLocation = (location) => {
     dispatch({ type: "SET_LOCATION", payload: location });
   };
-
-  // Load persisted selected bus on startup
-  useEffect(() => {
-    const loadPersistedBus = async () => {
-      try {
-        const previewNumber = await AsyncStorage.getItem(
-          `selectedBusPreviewNumber_${user?.id || user?._id || "anonymous"}`,
-        );
-        if (previewNumber && token) {
-          selectPreviewBus(previewNumber);
-        }
-      } catch (error) {
-        console.error("Failed to load persisted bus:", error);
-      }
-    };
-    loadPersistedBus();
-  }, [token]);
 
   const value = {
     ...state,

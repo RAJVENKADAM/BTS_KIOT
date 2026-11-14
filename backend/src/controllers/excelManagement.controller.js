@@ -1,12 +1,19 @@
 const mongoose = require('mongoose');
+const { createHash } = require('node:crypto');
 const ExcelUpload = require('../models/ExcelUpload');
 const User = require('../models/User');
 const Bus = require('../models/Bus');
 const normalizeBusNumber = require('../utils/normalizeBusNumber');
 const { parseCursor, parsePagination } = require('../utils/pagination');
-const { disconnectUserSockets } = require('../socket');
 const { logSafeError } = require('../utils/safeErrorLog');
-const { runGpsConfigurationMutation } = require('../services/gpsConfigurationBarrier');
+const { recordAssignmentMutation } = require('../services/assignmentPropagation');
+const {
+  getMutationHeaders,
+  runIdempotentMutation,
+} = require('../services/mutationIdempotency');
+const { buildUserRevisionFilter } = require('../services/userRevision');
+const { preserveSuperadminAccess } = require('../services/superadminAccess');
+const { disconnectUserSockets } = require('../socket');
 
 // Get all Excel uploads for current user
 async function getAllExcelUploads(req, res) {
@@ -23,7 +30,7 @@ async function getAllExcelUploads(req, res) {
 
     const uploads = await ExcelUpload.find({ uploaded_by: userId })
       .sort({ createdAt: -1 })
-      .select('_id file_name custom_name uploaded_by createdAt updatedAt is_active import_status import_summary')
+      .select('_id file_name custom_name uploaded_by createdAt updatedAt is_active import_status import_summary revision')
       .lean();
 
     // Ensure frontend receives a stable `id` field and uses `custom_name` correctly.
@@ -76,104 +83,181 @@ async function getExcelUpload(req, res) {
   }
 }
 
-// Re-upload Excel file
-async function reuploadExcel(req, res) {
+// Delete Excel upload and cascade-wipe all linked users
+async function deleteExcelUpload(req, res) {
+  let affectedUserIds = [];
   try {
     const { id } = req.params;
     const userId = req.user?.id;
-    
-    if (!req.file || !req.file.buffer) {
-      return res.status(400).json({
-        success: false,
-        error: 'No file uploaded'
-      });
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, error: 'Invalid Excel upload ID.' });
     }
+    const { expectedVersion, idempotencyKey } = getMutationHeaders(req);
+    const mutation = await runIdempotentMutation({
+      scope: `excel-upload-delete:${id}`,
+      idempotencyKey,
+      actorId: userId,
+      request: { uploadId: id },
+      resourceId: id,
+      expectedVersion,
+      mutate: async (session) => {
+        let uploadQuery = ExcelUpload.findById(id)
+          .select('_id uploaded_by is_active revision');
+        if (session) uploadQuery = uploadQuery.session(session);
+        const upload = await uploadQuery.lean();
+        if (!upload) {
+          const error = new Error('Excel upload not found.');
+          error.statusCode = 404;
+          throw error;
+        }
 
-    // Update Excel upload record
-    const upload = await ExcelUpload.findByIdAndUpdate(
-      id,
-      {
-        file_name: req.file.originalname,
-        updatedAt: new Date()
+        const uploadRevision = upload.revision ?? 0;
+        if (uploadRevision !== expectedVersion || upload.is_active === false) {
+          const error = new Error('The Excel upload changed. Refresh and retry.');
+          error.code = 'RESOURCE_REVISION_CONFLICT';
+          error.statusCode = 409;
+          throw error;
+        }
+
+        const revisionFilter = expectedVersion === 0
+          ? { $or: [{ revision: 0 }, { revision: { $exists: false } }] }
+          : { revision: expectedVersion };
+        const deactivatedUpload = await ExcelUpload.findOneAndUpdate(
+          {
+            _id: id,
+            is_active: true,
+            ...revisionFilter,
+          },
+          {
+            $set: { is_active: false },
+            $inc: { revision: 1 },
+          },
+          { new: true, runValidators: true, ...(session ? { session } : {}) },
+        ).lean();
+        if (!deactivatedUpload) {
+          const error = new Error('The Excel upload changed. Refresh and retry.');
+          error.code = 'RESOURCE_REVISION_CONFLICT';
+          error.statusCode = 409;
+          throw error;
+        }
+
+        let linkedUsersQuery = User.find({
+          excel_upload_id: id,
+          is_active: true,
+          deleted_by_user: { $ne: true },
+        })
+          .select('_id role bus_no resourceVersion assignmentRevision')
+          .lean();
+        if (session) linkedUsersQuery = linkedUsersQuery.session(session);
+        const linkedUsers = await linkedUsersQuery;
+        const accessError = await preserveSuperadminAccess(linkedUsers, {
+          currentUserId: userId,
+          session,
+        });
+        if (accessError) {
+          const error = new Error(accessError);
+          error.code = 'SUPERADMIN_ACCESS_PROTECTED';
+          error.statusCode = 409;
+          throw error;
+        }
+        affectedUserIds = linkedUsers.map((user) => String(user._id));
+        const userOperations = linkedUsers.map((user) => ({
+          updateOne: {
+            filter: {
+              $and: [
+                buildUserRevisionFilter({
+                  userId: user._id,
+                  expectedResourceVersion: user.resourceVersion ?? 0,
+                  expectedAssignmentRevision: user.assignmentRevision ?? 0,
+                }),
+                {
+                  excel_upload_id: id,
+                  is_active: true,
+                  deleted_by_user: { $ne: true },
+                },
+              ],
+            },
+            update: {
+              $set: { is_active: false, deleted_by_user: true },
+              $inc: { resourceVersion: 1, assignmentRevision: 1 },
+            },
+            upsert: false,
+          },
+        }));
+        if (userOperations.length) {
+          const writeResult = await User.bulkWrite(userOperations, {
+            ordered: true,
+            ...(session ? { session } : {}),
+          });
+          if (writeResult.matchedCount !== userOperations.length) {
+            const error = new Error(
+              'Linked users changed. Refresh and retry the upload deactivation.',
+            );
+            error.code = 'ASSIGNMENT_REVISION_CONFLICT';
+            error.statusCode = 409;
+            throw error;
+          }
+        }
+
+        const mutationId = `excel-upload-delete:${createHash('sha256')
+          .update(`${id}\u0000${idempotencyKey}`)
+          .digest('hex')}`;
+        await recordAssignmentMutation({
+          session,
+          mutationId,
+          actorId: userId,
+          action: 'spreadsheet-users-deactivated',
+          resourceId: id,
+          requestId: idempotencyKey,
+          recipients: linkedUsers.map((user) => ({
+            user_id: user._id,
+            notification: null,
+          })),
+          previousState: {
+            upload_is_active: true,
+            upload_revision: uploadRevision,
+            user_ids: linkedUsers.map((user) => String(user._id)),
+          },
+          newState: {
+            upload_is_active: false,
+            upload_revision: deactivatedUpload.revision,
+            user_ids: linkedUsers.map((user) => String(user._id)),
+            users_is_active: false,
+            users_deleted_by_user: true,
+          },
+          resourceRevisionBefore: uploadRevision,
+          resourceRevisionAfter: deactivatedUpload.revision,
+        });
+
+        const response = {
+          success: true,
+          message: 'Excel upload and linked users were deactivated.',
+          deactivatedUsers: linkedUsers.length,
+          revision: deactivatedUpload.revision,
+        };
+        return { response, resourceVersion: deactivatedUpload.revision };
       },
-      { new: true }
-    );
-
-    if (!upload) {
-      return res.status(404).json({
-        success: false,
-        error: 'Excel upload not found'
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      message: 'Excel file re-uploaded successfully',
-      data: upload
     });
-  } catch (error) {
-    logSafeError('Re-upload Excel failed', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to update Excel upload.'
-    });
-  }
-}
 
-// Delete Excel upload and cascade-wipe all linked users
-async function deleteExcelUpload(req, res) {
-  try {
-    const { id } = req.params;
-    const userId = req.user.id;
-    
-    const upload = await ExcelUpload.findById(id);
-    
-    if (!upload) {
-      return res.status(404).json({
-        success: false,
-        error: 'Excel upload not found'
-      });
+    if (!mutation.duplicate && affectedUserIds.length) {
+      try {
+        disconnectUserSockets(affectedUserIds);
+      } catch (error) {
+        logSafeError('Committed Excel upload deactivation socket revocation failed', error);
+      }
     }
-
-    // Only user who uploaded or admin can delete
-    if (upload.uploaded_by.toString() !== userId && req.user.role !== 'superadmin') {
-      return res.status(403).json({
-        success: false,
-        error: 'Unauthorized to delete this upload'
-      });
-    }
-
-    // ❗ CRITICAL FIX: Soft-deactivate all users linked to this ExcelUpload
-    // Changed from User.deleteMany() to User.updateMany() to avoid permanent data loss.
-    // This sets is_active=false, deleted_by_user=true so users cannot log in,
-    // but their account records and history are preserved.
-    const { linkedUsers, updateResult } = await runGpsConfigurationMutation(async (session) => {
-      const options = session ? { session } : {};
-      let linkedUsersQuery = User.find({ excel_upload_id: id }).select('_id');
-      if (session) linkedUsersQuery = linkedUsersQuery.session(session);
-      const linkedUsers = await linkedUsersQuery.lean();
-      const updateResult = await User.updateMany(
-        { excel_upload_id: id },
-        { $set: { is_active: false, deleted_by_user: true } },
-        options,
-      );
-      await ExcelUpload.deleteOne({ _id: id }, options);
-      return { linkedUsers, updateResult };
-    });
-    if (linkedUsers.length) {
-      disconnectUserSockets(linkedUsers.map((user) => String(user._id)));
-    }
-
-    res.status(200).json({
-      success: true,
-      message: 'Excel upload deleted and associated users deactivated successfully',
-      deactivatedUsers: updateResult.modifiedCount || 0
+    return res.status(200).json({
+      ...mutation.response,
+      duplicate: mutation.duplicate,
     });
   } catch (error) {
     logSafeError('Delete Excel upload failed', error);
-    res.status(500).json({
+    return res.status(error.statusCode || 500).json({
       success: false,
-      error: 'Failed to delete Excel upload.'
+      error: error.statusCode
+        ? error.message
+        : 'Failed to deactivate the Excel upload. Please retry with the same key and content.',
+      ...(error.code ? { code: error.code } : {}),
     });
   }
 }
@@ -287,7 +371,6 @@ async function getUsersByExcelUpload(req, res) {
 module.exports = {
   getAllExcelUploads,
   getExcelUpload,
-  reuploadExcel,
   deleteExcelUpload,
   getUsersByExcelUpload
 };

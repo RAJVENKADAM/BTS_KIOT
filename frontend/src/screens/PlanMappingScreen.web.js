@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import planMappingApi from "../api/planMappingApi";
 import { useAuth } from "../context/AuthContext";
+import { getErrorMessage } from "../utils/errorHandler";
 
 const PLANS = ["PLAN A", "PLAN B", "PLAN C", "PLAN D"];
 
@@ -29,7 +30,7 @@ export default function PlanMappingScreen({ navigation }) {
         PLANS.includes(current) ? current : result.activePlan,
       );
     } catch (requestError) {
-      setError(requestError.message || "Could not load plan mappings.");
+      setError(getErrorMessage(requestError, "Could not load plan mappings."));
     } finally {
       setLoading(false);
     }
@@ -169,7 +170,8 @@ export default function PlanMappingScreen({ navigation }) {
       setMessage("Root route updated. Riders in this cluster have been notified.");
       await load();
     } catch (requestError) {
-      setError(requestError.message || "Could not update the root route.");
+      if (requestError?.status === 409) await load();
+      setError(getErrorMessage(requestError, "Could not update the root route."));
     } finally {
       setSaving(false);
     }
@@ -190,9 +192,10 @@ export default function PlanMappingScreen({ navigation }) {
       setMessage("Cluster saved. The mapping is now available to the bus service.");
       await load();
     } catch (requestError) {
+      if (requestError?.status === 409) await load();
       const uncovered = requestError.data?.uncoveredBuses;
       setError(
-        `${requestError.message || "Could not save this cluster."}${
+        `${getErrorMessage(requestError, "Could not save this cluster.")}${
           uncovered?.length
             ? ` Buses needing another assignment: ${uncovered.map((bus) => `Bus ${bus}`).join(", ")}.`
             : ""
@@ -214,7 +217,8 @@ export default function PlanMappingScreen({ navigation }) {
       if (form?.clusterId === cluster.id) setForm(null);
       await load();
     } catch (requestError) {
-      setError(requestError.message || "Could not delete this cluster.");
+      if (requestError?.status === 409) await load();
+      setError(getErrorMessage(requestError, "Could not delete this cluster."));
     } finally {
       setSaving(false);
     }
@@ -235,9 +239,10 @@ export default function PlanMappingScreen({ navigation }) {
       setMessage("Operating plan changed. Affected users have been notified.");
       await load();
     } catch (requestError) {
+      if (requestError?.status === 409) await load();
       const uncovered = requestError.data?.uncoveredBuses;
       setError(
-        `${requestError.message || "Could not change the operating plan."}${
+        `${getErrorMessage(requestError, "Could not change the operating plan.")}${
           uncovered?.length
             ? ` Map these buses first: ${uncovered.map((bus) => `Bus ${bus}`).join(", ")}.`
             : ""

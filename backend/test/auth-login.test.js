@@ -67,7 +67,11 @@ test('50 valid accounts sharing one campus IP can log in concurrently', async ()
   const emails = Array.from({ length: 50 }, (_, index) =>
     `campus-burst-${index}@example.edu`,
   );
-  for (const email of emails) users.set(email, makeUser(email));
+  for (const email of emails) {
+    users.set(email, makeUser(email, {
+      comparePasswordFn: async (password) => password === 'correct-password',
+    }));
+  }
 
   const originalInfo = console.info;
   console.info = () => {};
@@ -121,7 +125,7 @@ const responseDouble = () => ({
   },
 });
 
-const makeUser = (email, { delayMs = 0 } = {}) => ({
+const makeUser = (email, { delayMs = 0, comparePasswordFn = null } = {}) => ({
   _id: `id-${email}`,
   name: 'Test Student',
   email,
@@ -140,6 +144,7 @@ const makeUser = (email, { delayMs = 0 } = {}) => ({
       if (delayMs) {
         await new Promise((resolve) => setTimeout(resolve, delayMs));
       }
+      if (comparePasswordFn) return comparePasswordFn(password);
       return bcrypt.compare(password, await passwordHash);
     } finally {
       activePasswordChecks -= 1;

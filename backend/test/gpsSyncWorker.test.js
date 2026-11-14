@@ -9,8 +9,8 @@ const gpsWorkerOwnership = require("../src/services/gpsWorkerOwnership");
 const {
   GPS_SYNC_INTERVAL_MS,
   GpsSyncWorker,
-  buildUsersByBus,
   getBusLocation,
+  getLocationPublicationRooms,
 } = require("../src/workers/gpsSyncWorker");
 
 function query(result) {
@@ -862,6 +862,10 @@ test("single-instance GPS persistence uses the MongoDB ownership transaction wit
   assert.equal(updates[0].options.session, session);
   assert.equal(updates[0].operation.$set.publicationPending, true);
   assert.equal(updates[0].operation.$inc.locationVersion, 1n);
+  assert.deepEqual(updates[0].operation.$set.publicationRooms, [
+    "assigned_bus_bus-1",
+    "preview_PREVIEW-1",
+  ]);
 });
 
 test("one bus write failure does not prevent other buses from being processed", async () => {
@@ -942,29 +946,19 @@ test("failed location persistence queues no event while other buses continue", a
   );
 });
 
-test("starts bus and student reads independently and waits for both before location reads and writes", async () => {
-  const pendingBuses = deferred();
-  const pendingUsers = deferred();
-  const startedReads = [];
+test("GPS synchronization does not query student assignments", async () => {
   let locationReads = 0;
   let writes = 0;
   const worker = new GpsSyncWorker({
     BusModel: {
       find: (filter) => {
-        startedReads.push("buses");
         assert.deepEqual(filter, { status: "active" });
-        return query(pendingBuses.promise);
+        return query([{ _id: "bus-1", bus_no: "BUS-1" }]);
       },
     },
     UserModel: {
-      find: (filter) => {
-        startedReads.push("users");
-        assert.deepEqual(filter, {
-          role: "student",
-          is_active: true,
-          bus_no: { $nin: [null, ""] },
-        });
-        return query(pendingUsers.promise);
+      find: () => {
+        throw new Error("GPS synchronization must not scan students");
       },
     },
     LiveLocationModel: {
@@ -980,24 +974,12 @@ test("starts bus and student reads independently and waits for both before locat
     socketGetter: () => null,
   });
 
-  const cycle = worker.runCycle();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(startedReads, ["buses", "users"]);
-  assert.equal(locationReads, 0);
-  assert.equal(writes, 0);
-
-  pendingBuses.resolve([{ _id: "bus-1", bus_no: "BUS-1" }]);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(locationReads, 0);
-  assert.equal(writes, 0);
-
-  pendingUsers.resolve([{ _id: "student-1", bus_no: "BUS-1" }]);
-  await cycle;
+  await worker.runCycle();
   assert.equal(locationReads, 1);
   assert.equal(writes, 1);
 });
 
-for (const failingRead of ["buses", "users"]) {
+for (const failingRead of ["buses"]) {
   test(`${failingRead} read failure prevents writes and a subsequent cycle recovers`, async () => {
     let readAttempts = 0;
     const updates = [];
@@ -1041,10 +1023,8 @@ for (const failingRead of ["buses", "users"]) {
   });
 }
 
-test("a failed read keeps the cycle locked until the other read settles", async () => {
-  const pendingUsers = deferred();
+test("a failed bus read releases the cycle lock and a subsequent cycle recovers", async () => {
   let busReadAttempts = 0;
-  let userReadAttempts = 0;
   let providerCalls = 0;
   let writes = 0;
   const worker = new GpsSyncWorker({
@@ -1060,8 +1040,7 @@ test("a failed read keeps the cycle locked until the other read settles", async 
     },
     UserModel: {
       find: () => {
-        userReadAttempts++;
-        return query(userReadAttempts === 1 ? pendingUsers.promise : []);
+        throw new Error("GPS synchronization must not scan students");
       },
     },
     LiveLocationModel: {
@@ -1079,20 +1058,7 @@ test("a failed read keeps the cycle locked until the other read settles", async 
     socketGetter: () => null,
   });
 
-  let cycleSettled = false;
-  const failedCycle = worker.runCycle().finally(() => {
-    cycleSettled = true;
-  });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(cycleSettled, false);
-  assert.equal(worker.syncLock, true);
-
-  await worker.runCycle();
-  assert.equal(providerCalls, 1);
-  assert.equal(writes, 0);
-
-  pendingUsers.resolve([]);
-  await assert.rejects(failedCycle, /bus read failed/);
+  await assert.rejects(worker.runCycle(), /bus read failed/);
   assert.equal(worker.syncLock, false);
 
   await worker.runCycle();
@@ -1147,7 +1113,7 @@ test("cycle observability reports timings, counts, failures, and skipped ticks w
   assert.ok(skipped);
   assert.equal(completed.status, "COMPLETED_WITH_ERRORS");
   assert.equal(completed.activeBusCount, 2);
-  assert.equal(completed.assignedStudentCount, 3);
+  assert.equal("assignedStudentCount" in completed, false);
   assert.equal(completed.normalizedProviderRecordCount, 2);
   assert.equal(completed.successfulWrites, 1);
   assert.equal(completed.failedWrites, 1);
@@ -1159,7 +1125,6 @@ test("cycle observability reports timings, counts, failures, and skipped ticks w
     "durationMs",
     "providerDurationMs",
     "busQueryDurationMs",
-    "studentQueryDurationMs",
     "locationReadDurationMs",
     "locationWriteDurationMs",
   ]) {
@@ -1260,12 +1225,15 @@ test("matches primary and alias device IDs before registration numbers", () => {
   );
 });
 
-test("deduplicates assigned user room identifiers", () => {
-  const usersByBus = buildUsersByBus([
-    { _id: "student-1", bus_no: " bus-1 " },
-    { _id: "student-1", bus_no: "BUS-1" },
-  ]);
-  assert.deepEqual([...usersByBus.get("BUS-1")], ["student-1"]);
+test("GPS publication rooms are bus-scoped and contain no user room identifiers", () => {
+  assert.deepEqual(
+    getLocationPublicationRooms({
+      _id: "bus-1",
+      bus_no: "BUS-1",
+      preview_number: "4",
+    }),
+    ["assigned_bus_bus-1", "preview_4"],
+  );
 });
 
 test("bulk provider response rejects invalid coordinates and indexes registration-only records", async () => {

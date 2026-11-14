@@ -5,7 +5,12 @@
 import { API_BASE_URL } from "./api";
 import { fetchJson, getErrorMessage } from "../utils/errorHandler";
 
-export async function importUsersExcelJson({ token, users, excelCustomName }) {
+export async function importUsersExcelJson({
+  token,
+  users,
+  excelCustomName,
+  idempotencyKey,
+}) {
   const data = await fetchJson(`${API_BASE_URL}/api/superadmin/import-users`, {
     timeoutMs: 120000,
     method: "POST",
@@ -14,6 +19,7 @@ export async function importUsersExcelJson({ token, users, excelCustomName }) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ users, excelCustomName }),
+    idempotencyKey,
   });
   return data;
 }
@@ -22,6 +28,7 @@ export async function uploadUsersExcelWorkbook({
   token,
   file,
   excelCustomName,
+  idempotencyKey,
 }) {
   const formData = new FormData();
   const fileName = file.name || "users.xlsx";
@@ -46,10 +53,25 @@ export async function uploadUsersExcelWorkbook({
       Authorization: `******
     },
     body: formData,
+    idempotencyKey,
   });
 }
 
-export async function importBusRoutesExcelJson({ token, busPayload }) {
+export async function getImportOperation({ token, uploadId }) {
+  return fetchJson(
+    `${API_BASE_URL}/api/superadmin/imports/${encodeURIComponent(uploadId)}`,
+    {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: "no-store",
+    },
+  );
+}
+
+export async function importBusRoutesExcelJson({
+  token,
+  busPayload,
+  idempotencyKey,
+}) {
   const data = await fetchJson(`${API_BASE_URL}/api/bus/import-routes`, {
     method: "POST",
     headers: {
@@ -57,6 +79,7 @@ export async function importBusRoutesExcelJson({ token, busPayload }) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify(busPayload),
+    idempotencyKey,
   });
   return data;
 }

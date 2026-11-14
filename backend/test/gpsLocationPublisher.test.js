@@ -8,7 +8,7 @@ function createModel(overrides = {}) {
   const record = {
     _id: "bus-live-1",
     publicationPending: true,
-    publicationRooms: ["preview_4", "user_student-1"],
+    publicationRooms: ["assigned_bus_bus-live-1", "preview_4"],
     publicationPreviewNumber: "4",
     publicationClaimId: null,
     publicationClaimUntil: null,

@@ -1,17 +1,26 @@
 const Bus = require('../models/Bus');
 const BusRoute = require('../models/BusRoute');
+const BusLiveLocation = require('../models/BusLiveLocation');
 const StopMaster = require('../models/StopMaster');
 const User = require('../models/User');
-const Notification = require('../models/Notification');
 const BusChange = require('../models/BusChange');
-const { getIO } = require('../socket');
 const { randomUUID } = require("node:crypto");
-const { runGpsConfigurationMutation } = require("../services/gpsConfigurationBarrier");
+const { recordAssignmentMutation } = require("../services/assignmentPropagation");
+const {
+  checkIdempotentReplay,
+  getMutationHeaders,
+  runIdempotentMutation,
+} = require("../services/mutationIdempotency");
 const { normalizeArrivalTime } = require("../utils/planMapping");
 const normalizeStopNameKey = require("../utils/normalizeStopName");
 const getRouteUpdateImpactBuses = require("../utils/routeUpdateImpact");
 const normalizeBusNumber = require("../utils/normalizeBusNumber");
 const { logSafeError } = require("../utils/safeErrorLog");
+const importLedger = require("../services/importLedger");
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 function isNonEmptyString(v) {
   return typeof v === 'string' && v.trim().length > 0;
@@ -39,13 +48,44 @@ function buildRouteKey(busId, plan_name, stop_order) {
   return `${busId}__${plan_name}__${stop_order}`;
 }
 
-async function notifyStudentsOfRouteUpdate(updatedBus) {
-  const incomingChanges = await Bus.find({
+async function incrementAssignmentRevision(student, session) {
+  const expectedRevision = student.assignmentRevision ?? 0;
+  const conditions = [{ _id: student._id }];
+  if (Object.hasOwn(student, "bus_no")) {
+    conditions.push({ bus_no: student.bus_no });
+  }
+  conditions.push(
+    expectedRevision === 0
+      ? {
+          $or: [
+            { assignmentRevision: 0 },
+            { assignmentRevision: { $exists: false } },
+          ],
+        }
+      : { assignmentRevision: expectedRevision },
+  );
+  const result = await User.updateOne(
+    { $and: conditions },
+    { $inc: { assignmentRevision: 1 } },
+    session ? { session } : {},
+  );
+  if (result.matchedCount !== 1) {
+    const error = new Error(
+      "A student assignment changed during the route import. Reload and retry.",
+    );
+    error.code = "BUS_ASSIGNMENT_CONFLICT";
+    error.statusCode = 409;
+    throw error;
+  }
+}
+
+async function getRouteUpdateRecipients(updatedBus, session) {
+  let incomingChangesQuery = Bus.find({
     altered_to_bus_id: updatedBus._id,
     alteration_type: { $in: ["alter", "combine"] },
-  })
-    .select("_id bus_no preview_number alteration_type alteration_route_source")
-    .lean();
+  }).select("_id bus_no preview_number alteration_type alteration_route_source");
+  if (session) incomingChangesQuery = incomingChangesQuery.session(session);
+  const incomingChanges = await incomingChangesQuery.lean();
   const affectedBuses = getRouteUpdateImpactBuses(
     updatedBus,
     incomingChanges,
@@ -59,9 +99,9 @@ async function notifyStudentsOfRouteUpdate(updatedBus) {
       ),
     ),
   ];
-  if (!identifiers.length) return;
+  if (!identifiers.length) return [];
 
-  const users = await User.find({
+  let usersQuery = User.find({
     bus_no: {
       $in: identifiers.map(
         (identifier) =>
@@ -74,38 +114,51 @@ async function notifyStudentsOfRouteUpdate(updatedBus) {
     role: "student",
     is_active: true,
   }).select("_id");
-  if (!users.length) return;
+  if (session) usersQuery = usersQuery.session(session);
+  const users = await usersQuery;
+  if (!users.length) return [];
 
   const isCombined =
     updatedBus.alteration_type === "combine" ||
     affectedBuses.some((bus) => bus.alteration_type === "combine");
   const notificationType = isCombined ? "bus_combined" : "bus_altered";
   const message = `Route stops for Bus ${updatedBus.preview_number ?? updatedBus.bus_no} have been updated. Check your bus route for the latest stops.`;
-  await Notification.insertMany(
-    users.map((user) => ({
+  return users.map((user) => ({
       user_id: user._id,
-      type: notificationType,
-      message,
-      new_bus_no: updatedBus.bus_no,
-      new_preview: updatedBus.preview_number ?? null,
-    })),
-  );
-
-  const io = getIO();
-  if (io) {
-    users.forEach((user) => {
-      io.to(`user_${String(user._id)}`).emit("notification", {
+      notification: {
         type: notificationType,
         message,
-        newPreview: updatedBus.preview_number ?? null,
-      });
-    });
-  }
+        new_bus_no: updatedBus.bus_no,
+        new_preview: updatedBus.preview_number ?? null,
+      },
+    }));
 }
 
 async function importBusRoutes(req, res) {
+  let ledgerUploadId;
+  let ledgerOwner;
+  let ledgerRow;
   try {
     const payload = req.body || {};
+    const { expectedVersion, idempotencyKey } = getMutationHeaders(req);
+    const request = {
+      ...payload,
+      expectedVersion,
+    };
+    const scope = `bus-routes:${String(req.user?.id || "")}`;
+    const replay = await checkIdempotentReplay({
+      scope,
+      idempotencyKey,
+      request,
+      expectedVersion,
+    });
+    if (replay) {
+      return res.status(200).json({
+        success: true,
+        ...replay.response,
+        duplicate: true,
+      });
+    }
 
     const {
       busNo,
@@ -126,7 +179,7 @@ async function importBusRoutes(req, res) {
     const normalizedBusNoValue = normalizeBusNo(busNo);
     const busFilter = { bus_no: normalizedBusNoValue };
     const existingBus = await Bus.findOne(busFilter)
-      .select("_id bus_no preview_number altered_to_bus_id alteration_type alteration_route_source")
+      .select("_id bus_no revision bus_name preview_number gps_device_id reg_no status altered_to_bus_id alteration_type alteration_route_source")
       .lean();
     if (existingBus) {
       const activeChange = await BusChange.findOne({
@@ -233,6 +286,7 @@ async function importBusRoutes(req, res) {
       stopsByName.set(key, [...(stopsByName.get(key) || []), stop]);
     });
     const pendingStopsByName = new Map();
+    const pendingStops = [];
     const resolvedStops = [];
     for (const row of good) {
       let stop = row.stopId ? stopsById.get(String(row.stopId)) : null;
@@ -251,152 +305,532 @@ async function importBusRoutes(req, res) {
         const key = normalizeStopNameKey(row.stop_name);
         stop = pendingStopsByName.get(key);
         if (!stop) {
-          stop = await StopMaster.create({
+          stop = {
             stopId: `STOP-${randomUUID()}`,
             name: row.stop_name.trim().replace(/\s+/g, " "),
             source: "EXISTING_STOP",
             status: "PENDING",
-          });
+          };
+          pendingStops.push(stop);
           pendingStopsByName.set(key, stop);
         }
       }
       resolvedStops.push({ ...row, stopId: stop.stopId, stop_name: stop.name });
     }
 
-    const busUpdate = {
-      $set: {
-        bus_name: busNo,
-        gps_device_id,
-        reg_no: regNo || null,
-        preview_number: previewNumber || null,
-      },
-      $setOnInsert: { status: "active" },
-    };
-    const bus = await runGpsConfigurationMutation(async (session) => {
-      await Bus.findOneAndUpdate(busFilter, busUpdate, {
-        upsert: true,
-        new: true,
-        ...(session ? { session } : {}),
-      });
-      const query = Bus.findOne({ bus_no: normalizedBusNoValue });
-      if (session) query.session(session);
-      return query;
+    const staged = await importLedger.createOrResumeImport({
+      actorId: req.user?.id,
+      importType: "bus-routes",
+      idempotencyKey,
+      content: request,
+      rows: [{
+        rowNumber: 1,
+        identity: normalizedBusNoValue,
+        expectedVersion,
+        expectedVersionCaptured: true,
+        input: request,
+      }],
     });
-    if (!bus) throw new Error('Bus upsert failed');
-    const previousRoutes = replaceRoutes
-      ? await BusRoute.find({ bus_id: bus._id })
-          .select("plan_name stop_name stop_order arrival_time")
-          .lean()
-      : [];
-    const previousArrivalByStop = new Map(
-      previousRoutes.map((row) => [
-        `${normalizePlanName(row.plan_name)}:${row.stop_order}:${normalizeStopNameKey(row.stop_name)}`,
-        row.arrival_time,
-      ]),
-    );
-    const goodWithBus = resolvedStops.map((row) => ({
-      ...row,
-      bus_id: bus._id,
-      arrival_time:
-        row.arrival_time ||
-        previousArrivalByStop.get(
-          `${normalizePlanName(row.plan_name)}:${row.stop_order}:${normalizeStopNameKey(row.stop_name)}`,
-        ) ||
-        null,
-    }));
-
-    // If replaceRoutes is set, remove existing routes so edits fully replace old data.
-    if (replaceRoutes) {
-      await BusRoute.deleteMany({ bus_id: bus._id });
-    }
-
-    // Bus created/updated with no routes → success (routes can be added later).
-    if (!goodWithBus.length) {
-      if (existingBus && replaceRoutes) {
-        await notifyStudentsOfRouteUpdate(bus);
-      }
+    ledgerUploadId = staged.uploadId;
+    if (staged.operation?.status === "completed" && staged.operation.result) {
       return res.status(200).json({
         success: true,
-        busNo: normalizedBusNoValue,
-        previewNumber: bus.preview_number,
-        summary,
+        ...staged.operation.result,
+        uploadId: ledgerUploadId,
+        duplicate: true,
       });
     }
-
-    // Existing routes for upsert comparison
-    const existing = await BusRoute.find({ bus_id: bus._id, plan_name: { $in: Array.from(new Set(goodWithBus.map((g) => g.plan_name))) } }).lean();
-    const existingKeyToRow = new Map(
-      existing.map((r) => [buildRouteKey(bus._id.toString(), r.plan_name, r.stop_order), r])
-    );
-
-    const ops = [];
-
-    for (const row of goodWithBus) {
-      const key = buildRouteKey(bus._id.toString(), row.plan_name, row.stop_order);
-      const cur = existingKeyToRow.get(key);
-      if (!cur) {
-        ops.push({
-          updateOne: {
-            filter: { bus_id: bus._id, plan_name: row.plan_name, stop_order: row.stop_order },
-            update: {
-              $set: {
-                bus_id: bus._id,
-                plan_name: row.plan_name,
-                stop_name: row.stop_name,
-                stop_order: row.stop_order,
-                stopId: row.stopId,
-                ...(row.arrival_time ? { arrival_time: row.arrival_time } : {}),
-              },
-            },
-            upsert: true,
-          },
+    if (staged.staging) {
+      return res.status(202).json({
+        success: true,
+        status: "processing",
+        uploadId: ledgerUploadId,
+      });
+    }
+    ledgerOwner = randomUUID();
+    ledgerRow = await importLedger.claimNextRow(ledgerUploadId, ledgerOwner);
+    if (!ledgerRow) {
+      const current = await importLedger.finalizeImport(ledgerUploadId);
+      if (current?.status === "completed" && current.result) {
+        return res.status(200).json({
+          success: true,
+          ...current.result,
+          uploadId: ledgerUploadId,
+          duplicate: true,
         });
-        continue;
       }
-
-      const unchanged =
-        cur.stop_name === row.stop_name &&
-        cur.stop_order === row.stop_order &&
-        cur.plan_name === row.plan_name &&
-        cur.stopId === row.stopId &&
-        (!row.arrival_time || cur.arrival_time === row.arrival_time);
-      if (unchanged) {
-        summary.unchangedRows += 1;
-        continue;
-      }
-
-      ops.push({
-        updateOne: {
-          filter: { bus_id: bus._id, plan_name: row.plan_name, stop_order: row.stop_order },
-          update: {
-            $set: {
-              stop_name: row.stop_name,
-              stopId: row.stopId,
-              ...(row.arrival_time ? { arrival_time: row.arrival_time } : {}),
-            },
-          },
-          upsert: false,
-        },
+      return res.status(202).json({
+        success: true,
+        status: current?.status || "processing",
+        uploadId: ledgerUploadId,
       });
     }
 
-    if (ops.length) {
-      const result = await BusRoute.bulkWrite(ops, { ordered: false });
-      summary.insertedRows = (result.upsertedCount || 0);
-      summary.updatedRows = (result.modifiedCount || 0);
-    }
+    const mutation = await runIdempotentMutation({
+      scope,
+      idempotencyKey,
+      actorId: req.user?.id,
+      request,
+      resourceId: existingBus?._id || normalizedBusNoValue,
+      expectedVersion,
+      mutate: async (session) => {
+        const options = session ? { session } : {};
+        if (pendingStops.length) {
+          await StopMaster.create(pendingStops, options);
+        }
 
-    if (existingBus && (replaceRoutes || ops.length)) {
-      await notifyStudentsOfRouteUpdate(bus);
-    }
+        let currentBusQuery = Bus.findOne(busFilter)
+          .select("_id bus_no revision bus_name preview_number gps_device_id reg_no status");
+        if (session) currentBusQuery = currentBusQuery.session(session);
+        const busBeforeMutation = await currentBusQuery.lean();
+        let persistedBus;
+        if (busBeforeMutation) {
+          const revisionFilter = expectedVersion === 0
+            ? {
+                $or: [
+                  { revision: 0 },
+                  { revision: { $exists: false } },
+                ],
+              }
+            : { revision: expectedVersion };
+          persistedBus = await Bus.findOneAndUpdate(
+            {
+              $and: [
+                { _id: busBeforeMutation._id },
+                revisionFilter,
+              ],
+            },
+            {
+              $set: {
+                bus_name: busNo,
+                gps_device_id,
+                reg_no: regNo || null,
+                preview_number: previewNumber || null,
+              },
+              $inc: { revision: 1 },
+            },
+            {
+              new: true,
+              runValidators: true,
+              ...options,
+            },
+          ).lean();
+          if (!persistedBus) {
+            const error = new Error(
+              "The bus changed. Reload before importing routes.",
+            );
+            error.code = "BUS_REVISION_CONFLICT";
+            error.statusCode = 409;
+            throw error;
+          }
+        } else {
+          if (expectedVersion !== 0) {
+            const error = new Error(
+              "A new bus must use expectedVersion 0.",
+            );
+            error.code = "BUS_REVISION_CONFLICT";
+            error.statusCode = 409;
+            throw error;
+          }
+          const [createdBus] = await Bus.create(
+            [{
+              ...busFilter,
+              bus_name: busNo,
+              gps_device_id,
+              reg_no: regNo || null,
+              preview_number: previewNumber || null,
+              status: "active",
+              revision: 0,
+            }],
+            options,
+          );
+          persistedBus = createdBus.toObject();
+        }
+        if (
+          busBeforeMutation &&
+          String(busBeforeMutation.gps_device_id || "") !==
+            String(persistedBus.gps_device_id || "")
+        ) {
+          await BusLiveLocation.deleteOne(
+            { bus_id: persistedBus._id },
+            options,
+          );
+        }
 
-    return res.status(200).json({ success: true, summary });
+        const desiredBusState = {
+          bus_no: normalizedBusNoValue,
+          bus_name: busNo,
+          gps_device_id,
+          reg_no: regNo || null,
+          preview_number: previewNumber || null,
+          status: busBeforeMutation?.status || "active",
+        };
+        const metadataChanged =
+          !busBeforeMutation ||
+          ["bus_name", "gps_device_id", "reg_no", "preview_number"].some(
+            (field) =>
+              String(busBeforeMutation[field] ?? "") !==
+              String(desiredBusState[field] ?? ""),
+          );
+        const assignmentIdentityChanged =
+          !busBeforeMutation ||
+          String(busBeforeMutation.preview_number ?? "") !==
+            String(desiredBusState.preview_number ?? "");
+        let affectedStudents = [];
+        let assignmentSnapshots = [];
+        let priorCandidates = [];
+        if (assignmentIdentityChanged) {
+          const identifiers = [
+            normalizedBusNoValue,
+            busBeforeMutation?.preview_number,
+            desiredBusState.preview_number,
+          ].filter((value) => value !== null && value !== undefined && value !== "");
+          const identifierPatterns = [...new Set(identifiers.map(String))].map(
+            (identifier) => new RegExp(`^${escapeRegExp(identifier)}$`, "i"),
+          );
+          let studentsQuery = User.find({
+            bus_no: { $in: identifierPatterns },
+            role: "student",
+            is_active: true,
+            deleted_by_user: { $ne: true },
+          }).select("_id bus_no assignmentRevision");
+          let busesQuery = Bus.find({
+            $or: [
+              { bus_no: { $in: identifierPatterns } },
+              { preview_number: { $in: identifierPatterns } },
+            ],
+          }).select("_id bus_no preview_number status");
+          if (session) {
+            studentsQuery = studentsQuery.session(session);
+            busesQuery = busesQuery.session(session);
+          }
+          affectedStudents = await studentsQuery.lean();
+          priorCandidates = await busesQuery.lean();
+        }
+
+        if (assignmentIdentityChanged) {
+          const newCandidates = priorCandidates.filter(
+            (candidate) =>
+              String(candidate._id) !== String(busBeforeMutation?._id || ""),
+          );
+          newCandidates.push(persistedBus);
+          const resolveAlias = (value, candidates) => {
+            if (value === null || value === undefined || value === "") return null;
+            const normalized = normalizeBusNo(value);
+            return (
+              candidates.find(
+                (candidate) => normalizeBusNo(candidate.bus_no) === normalized,
+              ) ||
+              candidates.find(
+                (candidate) =>
+                  String(candidate.preview_number ?? "") === String(value),
+              ) ||
+              null
+            );
+          };
+          assignmentSnapshots = affectedStudents.map((student) => {
+            const beforeBus = resolveAlias(student.bus_no, priorCandidates);
+            const afterBus = resolveAlias(student.bus_no, newCandidates);
+            return {
+              user_id: student._id,
+              bus_no: student.bus_no ?? null,
+              previous_effective_bus_id: beforeBus?._id ?? null,
+              new_effective_bus_id: afterBus?._id ?? null,
+              previous_assignment_revision: student.assignmentRevision ?? 0,
+              new_assignment_revision: (student.assignmentRevision ?? 0) + 1,
+              assignment_changed:
+                String(beforeBus?._id ?? "") !== String(afterBus?._id ?? ""),
+            };
+          });
+          assignmentSnapshots = assignmentSnapshots.filter(
+            (snapshot) => snapshot.assignment_changed,
+          );
+          affectedStudents = affectedStudents.filter((student) =>
+            assignmentSnapshots.some(
+              (snapshot) =>
+                String(snapshot.user_id) === String(student._id),
+            ),
+          );
+          for (const student of affectedStudents) {
+            await incrementAssignmentRevision(student, session);
+          }
+        }
+
+        if (metadataChanged) {
+          await recordAssignmentMutation({
+            session,
+            actorId: req.user?.id,
+            action: busBeforeMutation
+              ? "bus-metadata-updated-by-route-import"
+              : "bus-created-by-route-import",
+            resourceId: persistedBus._id,
+            requestId: idempotencyKey,
+            busRevisionBefore: busBeforeMutation?.revision ?? null,
+            busRevisionAfter: persistedBus.revision ?? 0,
+            recipients: affectedStudents.map((student) => ({
+              user_id: student._id,
+              notification: null,
+            })),
+            previousState: {
+              bus: busBeforeMutation || null,
+              assignments: assignmentSnapshots.map((assignment) => ({
+                user_id: assignment.user_id,
+                bus_no: assignment.bus_no,
+                effective_bus_id: assignment.previous_effective_bus_id,
+                assignment_revision: assignment.previous_assignment_revision,
+              })),
+            },
+            newState: {
+              bus: persistedBus,
+              assignments: assignmentSnapshots.map((assignment) => ({
+                user_id: assignment.user_id,
+                bus_no: assignment.bus_no,
+                effective_bus_id: assignment.new_effective_bus_id,
+                assignment_revision: assignment.new_assignment_revision,
+              })),
+            },
+          });
+        }
+
+        let previousRoutesQuery = BusRoute.find({ bus_id: persistedBus._id })
+          .select("plan_name stop_name stop_order arrival_time");
+        if (session) previousRoutesQuery = previousRoutesQuery.session(session);
+        const previousRoutes = replaceRoutes
+          ? await previousRoutesQuery.lean()
+          : [];
+        const previousArrivalByStop = new Map(
+          previousRoutes.map((row) => [
+            `${normalizePlanName(row.plan_name)}:${row.stop_order}:${normalizeStopNameKey(row.stop_name)}`,
+            row.arrival_time,
+          ]),
+        );
+        const goodWithBus = resolvedStops.map((row) => ({
+          ...row,
+          bus_id: persistedBus._id,
+          arrival_time:
+            row.arrival_time ||
+            previousArrivalByStop.get(
+              `${normalizePlanName(row.plan_name)}:${row.stop_order}:${normalizeStopNameKey(row.stop_name)}`,
+            ) ||
+            null,
+        }));
+
+        if (!goodWithBus.length) {
+          if (replaceRoutes) {
+            const recipients = busBeforeMutation
+              ? await getRouteUpdateRecipients(persistedBus, session)
+              : [];
+            await BusRoute.deleteMany({ bus_id: persistedBus._id }, options);
+            await recordAssignmentMutation({
+              session,
+              actorId: req.user?.id,
+              action: "bus-routes-replaced",
+              resourceId: persistedBus._id,
+              requestId: idempotencyKey,
+              recipients,
+              previousState: { routes: previousRoutes },
+              newState: { routes: [] },
+            });
+          }
+          const response = {
+            busNo: normalizedBusNoValue,
+            previewNumber: persistedBus.preview_number,
+            summary,
+          };
+          await importLedger.completeClaimedRow({
+            uploadId: ledgerUploadId,
+            rowId: ledgerRow._id,
+            owner: ledgerOwner,
+            session,
+            resultResourceId: persistedBus._id,
+            result: response,
+          });
+          return {
+            response,
+            resourceVersion: persistedBus.revision ?? 0,
+          };
+        }
+
+        let existingRoutesQuery = replaceRoutes
+          ? null
+          : BusRoute.find({
+              bus_id: persistedBus._id,
+              plan_name: {
+                $in: Array.from(
+                  new Set(goodWithBus.map((row) => row.plan_name)),
+                ),
+              },
+            });
+        if (session && existingRoutesQuery) {
+          existingRoutesQuery = existingRoutesQuery.session(session);
+        }
+        const existing = existingRoutesQuery
+          ? await existingRoutesQuery.lean()
+          : [];
+        const existingKeyToRow = new Map(
+          existing.map((row) => [
+            buildRouteKey(
+              persistedBus._id.toString(),
+              row.plan_name,
+              row.stop_order,
+            ),
+            row,
+          ]),
+        );
+        const ops = [];
+        for (const row of goodWithBus) {
+          const key = buildRouteKey(
+            persistedBus._id.toString(),
+            row.plan_name,
+            row.stop_order,
+          );
+          const current = existingKeyToRow.get(key);
+          if (!current) {
+            ops.push({
+              updateOne: {
+                filter: {
+                  bus_id: persistedBus._id,
+                  plan_name: row.plan_name,
+                  stop_order: row.stop_order,
+                },
+                update: {
+                  $set: {
+                    bus_id: persistedBus._id,
+                    plan_name: row.plan_name,
+                    stop_name: row.stop_name,
+                    stop_order: row.stop_order,
+                    stopId: row.stopId,
+                    ...(row.arrival_time
+                      ? { arrival_time: row.arrival_time }
+                      : {}),
+                  },
+                },
+                upsert: true,
+              },
+            });
+            continue;
+          }
+
+          const unchanged =
+            current.stop_name === row.stop_name &&
+            current.stop_order === row.stop_order &&
+            current.plan_name === row.plan_name &&
+            current.stopId === row.stopId &&
+            (!row.arrival_time || current.arrival_time === row.arrival_time);
+          if (unchanged) {
+            summary.unchangedRows += 1;
+            continue;
+          }
+          ops.push({
+            updateOne: {
+              filter: {
+                bus_id: persistedBus._id,
+                plan_name: row.plan_name,
+                stop_order: row.stop_order,
+              },
+              update: {
+                $set: {
+                  stop_name: row.stop_name,
+                  stopId: row.stopId,
+                  ...(row.arrival_time
+                    ? { arrival_time: row.arrival_time }
+                    : {}),
+                },
+              },
+              upsert: false,
+            },
+          });
+        }
+
+        if (replaceRoutes || ops.length) {
+          const recipients = busBeforeMutation
+            ? await getRouteUpdateRecipients(persistedBus, session)
+            : [];
+          if (replaceRoutes) {
+            await BusRoute.deleteMany({ bus_id: persistedBus._id }, options);
+          }
+          const writeResult = ops.length
+            ? await BusRoute.bulkWrite(ops, {
+                ordered: false,
+                ...options,
+              })
+            : null;
+          await recordAssignmentMutation({
+            session,
+            actorId: req.user?.id,
+            action: replaceRoutes ? "bus-routes-replaced" : "bus-routes-updated",
+            resourceId: persistedBus._id,
+            requestId: idempotencyKey,
+            recipients,
+            previousState: { routes: replaceRoutes ? previousRoutes : existing },
+            newState: { routes: goodWithBus },
+          });
+          summary.insertedRows = writeResult?.upsertedCount || 0;
+          summary.updatedRows = writeResult?.modifiedCount || 0;
+        }
+
+        const response = {
+          busNo: normalizedBusNoValue,
+          previewNumber: persistedBus.preview_number,
+          summary,
+        };
+        await importLedger.completeClaimedRow({
+          uploadId: ledgerUploadId,
+          rowId: ledgerRow._id,
+          owner: ledgerOwner,
+          session,
+          resultResourceId: persistedBus._id,
+          result: response,
+        });
+        return {
+          response,
+          resourceVersion: persistedBus.revision ?? 0,
+        };
+      },
+    });
+
+    const finalized = await importLedger.finalizeImport(
+      ledgerUploadId,
+      mutation.response,
+    );
+    return res.status(200).json({
+      success: true,
+      ...mutation.response,
+      uploadId: ledgerUploadId,
+      status: finalized?.status || "completed",
+      duplicate: mutation.duplicate,
+    });
   } catch (error) {
+    if (ledgerUploadId && ledgerRow && ledgerOwner) {
+      try {
+        await importLedger.failClaimedRow({
+          uploadId: ledgerUploadId,
+          claimedRowId: ledgerRow._id,
+          owner: ledgerOwner,
+          category: error?.statusCode === 409 ? "revision_conflict" : "processing",
+          message:
+            error?.statusCode === 409
+              ? "The bus or assignment state changed. Reload and retry with a new operation."
+              : "The route import did not complete and can be retried with the same key and content.",
+          conflict: error?.statusCode === 409,
+          retryable: error?.statusCode !== 409,
+        });
+        await importLedger.finalizeImport(ledgerUploadId);
+      } catch (ledgerError) {
+        logSafeError("Bus route import ledger update failed", ledgerError);
+      }
+    }
     logSafeError('importBusRoutes failed', error);
-    return res.status(500).json({
+    const statusCode = error.statusCode || (error.code === 11000 ? 409 : 500);
+    return res.status(statusCode).json({
       success: false,
       summary: { totalRows: 0, insertedRows: 0, updatedRows: 0, unchangedRows: 0, failedRows: 1 },
-      error: 'Route import failed. Please try again.',
+      error: error.statusCode
+        ? error.message
+        : error.code === 11000
+          ? "Bus number, preview number, or GPS device ID is already in use."
+          : 'Route import failed. Please try again.',
+      ...(error.code ? { code: error.code } : {}),
     });
   }
 }

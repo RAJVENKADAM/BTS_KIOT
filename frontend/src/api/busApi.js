@@ -2,7 +2,27 @@
 import { API_BASE_URL } from "./api";
 import { fetchJson } from "../utils/errorHandler";
 
+function busMutationHeaders(token, expectedVersion) {
+  return {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+    "If-Match": `"${expectedVersion}"`,
+  };
+}
+
 export const busApi = {
+  getMyAssignment: async (token) => {
+    const data = await fetchJson(`${API_BASE_URL}/api/bus/my-assignment`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!data.success) {
+      const error = new Error(data.error || "Could not load your bus assignment.");
+      error.code = "ASSIGNMENT_UNAVAILABLE";
+      throw error;
+    }
+    return data;
+  },
+
   /**
    * Track bus by preview number (live GPS) - legacy
    */
@@ -66,7 +86,13 @@ export const busApi = {
     return data;
   },
 
-  updatePreview: async (token, busNo, previewNumber) => {
+  updatePreview: async (
+    token,
+    busNo,
+    previewNumber,
+    expectedVersion,
+    idempotencyKey,
+  ) => {
     const data = await fetchJson(
       `${API_BASE_URL}/api/bus/update-preview/${busNo}`,
       {
@@ -75,11 +101,27 @@ export const busApi = {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ previewNumber }),
+        body: JSON.stringify({ previewNumber, expectedVersion }),
+        idempotencyKey,
       },
     );
     return data;
   },
+
+  updateBusNumber: async (
+    token,
+    busNo,
+    { newBusNo, previewNumber, expectedVersion, idempotencyKey },
+  ) =>
+    fetchJson(
+      `${API_BASE_URL}/api/bus/update-bus-number/${encodeURIComponent(busNo)}`,
+      {
+        method: "PUT",
+        headers: busMutationHeaders(token, expectedVersion),
+        body: JSON.stringify({ newBusNo, previewNumber, expectedVersion }),
+        idempotencyKey,
+      },
+    ),
 
   // Get plans + stops for a bus (current plan, plan names, all stops)
   getBusRoutes: async (token, busNo) => {
@@ -125,20 +167,23 @@ export const busApi = {
     return data;
   },
 
-  restoreAltered: async (token, busNo) =>
+  restoreAltered: async (token, busNo, expectedVersion, idempotencyKey) =>
     fetchJson(`${API_BASE_URL}/api/bus/restore-altered/${encodeURIComponent(busNo)}`, {
       method: "PUT",
+      body: JSON.stringify({ expectedVersion }),
+      idempotencyKey,
       headers: { Authorization: `Bearer ${token}` },
     }),
 
-  setGlobalActivePlan: async (token, plan) => {
+  setGlobalActivePlan: async (token, plan, expectedVersion, idempotencyKey) => {
     const data = await fetchJson(`${API_BASE_URL}/api/bus/global-plan`, {
       method: "PUT",
       headers: {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ plan }),
+      body: JSON.stringify({ plan, expectedVersion }),
+      idempotencyKey,
     });
     if (!data.success) {
       const err = new Error(
@@ -170,7 +215,7 @@ export const busApi = {
   },
 
   // Update bus details (preview number, GPS device id, reg no)
-  updateBusDetails: async (token, busNo, payload) => {
+  updateBusDetails: async (token, busNo, payload, idempotencyKey) => {
     const data = await fetchJson(
       `${API_BASE_URL}/api/bus/update-bus-details/${encodeURIComponent(busNo)}`,
       {
@@ -180,13 +225,20 @@ export const busApi = {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(payload),
+        idempotencyKey,
       },
     );
 
     return data;
   },
 
-  alterBus: async (token, busNo, newBusNo, routeOptions) => {
+  alterBus: async (
+    token,
+    busNo,
+    newBusNo,
+    routeOptions,
+    { expectedVersion, expectedVersions, idempotencyKey },
+  ) => {
     return fetchJson(
       `${API_BASE_URL}/api/bus/alter-bus/${encodeURIComponent(busNo)}`,
       {
@@ -195,12 +247,24 @@ export const busApi = {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ newBusNo, ...routeOptions }),
+        body: JSON.stringify({
+          newBusNo,
+          ...routeOptions,
+          expectedVersion,
+          expectedVersions,
+        }),
+        idempotencyKey,
       },
     );
   },
 
-  combineBus: async (token, busNo, newBusNo, routeOptions) => {
+  combineBus: async (
+    token,
+    busNo,
+    newBusNo,
+    routeOptions,
+    { expectedVersion, expectedVersions, idempotencyKey },
+  ) => {
     return fetchJson(
       `${API_BASE_URL}/api/bus/combine-bus/${encodeURIComponent(busNo)}`,
       {
@@ -209,10 +273,31 @@ export const busApi = {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ newBusNo, ...routeOptions }),
+        body: JSON.stringify({
+          newBusNo,
+          ...routeOptions,
+          expectedVersion,
+          expectedVersions,
+        }),
+        idempotencyKey,
       },
     );
   },
+
+  deleteBus: async (
+    token,
+    busNo,
+    { expectedVersion, expectedVersions, idempotencyKey },
+  ) =>
+    fetchJson(
+      `${API_BASE_URL}/api/bus/delete-bus/${encodeURIComponent(busNo)}`,
+      {
+        method: "DELETE",
+        headers: busMutationHeaders(token, expectedVersion),
+        body: JSON.stringify({ expectedVersion, expectedVersions }),
+        idempotencyKey,
+      },
+    ),
 };
 
 // Export for convenience

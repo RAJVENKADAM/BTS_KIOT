@@ -32,15 +32,15 @@ function locationIo(sockets) {
 test("durable publisher emits one versioned event to the union of relevant rooms", async () => {
   const firstSocket = {
     id: "socket-1",
-    rooms: new Set(["preview_4", "user_student-1"]),
+    rooms: new Set(["preview_4", "assigned_bus_bus-live-4"]),
   };
   const secondSocket = {
     id: "socket-2",
-    rooms: new Set(["user_student-2"]),
+    rooms: new Set(["assigned_bus_bus-live-4"]),
   };
   const unrelatedSocket = {
     id: "socket-3",
-    rooms: new Set(["preview_9", "user_other"]),
+    rooms: new Set(["preview_9", "assigned_bus_other"]),
   };
   const { io, emissions } = locationIo([
     firstSocket,
@@ -50,7 +50,7 @@ test("durable publisher emits one versioned event to the union of relevant rooms
   const record = {
     _id: "bus-live-4",
     publicationPending: true,
-    publicationRooms: ["preview_4", "user_student-1", "user_student-2"],
+    publicationRooms: ["assigned_bus_bus-live-4", "preview_4"],
     publicationPreviewNumber: "4",
     publicationClaimId: null,
     locationVersion: 4n,
@@ -140,7 +140,7 @@ test("legacy socket location request uses projected lean reads and preserves eve
     },
   };
   const socket = {
-    user: { id: "student-1" },
+    user: { id: "admin-1", role: "primary_admin" },
     join() {},
     on(event, handler) {
       socketEvents[event] = handler;

@@ -3,10 +3,10 @@ const User = require('../models/User');
 const normalizeBusNumber = require('../utils/normalizeBusNumber');
 const { runLimitedImportPasswordHash } = require('../utils/authProtection');
 const { runGpsConfigurationMutation } = require('./gpsConfigurationBarrier');
+const { recordAssignmentMutation } = require('./assignmentPropagation');
 const { sendEmail } = require('../services/emailService');
 const {
   disconnectUserSockets,
-  emitBusAssignmentNotification,
 } = require('../socket');
 
 const IMPORT_BATCH_SIZE = 100;
@@ -166,6 +166,7 @@ class ExcelUserService {
       skippedRows: 0,
       duplicateRows: 0,
       failedRows: 0,
+      assignmentSyncFailures: 0,
       completed: false,
       partial: false,
       rowResults: [],
@@ -305,22 +306,51 @@ class ExcelUserService {
                 session ? { session } : {},
               );
             const updateResult = routingChanged
-              ? await runGpsConfigurationMutation((session) =>
-                  updateUser(session, true),
-                )
+              ? await runGpsConfigurationMutation(async (session) => {
+                  const result = await updateUser(session, true);
+                  if (result.modifiedCount) {
+                    const assignmentChanged =
+                      String(existing.bus_no ?? '').trim().toUpperCase() !==
+                      String(item.value.bus_no ?? '').trim().toUpperCase();
+                    await recordAssignmentMutation({
+                      session,
+                      actorId: uploadedByUserId,
+                      action: assignmentChanged
+                        ? 'workbook-assignment-updated'
+                        : 'workbook-account-routing-updated',
+                      resourceId: existing._id,
+                      requestId: `workbook:${uploadedByUserId}:${item.rowNumber}`,
+                      recipients: [{
+                        user_id: existing._id,
+                        notification: assignmentChanged
+                          ? {
+                              type: item.value.bus_no
+                                ? 'bus_reassigned'
+                                : 'bus_unassigned',
+                              message: item.value.bus_no
+                                ? `Your bus assignment changed to Bus ${item.value.bus_no}.`
+                                : 'Your bus assignment was removed.',
+                              new_bus_no: item.value.bus_no || null,
+                            }
+                          : null,
+                      }],
+                      previousState: {
+                        role: existing.role,
+                        bus_no: existing.bus_no ?? null,
+                        is_active: existing.is_active !== false,
+                      },
+                      newState: {
+                        role: item.value.role,
+                        bus_no: item.value.bus_no ?? null,
+                        is_active: true,
+                      },
+                    });
+                  }
+                  return result;
+                })
               : await updateUser(null, false);
             if (updateResult.modifiedCount) {
               const id = String(existing._id);
-              if (
-                String(existing.bus_no ?? '').trim().toUpperCase() !==
-                String(item.value.bus_no ?? '').trim().toUpperCase()
-              ) {
-                try {
-                  emitBusAssignmentNotification(id, item.value.bus_no);
-                } catch {
-                  console.error('Unable to deliver a committed bus assignment notification.');
-                }
-              }
               if (existing.role !== item.value.role) {
                 try {
                   disconnectUserSockets(id);
@@ -374,7 +404,27 @@ class ExcelUserService {
                 session ? { session } : {},
               );
             await runLimitedImportPasswordHash(() =>
-              runGpsConfigurationMutation(createUser),
+              runGpsConfigurationMutation(async (session) => {
+                const created = await createUser(session);
+                const createdUser = Array.isArray(created)
+                  ? created[0]
+                  : created;
+                if (createdUser?._id) {
+                  await recordAssignmentMutation({
+                    session,
+                    actorId: uploadedByUserId,
+                    action: 'workbook-user-created',
+                    resourceId: createdUser._id,
+                    requestId: `workbook:${uploadedByUserId}:${item.rowNumber}`,
+                    newState: {
+                      role: item.value.role,
+                      bus_no: item.value.bus_no ?? null,
+                      is_active: true,
+                    },
+                  });
+                }
+                return created;
+              }),
             );
             results.created.push({
               email: item.value.email,
@@ -456,10 +506,14 @@ class ExcelUserService {
     }
     await processBatch();
 
-    summary.completed = !halted && summary.failedRows === validationFailures.length;
+    summary.completed =
+      !halted &&
+      summary.failedRows === validationFailures.length &&
+      summary.assignmentSyncFailures === 0;
     summary.partial =
       summary.skippedRows > 0 ||
-      (summary.failedRows > 0 && summary.created + summary.updated > 0);
+      (summary.failedRows > 0 && summary.created + summary.updated > 0) ||
+      summary.assignmentSyncFailures > 0;
     return results;
   }
 

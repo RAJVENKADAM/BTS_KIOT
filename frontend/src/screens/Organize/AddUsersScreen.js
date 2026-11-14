@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useRef, useState, useEffect } from "react";
 import {
   View,
   TouchableOpacity,
@@ -19,17 +19,22 @@ import MultiExcelUpload from "../../components/MultiExcelUpload";
 import ExcelUploadCard from "../../components/ExcelUploadCard";
 import UserCard from "../../components/UserCard";
 import Card from "../../components/UI/Card";
-import * as DocumentPicker from "expo-document-picker";
 
-import { uploadUsersExcelWorkbook } from "../../api/importApi";
+import {
+  getImportOperation,
+  uploadUsersExcelWorkbook,
+} from "../../api/importApi";
 
 import { COLORS, SPACING, RADIUS, SHADOWS } from "../../theme";
 import { Header, Body, MutedText } from "../../components/UI/Typography";
 import { getErrorMessage } from "../../utils/errorHandler";
+import { getMutationAttempt } from "../../utils/mutationKey";
 
 function formatImportRowErrors(rowResults) {
   if (!Array.isArray(rowResults)) return "";
-  const failures = rowResults.filter((row) => row?.status === "failed");
+  const failures = rowResults.filter((row) =>
+    ["failed", "conflict"].includes(row?.status),
+  );
   if (!failures.length) return "";
   const details = failures
     .slice(0, 6)
@@ -37,12 +42,26 @@ function formatImportRowErrors(rowResults) {
       const excelRow = Number.isInteger(row.rowNumber)
         ? row.rowNumber
         : (Number(row.index) || 0) + 2;
-      return `Excel row ${excelRow}: ${row.reason}`;
+      return `Excel row ${excelRow}: ${row.reason || row.error || row.status}`;
     });
   if (failures.length > details.length) {
     details.push(`...and ${failures.length - details.length} more.`);
   }
   return `\n\nRow issues:\n${details.join("\n")}`;
+}
+
+function formatImportLedgerRows(rows) {
+  if (!Array.isArray(rows) || !rows.length) return "";
+  const details = rows
+    .filter((row) => row.status !== "completed")
+    .slice(0, 6)
+    .map(
+      (row) =>
+        `Excel row ${row.rowNumber}: ${row.status}${row.error ? ` - ${row.error}` : ""}`,
+    );
+  return details.length
+    ? `\n\nPersisted row status:\n${details.join("\n")}`
+    : "";
 }
 
 export default function AddUsersScreen() {
@@ -54,6 +73,10 @@ export default function AddUsersScreen() {
   const [loadingMoreUsersByUpload, setLoadingMoreUsersByUpload] = useState({});
   const [refreshing, setRefreshing] = useState(false);
   const { token, loading: authLoading } = useAuth();
+  const importMutation = useRef({ key: null, signature: null });
+  const importInFlight = useRef(false);
+  const uploadDeleteAttempts = useRef(new Map());
+  const uploadDeleteInFlight = useRef(new Set());
 
   useEffect(() => {
     if (token) loadExcelUploads();
@@ -140,22 +163,53 @@ export default function AddUsersScreen() {
   };
 
   const handleFileUpload = async (file, customName) => {
-    if (!token || !file?.uri) return;
+    if (!token || !file?.uri || importInFlight.current) return;
 
+    importInFlight.current = true;
     setUploading(true);
+    const operation = {
+      name: file.name || "",
+      size: file.size ?? null,
+      lastModified: file.lastModified ?? null,
+      uri: file.uri,
+      customName: String(customName || "").trim(),
+    };
+    const idempotencyKey = getMutationAttempt(importMutation, operation);
 
     try {
       const response = await uploadUsersExcelWorkbook({
         token,
         file,
         excelCustomName: customName,
+        idempotencyKey,
       });
 
       if (response?.success) {
         const summary = response.summary || {};
-        const rowErrors = formatImportRowErrors(summary.rowResults);
+        if (response.status === "completed" && !summary.outcomeUnknown) {
+          importMutation.current = { key: null, signature: null };
+        }
+        let persistedRows = "";
+        if (response.uploadId && response.status !== "completed") {
+          try {
+            const status = await getImportOperation({
+              token,
+              uploadId: response.uploadId,
+            });
+            persistedRows = formatImportLedgerRows(status.rows);
+          } catch (statusError) {
+            persistedRows = `\n\n${getErrorMessage(
+              statusError,
+              "Could not load persisted import row status.",
+            )}`;
+          }
+        }
+        const rowErrors =
+          formatImportRowErrors(summary.rowResults) || persistedRows;
         Alert.alert(
-          summary.partial
+          response.status === "processing"
+            ? "Import processing"
+            : summary.partial
             ? "Import partially completed"
             : summary.failedRows
             ? "Import completed with errors"
@@ -171,7 +225,10 @@ export default function AddUsersScreen() {
             summary.outcomeUnknown
               ? "Database outcome is uncertain; check the upload status before retrying."
               : "",
-            rowErrors,
+            rowErrors ||
+              (response.status === "processing"
+                ? `Import ${response.uploadId} is still processing. Refresh the upload list or inspect its row status before retrying.`
+                : ""),
           ]
             .filter(Boolean)
             .join("\n"),
@@ -212,109 +269,113 @@ export default function AddUsersScreen() {
         summary?.partial ? "Import partially completed" : "Import failed",
         message,
       );
-      if (e?.isTimeout || summary?.partial || summary?.outcomeUnknown) {
+      if (e?.status === 409 || e?.isTimeout || summary?.partial || summary?.outcomeUnknown) {
         await loadExcelUploads();
       }
     } finally {
+      importInFlight.current = false;
       setUploading(false);
     }
   };
 
-  const handleEditUpload = async (uploadId) => {
+  const handleDeleteUpload = async (upload) => {
+    const uploadId = upload?.id || upload?._id;
+    if (!uploadId || uploadDeleteInFlight.current.has(uploadId)) return;
+    uploadDeleteInFlight.current.add(uploadId);
+    setUploading(true);
+    let attempt = uploadDeleteAttempts.current.get(uploadId);
+    if (!attempt) {
+      attempt = { current: { key: null, signature: null } };
+      uploadDeleteAttempts.current.set(uploadId, attempt);
+    }
+    const expectedVersion = upload.revision ?? 0;
+    const idempotencyKey = getMutationAttempt(attempt, {
+      uploadId,
+      expectedVersion,
+      operation: "deactivate-upload",
+    });
     try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      });
-
-      if (result.canceled) return;
-      setUploading(true);
-      const response = await excelManagementApi.reupload(
+      const response = await excelManagementApi.deleteUpload(
         token,
         uploadId,
-        result.assets[0],
+        expectedVersion,
+        idempotencyKey,
       );
-
       if (response.success) {
-        Alert.alert("Updated", "User list updated successfully");
-        loadExcelUploads();
+        uploadDeleteAttempts.current.delete(uploadId);
+        await loadExcelUploads();
       }
     } catch (error) {
+      if (error?.status === 409) await loadExcelUploads();
       Alert.alert(
-        "Error",
-        getErrorMessage(error, "Could not update the Excel upload."),
+        "Upload deactivation failed",
+        getErrorMessage(error, "Could not deactivate this upload."),
       );
     } finally {
+      uploadDeleteInFlight.current.delete(uploadId);
       setUploading(false);
     }
   };
 
-  const handleDeleteUpload = async (uploadId) => {
-    Alert.alert(
-      "Delete Upload",
-      "This will deactivate users associated with this file. Continue?",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: async () => {
-            setUploading(true);
-            try {
-              const response = await excelManagementApi.deleteUpload(
-                token,
-                uploadId,
-              );
-              if (response.success) {
-                await loadExcelUploads();
+  const handleDeleteUser = (user, uploadId, idempotencyKey) => {
+    if (!user?.id || !uploadId) return Promise.resolve(false);
+
+    return new Promise((resolve, reject) => {
+      Alert.alert(
+        "Deactivate user",
+        `Deactivate ${user?.name || user?.email || "this user"}?`,
+        [
+          { text: "Cancel", style: "cancel", onPress: () => resolve(false) },
+          {
+            text: "Deactivate",
+            style: "destructive",
+            onPress: async () => {
+              try {
+                const response = await excelManagementApi.deactivateUser(
+                  token,
+                  user,
+                  idempotencyKey,
+                );
+                if (!response?.success) {
+                  throw new Error("The server could not confirm the user update.");
+                }
+                await loadUsersForUpload(uploadId);
+                resolve(true);
+              } catch (e) {
+                Alert.alert(
+                  "Error",
+                  getErrorMessage(e, "Failed to deactivate user."),
+                );
+                reject(e);
               }
-            } catch (error) {
-              Alert.alert("Error", getErrorMessage(error, "Delete failed."));
-            } finally {
-              setUploading(false);
-            }
+            },
           },
-        },
-      ],
-    );
+        ],
+      );
+    });
   };
 
-  const handleDeleteUser = async (user, uploadId) => {
-    if (!user?.id || !uploadId) return;
-
-    Alert.alert(
-      "Deactivate user",
-      `Deactivate ${user?.name || user?.email || "this user"}?`,
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Deactivate",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              await excelManagementApi.deactivateUser(token, user.id);
-              await loadUsersForUpload(uploadId);
-            } catch (e) {
-              Alert.alert(
-                "Error",
-                getErrorMessage(e, "Failed to deactivate user."),
-              );
-            }
-          },
-        },
-      ],
-    );
-  };
-
-  const handleEditUser = async (user, payload, uploadId) => {
+  const handleEditUser = async (user, payload, uploadId, idempotencyKey) => {
     if (!user?.id || !uploadId) return;
 
     try {
-      const res = await excelManagementApi.updateUser(token, user.id, payload);
-      if (res?.success) {
-        await loadUsersForUpload(uploadId);
+      const res = await excelManagementApi.updateUser(
+        token,
+        user.id,
+        {
+          ...payload,
+          expectedVersion: user.resourceVersion,
+          assignmentRevision: user.assignmentRevision,
+        },
+        idempotencyKey,
+      );
+      if (!res?.success) {
+        throw new Error("The server could not confirm the user update.");
       }
+      await loadUsersForUpload(uploadId);
     } catch (e) {
       Alert.alert("Error", getErrorMessage(e, "Failed to update user."));
+      throw e;
     }
   };
 
@@ -370,7 +431,6 @@ export default function AddUsersScreen() {
                 <View key={upload.id}>
                   <ExcelUploadCard
                     upload={upload}
-                    onEdit={handleEditUpload}
                     onDelete={handleDeleteUpload}
                   />
                   <View style={styles.usersSection}>
@@ -386,11 +446,20 @@ export default function AddUsersScreen() {
                           <UserCard
                             key={user.id}
                             user={user}
-                            onDelete={(selectedUser) =>
-                              handleDeleteUser(selectedUser, upload.id)
+                            onDelete={(selectedUser, mutationKey) =>
+                              handleDeleteUser(
+                                selectedUser,
+                                upload.id,
+                                mutationKey,
+                              )
                             }
-                            onEdit={(selectedUser, payload) =>
-                              handleEditUser(selectedUser, payload, upload.id)
+                            onEdit={(selectedUser, payload, mutationKey) =>
+                              handleEditUser(
+                                selectedUser,
+                                payload,
+                                upload.id,
+                                mutationKey,
+                              )
                             }
                           />
                         ))}

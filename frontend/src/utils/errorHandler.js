@@ -56,6 +56,8 @@ export function getHttpErrorMessage(status) {
       return "You do not have permission to perform this action.";
     case 404:
       return "The requested item was not found.";
+    case 409:
+      return "This data changed since you loaded it. Refresh and retry.";
     case 408:
       return "The request took too long. Please try again.";
     case 429:
@@ -89,7 +91,7 @@ function getSafeServerMessage(message, fallback) {
   if (typeof message !== "string" || !message.trim()) return null;
   const normalized = message.trim().replace(/^error:\s*/i, "");
   if (
-    /internal server error|request failed(?:\s*\(\d+\))?|network request failed|failed to fetch|timed out|timeout|syntaxerror|stack trace|<html|<!doctype/i.test(
+    /internal server error|request failed(?:\s*\(\d+\))?|network request failed|failed to fetch|network error|timed out|timeout|syntaxerror|stack trace|<html|<!doctype|\b(?:Mongo(?:\w+)?Error|AxiosError|TypeError|ReferenceError|RangeError|SystemError|SocketTimeoutException|UnknownHostException|ConnectException)\b|java\.net\.|node:\w+|^\s*at\s+/i.test(
       normalized,
     )
   ) {
@@ -131,10 +133,13 @@ export function getErrorMessage(
   if (err.code === "INVALID_RESPONSE") {
     return "The server returned an unexpected response. Please try again later.";
   }
+  if (err.code === "BUS_REVISION_CONFLICT") {
+    return "Bus details changed since you loaded them. Reload the bus list before trying again.";
+  }
 
   const fallbackMessage = fallback || "Something went wrong. Please try again.";
   const httpMsg = getHttpErrorMessage(err?.status);
-  if (httpMsg && err?.status !== 400) return httpMsg;
+  if (httpMsg && err?.status !== 400 && err?.status !== 409) return httpMsg;
 
   // Server-provided message (e.g. from a JSON error body).
   const serverMsg = err?.message || err?.serverMessage || err?.error;
@@ -175,7 +180,8 @@ export function createHttpError(response, data) {
       `Request failed (${response.status})`,
   );
   err.status = response.status;
-  err.code = data?.error || data?.code || `HTTP_${response.status}`;
+  err.code =
+    typeof data?.code === "string" ? data.code : `HTTP_${response.status}`;
   err.serverMessage = data?.error || data?.message;
   err.data = data;
   if (Array.isArray(data?.rowResults)) {
@@ -198,7 +204,29 @@ export function createHttpError(response, data) {
  */
 export async function fetchJson(url, options = {}) {
   const controller = new AbortController();
-  const { timeoutMs = 15000, signal, ...fetchOptions } = options;
+  const {
+    timeoutMs = 15000,
+    signal,
+    idempotencyKey,
+    ...fetchOptions
+  } = options;
+  if (idempotencyKey) {
+    fetchOptions.headers = {
+      ...(fetchOptions.headers || {}),
+      "Idempotency-Key": idempotencyKey,
+    };
+  }
+  if (
+    typeof fetchOptions.body === "string" &&
+    !Object.keys(fetchOptions.headers || {}).some(
+      (key) => key.toLowerCase() === "content-type",
+    )
+  ) {
+    fetchOptions.headers = {
+      ...(fetchOptions.headers || {}),
+      "Content-Type": "application/json",
+    };
+  }
   let timedOut = false;
   const timeoutId =
     timeoutMs > 0

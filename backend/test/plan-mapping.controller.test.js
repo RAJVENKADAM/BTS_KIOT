@@ -4,6 +4,7 @@ const AppSetting = require("../src/models/AppSetting");
 const Bus = require("../src/models/Bus");
 const BusRoute = require("../src/models/BusRoute");
 const PlanMapping = require("../src/models/PlanMapping");
+const PlanMappingRevision = require("../src/models/PlanMappingRevision");
 const User = require("../src/models/User");
 const { getPlanMappingData } = require("../src/controllers/planMapping.controller");
 
@@ -25,6 +26,7 @@ test("plan mapping data resolves raw references through one bus lookup map", asy
     busFind: Bus.find,
     routeFind: BusRoute.find,
     mappingFind: PlanMapping.find,
+    revisionFind: PlanMappingRevision.find,
     userAggregate: User.aggregate,
   };
   const rootId = "root-id";
@@ -92,6 +94,7 @@ test("plan mapping data resolves raw references through one bus lookup map", asy
     };
     return result;
   };
+  PlanMappingRevision.find = () => query([]);
   User.aggregate = async () => [{ _id: "2", count: 2 }];
   const response = {
     statusCode: 200,
@@ -125,6 +128,7 @@ test("plan mapping data resolves raw references through one bus lookup map", asy
     Bus.find = originals.busFind;
     BusRoute.find = originals.routeFind;
     PlanMapping.find = originals.mappingFind;
+    PlanMappingRevision.find = originals.revisionFind;
     User.aggregate = originals.userAggregate;
   }
 });

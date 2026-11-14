@@ -49,7 +49,12 @@ function createApplication({
   const corsOptions = {
     origin: [...new Set(corsOrigins)],
     methods: ["GET", "POST", "PUT", "DELETE"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "Idempotency-Key",
+      "If-Match",
+    ],
     credentials: true,
   };
 
@@ -220,11 +225,35 @@ function createApplication({
       return res.status(400).json({ error: err.message || "Invalid upload." });
     }
     const statusCode = err.statusCode || err.status || 500;
+    const rawMessage = typeof err.message === "string" ? err.message : "";
+    const safeMessage =
+      statusCode !== 500 &&
+      rawMessage.length <= 300 &&
+      !/mongo|mongoose|axios|node:|java\.net|sockettimeoutexception|unknownhostexception|connectexception|stack|^\s*at\s|<html|<!doctype/i.test(
+        rawMessage,
+      );
+    const code =
+      typeof err.code === "string" && /^[A-Z][A-Z0-9_]{1,59}$/.test(err.code)
+        ? err.code
+        : statusCode >= 500
+          ? "INTERNAL_SERVER_ERROR"
+          : `HTTP_${statusCode}`;
     const payload = {
       error:
-        statusCode === 500
-          ? "Internal server error"
-          : err.message || "Request failed",
+        safeMessage && rawMessage
+          ? rawMessage
+          : statusCode === 404
+            ? "The requested resource was not found."
+            : statusCode === 409
+              ? "The request conflicts with the current resource state."
+              : statusCode === 429
+                ? "Too many requests. Please try again later."
+                : statusCode === 503
+                  ? "The service is temporarily unavailable."
+                  : statusCode >= 500
+                    ? "Internal server error"
+                    : "The request could not be completed.",
+      code,
     };
 
     logSafeError(`API request failed with status ${statusCode}`, err, req.requestId);

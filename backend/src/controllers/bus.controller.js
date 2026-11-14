@@ -5,11 +5,10 @@ const { randomUUID } = require("node:crypto");
 const BusLiveLocation = require("../models/BusLiveLocation");
 const AppSetting = require("../models/AppSetting");
 const User = require("../models/User");
-const Notification = require("../models/Notification");
 const PlanMapping = require("../models/PlanMapping");
 const BusChange = require("../models/BusChange");
 const normalizeBusNumber = require("../utils/normalizeBusNumber");
-const { getIO, emitBusAssignmentNotification } = require("../socket");
+const { getIO } = require("../socket");
 const {
   getPlanChangeNotifications,
   loadPlanState,
@@ -32,16 +31,167 @@ const {
   normalizeArrivalTime,
 } = require("../utils/planMapping");
 const { logSafeError } = require("../utils/safeErrorLog");
-const { runGpsConfigurationMutation } = require("../services/gpsConfigurationBarrier");
+const { recordAssignmentMutation } = require("../services/assignmentPropagation");
+const {
+  checkIdempotentReplay,
+  getMutationHeaders,
+  runIdempotentMutation,
+} = require("../services/mutationIdempotency");
+const {
+  getPlanMappingVersions,
+  runPlanMappingMutation,
+  runPlanMappingNoop,
+} = require("../services/planMappingPersistence");
 const { parsePagination } = require("../utils/pagination");
+const {
+  getPublicAssignmentSnapshot,
+  resolveStudentAssignment,
+} = require("../services/studentBusAssignment");
 
 const GLOBAL_ACTIVE_PLAN_KEY = "global_active_plan";
 const DEFAULT_PLAN_NAMES = ["PLAN A", "PLAN B", "PLAN C", "PLAN D"];
 
-async function saveBusWithGpsBarrier(bus) {
-  return runGpsConfigurationMutation((session) =>
-    session ? bus.save({ session }) : bus.save(),
+function getBusRevisionFilter(bus, expectedVersion) {
+  return expectedVersion === 0
+    ? {
+        $or: [
+          { revision: 0 },
+          { revision: { $exists: false } },
+        ],
+      }
+    : { revision: expectedVersion };
+}
+
+function getExpectedBusVersions(req, buses, primaryBus, primaryVersion) {
+  const supplied = req.body?.expectedVersions;
+  const normalized = new Map(
+    Object.entries(
+      supplied && typeof supplied === "object" && !Array.isArray(supplied)
+        ? supplied
+        : {},
+    ).map(([key, value]) => [String(key).trim().toUpperCase(), value]),
   );
+  const versions = new Map();
+  for (const bus of buses) {
+    const isPrimary = String(bus._id) === String(primaryBus?._id);
+    const raw = isPrimary
+      ? primaryVersion
+      : normalized.get(String(bus.bus_no).trim().toUpperCase()) ??
+        normalized.get(String(bus._id).trim().toUpperCase());
+    const version = typeof raw === "number" ? raw : Number(raw);
+    if (!Number.isSafeInteger(version) || version < 0) {
+      const error = new Error(
+        `Provide the expected revision for bus ${bus.bus_no}.`,
+      );
+      error.code = "BUS_REVISION_REQUIRED";
+      error.statusCode = 428;
+      throw error;
+    }
+    versions.set(String(bus._id), version);
+  }
+  return versions;
+}
+
+async function updateBusAtRevision(bus, expectedVersion, update, session) {
+  const query = Bus.findOneAndUpdate(
+    {
+      $and: [
+        { _id: bus._id },
+        getBusRevisionFilter(bus, expectedVersion),
+      ],
+    },
+    {
+      $set: update,
+      $inc: { revision: 1 },
+    },
+    {
+      new: true,
+      runValidators: true,
+      ...(session ? { session } : {}),
+    },
+  );
+  const updated = await query.lean();
+  if (!updated) {
+    const error = new Error(
+      `Bus ${bus.bus_no} changed. Reload before applying this update.`,
+    );
+    error.code = "BUS_REVISION_CONFLICT";
+    error.statusCode = 409;
+    throw error;
+  }
+  return updated;
+}
+
+async function saveBusAtRevision(bus, expectedVersion, session) {
+  const excluded = new Set([
+    "_id",
+    "revision",
+    "__v",
+    "createdAt",
+    "updatedAt",
+  ]);
+  const update = Object.fromEntries(
+    bus
+      .modifiedPaths()
+      .filter((path) => !excluded.has(path))
+      .map((path) => [path, bus.get(path)]),
+  );
+  const persisted = await updateBusAtRevision(
+    bus,
+    expectedVersion,
+    update,
+    session,
+  );
+  bus.revision = persisted.revision;
+  return persisted;
+}
+
+async function runBusMutation({
+  req,
+  operation,
+  request,
+  resourceId,
+  expectedVersion,
+  mutate,
+}) {
+  const idempotencyKey = getMutationHeaders(req).idempotencyKey;
+  return runIdempotentMutation({
+    scope: getBusMutationScope(req, operation),
+    idempotencyKey,
+    actorId: req.user?.id,
+    request,
+    resourceId,
+    expectedVersion,
+    mutate,
+  });
+}
+
+function getBusMutationScope(req, operation) {
+  return `bus:${operation}:${String(req.user?.id || "")}`;
+}
+
+async function getBusMutationReplay(req, operation, request, expectedVersion) {
+  const { idempotencyKey } = getMutationHeaders(req);
+  return checkIdempotentReplay({
+    scope: getBusMutationScope(req, operation),
+    idempotencyKey,
+    request,
+    expectedVersion,
+  });
+}
+
+function assignmentRecipient(userId, busNumber) {
+  const assignmentBusNo = busNumber == null ? null : String(busNumber);
+  return {
+    user_id: userId,
+    notification: {
+      type: assignmentBusNo ? "bus_reassigned" : "bus_unassigned",
+      message: assignmentBusNo
+        ? `Your bus assignment changed to Bus ${assignmentBusNo}.`
+        : "Your bus assignment was removed.",
+      new_bus_no: assignmentBusNo,
+    },
+  };
 }
 
 function escapeRegExp(value) {
@@ -161,40 +311,6 @@ async function getCurrentGlobalPlan() {
   }).lean();
   const activePlan = normalizePlanName(setting?.value || "PLAN A");
   return DEFAULT_PLAN_NAMES.includes(activePlan) ? activePlan : "PLAN A";
-}
-
-async function notifyAssignedUsersOfBusStatus(bus, status) {
-  const users = await User.find({
-    bus_no: new RegExp(`^${escapeRegExp(bus.bus_no)}$`, "i"),
-    role: "student",
-    is_active: true,
-  }).select("_id");
-
-  if (!users.length) return;
-  const message =
-    status === "active"
-      ? `Bus ${bus.preview_number ?? ""} is active now.`
-      : `Bus ${bus.preview_number ?? ""} is inactive now.`;
-  const notifications = users.map((user) => ({
-    user_id: user._id,
-    type: "bus_status",
-    message,
-    new_preview: bus.preview_number ?? null,
-    is_bus_active: status === "active",
-  }));
-  await Notification.insertMany(notifications);
-
-  const io = getIO();
-  if (io) {
-    users.forEach((user) => {
-      io.to(`user_${String(user._id)}`).emit("notification", {
-        type: "bus_status",
-        message,
-        previewNumber: bus.preview_number ?? null,
-        isBusActive: status === "active",
-      });
-    });
-  }
 }
 
 // ================= SHARED HELPERS =================
@@ -410,9 +526,10 @@ async function getRouteSelectionLabel(bus, incomingChanges, busesById) {
   return `Bus ${bus.preview_number ?? bus.bus_no} routes`;
 }
 
-async function findStudentsAssignedToBus(bus) {
+async function findStudentsAssignedToBus(bus, additionalIdentifiers = []) {
   const identifiers = [bus.bus_no];
   if (bus.preview_number != null) identifiers.push(String(bus.preview_number));
+  identifiers.push(...additionalIdentifiers.filter((value) => value != null && value !== ""));
   return User.find({
     bus_no: {
       $in: identifiers.map(
@@ -421,72 +538,49 @@ async function findStudentsAssignedToBus(bus) {
     },
     role: "student",
     is_active: true,
-  }).select("_id bus_no");
+    deleted_by_user: { $ne: true },
+  }).select("_id bus_no assignmentRevision").lean();
 }
 
-// ================= UPLOAD BUS ROUTES =================
-async function uploadBusRoutes(req, res) {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: "No file uploaded" });
+async function updateStudentAssignmentsAtRevision(
+  students,
+  getNextBusNo,
+  session,
+  conflictMessage,
+) {
+  for (const student of students) {
+    const assignmentRevision = student.assignmentRevision ?? 0;
+    const conditions = [{ _id: student._id }];
+    if (Object.hasOwn(student, "bus_no")) {
+      conditions.push({ bus_no: student.bus_no });
     }
+    conditions.push(
+      assignmentRevision === 0
+        ? {
+            $or: [
+              { assignmentRevision: 0 },
+              { assignmentRevision: { $exists: false } },
+            ],
+          }
+        : { assignmentRevision },
+    );
 
-    const { busNo, previewNumber, gpsId, deviceId, regNo } = req.body;
-
-    if (!busNo || !deviceId) {
-      return res
-        .status(400)
-        .json({ error: "Bus number and device ID are required" });
+    const nextBusNo = getNextBusNo(student);
+    const update = {
+      $inc: { assignmentRevision: 1 },
+      ...(nextBusNo !== undefined ? { $set: { bus_no: nextBusNo } } : {}),
+    };
+    const result = await User.updateOne(
+      { $and: conditions },
+      update,
+      session ? { session } : {},
+    );
+    if (result.matchedCount !== 1) {
+      const error = new Error(conflictMessage);
+      error.code = "BUS_ASSIGNMENT_CONFLICT";
+      error.statusCode = 409;
+      throw error;
     }
-
-    // Find or create bus
-    const normalizedBusNo = normalizeBusNumber(busNo);
-    let bus = await Bus.findOne({ bus_no: normalizedBusNo });
-
-    if (bus) {
-      if (await findActiveChangeForBus(bus._id)) {
-        return res.status(409).json({
-          success: false,
-          error: "Roll back the temporary bus change before editing this bus.",
-        });
-      }
-      // Update existing bus
-      bus.gps_device_id = deviceId;
-      bus.reg_no = regNo;
-      if (previewNumber) bus.preview_number = previewNumber;
-    } else {
-      // Create new bus
-      bus = {
-        bus_no: normalizedBusNo,
-        bus_name: busNo,
-        gps_device_id: deviceId,
-        reg_no: regNo,
-        preview_number: previewNumber,
-        status: "active",
-      };
-    }
-    bus = await runGpsConfigurationMutation(async (session) => {
-      if (bus?._id) {
-        if (session) await bus.save({ session });
-        else await bus.save();
-        return bus;
-      }
-      const [createdBus] = await Bus.create(
-        [bus],
-        session ? { session } : {},
-      );
-      return createdBus;
-    });
-
-    res.status(200).json({
-      message: bus ? "Bus updated" : "Bus created",
-      busNo: bus.bus_no,
-      previewNumber: bus.preview_number,
-      routesCount: 0,
-    });
-  } catch (error) {
-    logSafeError("Bus upload failed", error);
-    res.status(500).json({ error: "Internal server error." });
   }
 }
 
@@ -495,8 +589,29 @@ async function updateBusNumber(req, res) {
   try {
     const { busNo } = req.params;
     const { newBusNo, previewNumber } = req.body;
+    const { expectedVersion, idempotencyKey } = getMutationHeaders(req);
     const normalizedBusNo = normalizeBusNumber(busNo);
     const normalizedNewBusNo = newBusNo ? normalizeBusNumber(newBusNo) : null;
+    const request = {
+      busNo: normalizedBusNo,
+      newBusNo: normalizedNewBusNo,
+      previewNumber,
+      expectedVersion,
+    };
+    const replay = await getBusMutationReplay(
+      req,
+      "update-number",
+      request,
+      expectedVersion,
+    );
+    if (replay) {
+      return res.status(200).json({
+        success: true,
+        ...replay.response,
+        duplicate: true,
+      });
+    }
+
     const currentBus = await Bus.findOne({ bus_no: normalizedBusNo });
     if (!currentBus) {
       return res.status(404).json({ success: false, error: "Bus not found." });
@@ -535,42 +650,159 @@ async function updateBusNumber(req, res) {
     }
 
     if (updateBusNumber || updatePreviewNumber) {
-      await runGpsConfigurationMutation(async (session) => {
-        const options = session ? { session } : {};
-        if (updateBusNumber) {
-          await Bus.updateOne(
-            { bus_no: normalizedBusNo },
-            { bus_no: normalizedNewBusNo },
-            options,
+      const affectedUsers = await findStudentsAssignedToBus(currentBus);
+      const affectedUserIds = affectedUsers.map((user) => user._id);
+      const previousState = {
+        bus: currentBus.toObject(),
+        assignments: affectedUsers.map((user) => ({
+          user_id: user._id,
+          bus_no: user.bus_no,
+          assignment_revision: user.assignmentRevision ?? 0,
+        })),
+      };
+      const previousAssignmentValues = [currentBus.bus_no];
+      if (currentBus.preview_number != null) {
+        previousAssignmentValues.push(String(currentBus.preview_number));
+      }
+      const result = await runBusMutation({
+        req,
+        operation: "update-number",
+        request,
+        resourceId: currentBus._id,
+        expectedVersion,
+        mutate: async (session) => {
+          const updatedBus = await updateBusAtRevision(
+            currentBus,
+            expectedVersion,
+            {
+              ...(updateBusNumber ? { bus_no: normalizedNewBusNo } : {}),
+              ...(updatePreviewNumber ? { preview_number: previewNumber } : {}),
+            },
+            session,
           );
-        }
-        if (updatePreviewNumber) {
-          await Bus.updateOne(
-            { bus_no: normalizeBusNumber(finalBusNo) },
-            { preview_number: previewNumber },
-            options,
-          );
-        }
+          if (updateBusNumber) {
+            await updateStudentAssignmentsAtRevision(
+              affectedUsers,
+              () => normalizedNewBusNo,
+              session,
+              "A rider assignment changed while the bus was being renamed. Reload and retry.",
+            );
+          } else {
+            await updateStudentAssignmentsAtRevision(
+              affectedUsers,
+              () => undefined,
+              session,
+              "A rider assignment changed while the preview number was being updated. Reload and retry.",
+            );
+          }
+        await recordAssignmentMutation({
+          session,
+          actorId: req.user?.id,
+          action: updateBusNumber
+            ? "bus-number-updated"
+            : "bus-preview-updated",
+          resourceId: currentBus._id,
+          requestId: idempotencyKey,
+          busRevisionBefore: currentBus.revision ?? 0,
+          busRevisionAfter: updatedBus.revision,
+          recipients: affectedUserIds.map((userId) => ({
+            user_id: userId,
+            notification: null,
+          })),
+          previousState,
+          newState: {
+            bus: {
+              ...currentBus.toObject(),
+              bus_no: finalBusNo,
+              ...(updatePreviewNumber ? { preview_number: previewNumber } : {}),
+              revision: updatedBus.revision,
+            },
+            assignments: affectedUsers.map((user) => ({
+              user_id: user._id,
+              bus_no: updateBusNumber &&
+                previousAssignmentValues.some((value) =>
+                  new RegExp(`^${escapeRegExp(value)}$`, "i").test(
+                    String(user.bus_no || ""),
+                  ),
+                )
+                ? finalBusNo
+                : user.bus_no,
+              assignment_revision: (user.assignmentRevision ?? 0) + 1,
+            })),
+          },
+        });
+          return {
+            response: {
+              message: "Bus updated successfully",
+              busNo: finalBusNo,
+              previewNumber,
+              revision: updatedBus.revision,
+            },
+            resourceVersion: updatedBus.revision,
+          };
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        ...result.response,
+        duplicate: result.duplicate,
       });
     }
 
+    const result = await runBusMutation({
+      req,
+      operation: "update-number",
+      request,
+      resourceId: currentBus._id,
+      expectedVersion,
+      mutate: async () => ({
+        response: {
+          message: "Bus updated successfully",
+          busNo: finalBusNo,
+          previewNumber,
+          revision: currentBus.revision ?? 0,
+        },
+        resourceVersion: currentBus.revision ?? 0,
+      }),
+    });
     res.status(200).json({
-      message: "Bus updated successfully",
-      busNo: finalBusNo,
-      previewNumber,
+      success: true,
+      ...result.response,
+      duplicate: result.duplicate,
     });
   } catch (error) {
     logSafeError("Bus update failed", error);
-    res.status(500).json({ error: "Internal server error." });
+    const statusCode = error.statusCode || (error.code === 11000 ? 409 : 500);
+    res.status(statusCode).json({
+      success: false,
+      error: error.statusCode
+        ? error.message
+        : error.code === 11000
+          ? "Bus number or preview number is already in use."
+          : "Internal server error.",
+      ...(error.code ? { code: error.code } : {}),
+    });
   }
 }
 
 // ================= GET ALL BUSES WITH LIVE GPS =================
 async function getAllBuses(req, res) {
   try {
+    if (
+      !["primary_admin", "superadmin"].includes(
+        String(req.user?.role || "").toLowerCase(),
+      )
+    ) {
+      return res.status(403).json({
+        success: false,
+        error: "Fleet access is restricted to administrators.",
+      });
+    }
+
     const buses = await Bus.find({})
       .select(
-        "_id bus_no preview_number status gps_device_id reg_no mobile_live altered_to_bus_id altered_to_preview altered_at alteration_type combined_route_source",
+        "_id bus_no revision preview_number status gps_device_id reg_no mobile_live altered_to_bus_id altered_to_preview altered_at alteration_type combined_route_source",
       )
       .sort({
         preview_number: 1,
@@ -647,6 +879,7 @@ async function getAllBuses(req, res) {
       const location = liveLocation;
 
       return {
+        revision: bus.revision ?? 0,
         busNo: bus.bus_no,
         previewNumber: bus.preview_number,
         status: bus.status,
@@ -710,6 +943,17 @@ async function getAllBuses(req, res) {
 
 async function getBusesForPlan(req, res) {
   try {
+    if (
+      !["primary_admin", "superadmin"].includes(
+        String(req.user?.role || "").toLowerCase(),
+      )
+    ) {
+      return res.status(403).json({
+        success: false,
+        error: "Fleet access is restricted to administrators.",
+      });
+    }
+
     const isSuperadmin =
       req.user && String(req.user.role || "").toLowerCase() === "superadmin";
     const { plan } = req.params || {};
@@ -821,6 +1065,21 @@ async function getBusesForPlan(req, res) {
 async function deleteBus(req, res) {
   try {
     const { busNo } = req.params;
+    const { expectedVersion, idempotencyKey } = getMutationHeaders(req);
+    const request = {
+      busNo: normalizeBusNumber(busNo),
+      expectedVersion,
+      expectedVersions: req.body?.expectedVersions || {},
+    };
+    const replay = await getBusMutationReplay(
+      req,
+      "delete",
+      request,
+      expectedVersion,
+    );
+    if (replay) {
+      return res.json({ success: true, ...replay.response, duplicate: true });
+    }
 
     const bus = await Bus.findOne({ bus_no: normalizeBusNumber(busNo) });
     if (!bus) {
@@ -833,59 +1092,118 @@ async function deleteBus(req, res) {
       });
     }
 
-    const assignedUserFilter = {
-      bus_no: new RegExp(`^${escapeRegExp(bus.bus_no)}$`, "i"),
-    };
-    const assignedUsers = await User.find(assignedUserFilter)
-      .select("_id")
+    const assignedUsers = await findStudentsAssignedToBus(bus);
+    const linkedBuses = await Bus.find({ altered_to_bus_id: bus._id })
+      .select("_id bus_no revision")
       .lean();
-    const assignmentResult = await runGpsConfigurationMutation(async (session) => {
-      const options = session ? { session } : {};
-      const result = await User.updateMany(
-        assignedUserFilter,
-        { $set: { bus_no: null } },
-        options,
-      );
+    const busVersions = getExpectedBusVersions(
+      req,
+      [bus, ...linkedBuses],
+      bus,
+      expectedVersion,
+    );
+    const result = await runBusMutation({
+      req,
+      operation: "delete",
+      request,
+      resourceId: bus._id,
+      expectedVersion,
+      mutate: async (session) => {
+        const options = session ? { session } : {};
+        for (const linkedBus of linkedBuses) {
+          await updateBusAtRevision(
+            linkedBus,
+            busVersions.get(String(linkedBus._id)),
+            {
+              altered_to_bus_id: null,
+              altered_to_preview: null,
+              alteration_type: null,
+              alteration_route_source: null,
+              alteration_routes: [],
+              combined_route_source: null,
+              combined_routes: [],
+              altered_at: null,
+            },
+            session,
+          );
+        }
+        await updateStudentAssignmentsAtRevision(
+          assignedUsers,
+          () => null,
+          session,
+          "A rider assignment changed while the bus was being deleted. Reload and retry.",
+        );
       await PlanMapping.updateMany(
         { member_bus_ids: bus._id },
         { $pull: { member_bus_ids: bus._id } },
         options,
       );
       await PlanMapping.deleteMany({ root_bus_id: bus._id }, options);
-      await Bus.updateMany(
-        { altered_to_bus_id: bus._id },
+      await BusRoute.deleteMany({ bus_id: bus._id }, options);
+      await BusLiveLocation.deleteMany({ bus_id: bus._id }, options);
+      const deleted = await Bus.deleteOne(
         {
-          $set: {
-            altered_to_bus_id: null,
-            altered_to_preview: null,
-            alteration_type: null,
-            alteration_route_source: null,
-            alteration_routes: [],
-            combined_route_source: null,
-            combined_routes: [],
-            altered_at: null,
-          },
+          $and: [
+            { _id: bus._id },
+            getBusRevisionFilter(bus, expectedVersion),
+          ],
         },
         options,
       );
-      await BusRoute.deleteMany({ bus_id: bus._id }, options);
-      await BusLiveLocation.deleteMany({ bus_id: bus._id }, options);
-      await Bus.deleteOne({ _id: bus._id }, options);
-      return result;
+      if (deleted.deletedCount !== 1) {
+        const error = new Error(
+          "The bus changed. Reload before deleting it.",
+        );
+        error.code = "BUS_REVISION_CONFLICT";
+        error.statusCode = 409;
+        throw error;
+      }
+      await recordAssignmentMutation({
+        session,
+        actorId: req.user?.id,
+        action: "bus-deleted",
+        resourceId: bus._id,
+        requestId: idempotencyKey,
+        busRevisionBefore: bus.revision ?? 0,
+        busRevisionAfter: null,
+        recipients: assignedUsers.map((user) =>
+          assignmentRecipient(user._id, null),
+        ),
+        previousState: {
+          bus: bus.toObject(),
+          assignments: assignedUsers.map((user) => ({
+            user_id: user._id,
+            bus_no: user.bus_no,
+            assignment_revision: user.assignmentRevision ?? 0,
+          })),
+        },
+        newState: {
+          bus: null,
+          assignments: assignedUsers.map((user) => ({
+            user_id: user._id,
+            bus_no: null,
+            assignment_revision: (user.assignmentRevision ?? 0) + 1,
+          })),
+        },
+      });
+        return {
+          response: {
+            success: true,
+            message: "Bus and its database records deleted successfully",
+          },
+          resourceVersion: null,
+        };
+      },
     });
-    if (assignmentResult.modifiedCount) {
-      assignedUsers.forEach((user) =>
-        emitBusAssignmentNotification(user._id, null),
-      );
-    }
 
-    res.json({
-      success: true,
-      message: "Bus and its database records deleted successfully",
-    });
+    res.json({ ...result.response, duplicate: result.duplicate });
   } catch (error) {
     logSafeError("Delete bus failed", error);
-    res.status(500).json({ error: "Internal server error." });
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.statusCode ? error.message : "Internal server error.",
+      ...(error.code ? { code: error.code } : {}),
+    });
   }
 }
 
@@ -893,6 +1211,12 @@ async function deleteBus(req, res) {
 async function activateBus(req, res) {
   try {
     const { busNo } = req.params;
+    const { expectedVersion } = getMutationHeaders(req);
+    const request = { busNo: normalizeBusNumber(busNo), status: "active", expectedVersion };
+    const replay = await getBusMutationReplay(req, "status", request, expectedVersion);
+    if (replay) {
+      return res.json({ success: true, ...replay.response, duplicate: true });
+    }
     const bus = await Bus.findOne({ bus_no: normalizeBusNumber(busNo) });
     if (!bus) return res.status(404).json({ error: "Bus not found" });
     if (await findActiveChangeForBus(bus._id)) {
@@ -902,14 +1226,77 @@ async function activateBus(req, res) {
       });
     }
 
-    bus.status = "active";
-    await saveBusWithGpsBarrier(bus);
-    await notifyAssignedUsersOfBusStatus(bus, "active");
+    const users = await findStudentsAssignedToBus(bus);
+    const previousState = { status: bus.status, bus_no: bus.bus_no, revision: bus.revision ?? 0 };
+    const result = await runBusMutation({
+      req,
+      operation: "status",
+      request,
+      resourceId: bus._id,
+      expectedVersion,
+      mutate: async (session) => {
+        const updatedBus = await updateBusAtRevision(
+          bus,
+          expectedVersion,
+          { status: "active" },
+          session,
+        );
+        await updateStudentAssignmentsAtRevision(
+          users,
+          () => undefined,
+          session,
+          "A rider assignment changed while the bus was being activated. Reload and retry.",
+        );
+      await recordAssignmentMutation({
+        session,
+        actorId: req.user?.id,
+        action: "bus-activated",
+        resourceId: bus._id,
+        requestId: req.get?.("Idempotency-Key"),
+        busRevisionBefore: bus.revision ?? 0,
+        busRevisionAfter: updatedBus.revision,
+        recipients: users.map((user) => ({
+          user_id: user._id,
+          notification: {
+            type: "bus_status",
+            message: `Bus ${bus.preview_number ?? ""} is active now.`,
+            new_preview: bus.preview_number ?? null,
+            is_bus_active: true,
+          },
+        })),
+        previousState: {
+          ...previousState,
+          assignments: users.map((user) => ({
+            user_id: user._id,
+            bus_no: user.bus_no,
+            assignment_revision: user.assignmentRevision ?? 0,
+          })),
+        },
+        newState: {
+          status: updatedBus.status,
+          bus_no: updatedBus.bus_no,
+          assignments: users.map((user) => ({
+            user_id: user._id,
+            bus_no: user.bus_no,
+            assignment_revision: (user.assignmentRevision ?? 0) + 1,
+          })),
+        },
+      });
+        return {
+          response: { message: "Bus activated", revision: updatedBus.revision },
+          resourceVersion: updatedBus.revision,
+        };
+      },
+    });
 
-    res.json({ message: "Bus activated" });
+    res.json({ success: true, ...result.response, duplicate: result.duplicate });
   } catch (error) {
     logSafeError("Activate bus failed", error);
-    res.status(500).json({ error: "Internal server error." });
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.statusCode ? error.message : "Internal server error.",
+      ...(error.code ? { code: error.code } : {}),
+    });
   }
 }
 
@@ -917,6 +1304,12 @@ async function activateBus(req, res) {
 async function deactivateBus(req, res) {
   try {
     const { busNo } = req.params;
+    const { expectedVersion } = getMutationHeaders(req);
+    const request = { busNo: normalizeBusNumber(busNo), status: "inactive", expectedVersion };
+    const replay = await getBusMutationReplay(req, "status", request, expectedVersion);
+    if (replay) {
+      return res.json({ success: true, ...replay.response, duplicate: true });
+    }
     const bus = await Bus.findOne({ bus_no: normalizeBusNumber(busNo) });
     if (!bus) return res.status(404).json({ error: "Bus not found" });
     if (await findActiveChangeForBus(bus._id)) {
@@ -926,14 +1319,77 @@ async function deactivateBus(req, res) {
       });
     }
 
-    bus.status = "inactive";
-    await saveBusWithGpsBarrier(bus);
-    await notifyAssignedUsersOfBusStatus(bus, "inactive");
+    const users = await findStudentsAssignedToBus(bus);
+    const previousState = { status: bus.status, bus_no: bus.bus_no, revision: bus.revision ?? 0 };
+    const result = await runBusMutation({
+      req,
+      operation: "status",
+      request,
+      resourceId: bus._id,
+      expectedVersion,
+      mutate: async (session) => {
+        const updatedBus = await updateBusAtRevision(
+          bus,
+          expectedVersion,
+          { status: "inactive" },
+          session,
+        );
+        await updateStudentAssignmentsAtRevision(
+          users,
+          () => undefined,
+          session,
+          "A rider assignment changed while the bus was being deactivated. Reload and retry.",
+        );
+      await recordAssignmentMutation({
+        session,
+        actorId: req.user?.id,
+        action: "bus-deactivated",
+        resourceId: bus._id,
+        requestId: req.get?.("Idempotency-Key"),
+        busRevisionBefore: bus.revision ?? 0,
+        busRevisionAfter: updatedBus.revision,
+        recipients: users.map((user) => ({
+          user_id: user._id,
+          notification: {
+            type: "bus_status",
+            message: `Bus ${bus.preview_number ?? ""} is inactive now.`,
+            new_preview: bus.preview_number ?? null,
+            is_bus_active: false,
+          },
+        })),
+        previousState: {
+          ...previousState,
+          assignments: users.map((user) => ({
+            user_id: user._id,
+            bus_no: user.bus_no,
+            assignment_revision: user.assignmentRevision ?? 0,
+          })),
+        },
+        newState: {
+          status: updatedBus.status,
+          bus_no: updatedBus.bus_no,
+          assignments: users.map((user) => ({
+            user_id: user._id,
+            bus_no: user.bus_no,
+            assignment_revision: (user.assignmentRevision ?? 0) + 1,
+          })),
+        },
+      });
+        return {
+          response: { message: "Bus deactivated", revision: updatedBus.revision },
+          resourceVersion: updatedBus.revision,
+        };
+      },
+    });
 
-    res.json({ message: "Bus deactivated" });
+    res.json({ success: true, ...result.response, duplicate: result.duplicate });
   } catch (error) {
     logSafeError("Deactivate bus failed", error);
-    res.status(500).json({ error: "Internal server error." });
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.statusCode ? error.message : "Internal server error.",
+      ...(error.code ? { code: error.code } : {}),
+    });
   }
 }
 
@@ -954,6 +1410,21 @@ async function updatePreviewNumber(req, res) {
   try {
     const { busNo } = req.params;
     const { previewNumber } = req.body;
+    const { expectedVersion } = getMutationHeaders(req);
+    const request = {
+      busNo: normalizeBusNumber(busNo),
+      previewNumber: previewNumber ?? null,
+      expectedVersion,
+    };
+    const replay = await getBusMutationReplay(
+      req,
+      "preview",
+      request,
+      expectedVersion,
+    );
+    if (replay) {
+      return res.json({ success: true, ...replay.response, duplicate: true });
+    }
     const bus = await Bus.findOne({ bus_no: normalizeBusNumber(busNo) });
     if (!bus) return res.status(404).json({ success: false, error: "Bus not found." });
     if (await findActiveChangeForBus(bus._id)) {
@@ -963,13 +1434,78 @@ async function updatePreviewNumber(req, res) {
       });
     }
 
-    bus.preview_number = previewNumber;
-    await saveBusWithGpsBarrier(bus);
+    const affectedUsers = await findStudentsAssignedToBus(bus);
+    const previousState = {
+      bus_no: bus.bus_no,
+      preview_number: bus.preview_number,
+      revision: bus.revision ?? 0,
+      assignments: affectedUsers.map((user) => ({
+        user_id: user._id,
+        bus_no: user.bus_no,
+        assignment_revision: user.assignmentRevision ?? 0,
+      })),
+    };
+    const result = await runBusMutation({
+      req,
+      operation: "preview",
+      request,
+      resourceId: bus._id,
+      expectedVersion,
+      mutate: async (session) => {
+        const updatedBus = await updateBusAtRevision(
+          bus,
+          expectedVersion,
+          { preview_number: previewNumber },
+          session,
+        );
+        await updateStudentAssignmentsAtRevision(
+          affectedUsers,
+          () => undefined,
+          session,
+          "A rider assignment changed while the preview number was being updated. Reload and retry.",
+        );
+      await recordAssignmentMutation({
+        session,
+        actorId: req.user?.id,
+        action: "bus-preview-updated",
+        resourceId: bus._id,
+        requestId: req.get?.("Idempotency-Key"),
+        busRevisionBefore: bus.revision ?? 0,
+        busRevisionAfter: updatedBus.revision,
+        recipients: affectedUsers.map((user) => ({
+          user_id: user._id,
+          notification: null,
+        })),
+        previousState,
+        newState: {
+          bus_no: bus.bus_no,
+          preview_number: updatedBus.preview_number,
+          revision: updatedBus.revision,
+          assignments: affectedUsers.map((user) => ({
+            user_id: user._id,
+            bus_no: user.bus_no,
+            assignment_revision: (user.assignmentRevision ?? 0) + 1,
+          })),
+        },
+      });
+        return {
+          response: {
+            message: "Preview updated successfully",
+            revision: updatedBus.revision,
+          },
+          resourceVersion: updatedBus.revision,
+        };
+      },
+    });
 
-    res.json({ message: "Preview updated successfully" });
+    res.json({ success: true, ...result.response, duplicate: result.duplicate });
   } catch (error) {
     logSafeError("Update preview number failed", error);
-    res.status(500).json({ error: "Internal server error." });
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.statusCode ? error.message : "Internal server error.",
+      ...(error.code ? { code: error.code } : {}),
+    });
   }
 }
 
@@ -996,6 +1532,13 @@ async function getGlobalActivePlan(req, res) {
     res.json({
       success: true,
       ...(isSuperadmin ? { activePlan, planNames: DEFAULT_PLAN_NAMES } : {}),
+      ...(isSuperadmin
+        ? {
+            version:
+              (await getPlanMappingVersions(["GLOBAL_ACTIVE_PLAN"]))
+                .GLOBAL_ACTIVE_PLAN ?? 0,
+          }
+        : {}),
     });
   } catch (error) {
     logSafeError("Get global active plan failed", error);
@@ -1015,53 +1558,98 @@ async function setGlobalActivePlan(req, res) {
       });
     }
 
+    const rawVersion =
+      req.body?.expectedVersion ?? req.get?.("If-Match") ?? req.headers?.["if-match"];
+    const expectedVersion =
+      typeof rawVersion === "string" && /^"?\d+"?$/.test(rawVersion)
+        ? Number(rawVersion.replaceAll('"', ""))
+        : rawVersion;
+    const idempotencyKey =
+      req.get?.("Idempotency-Key") || req.headers?.["idempotency-key"];
     const previousPlan = await getCurrentGlobalPlan();
     if (previousPlan === normalized) {
+      const noop = await runPlanMappingNoop({
+        scope: "GLOBAL_ACTIVE_PLAN",
+        idempotencyKey,
+        expectedVersion,
+        actorId: req.user?.id,
+        action: "global-plan-noop",
+        request: { plan: normalized, expectedVersion },
+        previousState: { activePlan: previousPlan },
+        newState: { activePlan: normalized },
+        response: { activePlan: normalized },
+      });
       return res.json({
         success: true,
         message: "Global active route updated successfully.",
-        activePlan: normalized,
+        activePlan: noop.response.activePlan,
+        version: noop.version,
+        duplicate: noop.duplicate,
         planNames: DEFAULT_PLAN_NAMES,
       });
     }
 
     const mappingState = await loadPlanState();
     const notifications = getPlanChangeNotifications(mappingState, normalized);
-
-    const updated = await AppSetting.findOneAndUpdate(
-      { key: GLOBAL_ACTIVE_PLAN_KEY },
-      { key: GLOBAL_ACTIVE_PLAN_KEY, value: normalized },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
-    );
-
-    if (notifications.length) {
-      await Notification.insertMany(notifications);
-    }
+    const mutation = await runPlanMappingMutation({
+      scope: "GLOBAL_ACTIVE_PLAN",
+      idempotencyKey,
+      expectedVersion,
+      actorId: req.user?.id,
+      action: "global-plan-change",
+      request: { plan: normalized, expectedVersion },
+      previousState: { activePlan: previousPlan },
+      newState: { activePlan: normalized },
+      recipients: notifications.map((notification) => ({
+        user_id: notification.user_id,
+        notification,
+      })),
+      mutate: async (session) => {
+        const updated = await AppSetting.findOneAndUpdate(
+          { key: GLOBAL_ACTIVE_PLAN_KEY },
+          { key: GLOBAL_ACTIVE_PLAN_KEY, value: normalized },
+          {
+            upsert: true,
+            new: true,
+            setDefaultsOnInsert: true,
+            ...(session ? { session } : {}),
+          },
+        );
+        return { response: { activePlan: updated.value } };
+      },
+    });
 
     const io = getIO();
     if (io) {
       // Do not broadcast the active plan value to all connected clients (privacy).
       // Send per-user notifications without including the plan name. Admin UIs should fetch
       // the global plan via the protected API (superadmin only).
-      io.emit("bus-update", { actionType: "PLAN_CHANGED" });
-      notifications.forEach((notification) => {
-        io.to(`user_${String(notification.user_id)}`).emit("notification", {
-          type: notification.type,
-          message: notification.message,
-          newPreview: notification.new_preview,
-          isBusActive: notification.is_bus_active,
-        });
-      });
+      try {
+        io.emit("bus-update", { actionType: "PLAN_CHANGED" });
+      } catch (error) {
+        logSafeError("Global plan websocket broadcast deferred", error);
+      }
     }
     res.json({
       success: true,
       message: "Global active plan updated successfully",
-      activePlan: updated.value,
+      activePlan: mutation.response.activePlan,
+      version: mutation.version,
+      duplicate: mutation.duplicate,
       planNames: DEFAULT_PLAN_NAMES,
     });
   } catch (error) {
     logSafeError("Set global active plan failed", error);
-    res.status(500).json({ success: false, error: "Internal server error." });
+    const statusCode =
+      String(error?.code || "").startsWith("PLAN_MAPPING_")
+        ? error.statusCode || 409
+        : 500;
+    res.status(statusCode).json({
+      success: false,
+      error:
+        statusCode === 500 ? "Internal server error." : error.message,
+      ...(error?.code ? { code: error.code } : {}),
+    });
   }
 }
 
@@ -1138,36 +1726,6 @@ async function findActiveChangeForBus(busId) {
     status: { $in: ["applying", "active"] },
     $or: [{ sourceBusId: busId }, { targetBusId: busId }],
   }).select("_id");
-}
-
-async function notifyBusChange(user, {
-  type,
-  message,
-  oldBusNo = null,
-  newBusNo = null,
-  oldPreview = null,
-  newPreview = null,
-  assignmentBusNo = null,
-}) {
-  await Notification.create({
-    user_id: user._id,
-    type,
-    message,
-    old_bus_no: oldBusNo,
-    new_bus_no: newBusNo,
-    old_preview: oldPreview,
-    new_preview: newPreview,
-  });
-  const io = getIO();
-  if (io) {
-    io.to(`user_${String(user._id)}`).emit("notification", {
-      type,
-      message,
-      oldPreview,
-      newPreview,
-      assignmentBusNo,
-    });
-  }
 }
 
 async function getTemporaryBusChanges(req, res) {
@@ -1389,6 +1947,22 @@ async function getTemporaryBusChanges(req, res) {
 
 async function rollbackTemporaryBusChange(req, res) {
   try {
+    const { expectedVersion, idempotencyKey } = getMutationHeaders(req);
+    const request = {
+      changeId: String(req.params.changeId),
+      expectedVersion,
+      expectedVersions: req.body?.expectedVersions || {},
+    };
+    const replay = await getBusMutationReplay(
+      req,
+      "rollback",
+      request,
+      expectedVersion,
+    );
+    if (replay) {
+      return res.json({ success: true, ...replay.response, duplicate: true });
+    }
+
     const change = await BusChange.findById(req.params.changeId);
     if (!change || !["applying", "active"].includes(change.status)) {
       return res.status(404).json({
@@ -1403,7 +1977,7 @@ async function rollbackTemporaryBusChange(req, res) {
     const busesById = new Map(buses.map((bus) => [String(bus._id), bus]));
     const users = await User.find({
       _id: { $in: change.assignmentSnapshots.map((snapshot) => snapshot.userId) },
-    }).select("_id bus_no role is_active");
+    }).select("_id bus_no assignmentRevision role is_active");
     const usersById = new Map(users.map((user) => [String(user._id), user]));
     if (buses.length !== change.busSnapshots.length) {
       return res.status(409).json({
@@ -1411,8 +1985,14 @@ async function rollbackTemporaryBusChange(req, res) {
         error: "A bus involved in this temporary change no longer exists; rollback cannot safely restore it.",
       });
     }
+    const sourceBus = busesById.get(String(change.sourceBusId));
+    const busVersions = getExpectedBusVersions(
+      req,
+      buses,
+      sourceBus,
+      expectedVersion,
+    );
     if (change.type === "combine") {
-      const sourceBus = busesById.get(String(change.sourceBusId));
       const currentRiders = await findStudentsAssignedToBus(sourceBus);
       if (currentRiders.length) {
         return res.status(409).json({
@@ -1470,34 +2050,12 @@ async function rollbackTemporaryBusChange(req, res) {
         snapshot.busNo,
       ]),
     );
-    await runGpsConfigurationMutation(async (session) => {
-      for (const snapshot of change.busSnapshots) {
-        const bus = busesById.get(String(snapshot.busId));
-        restoreBusSnapshot(bus, snapshot);
-        if (session) await bus.save({ session });
-        else await bus.save();
-      }
-      for (const snapshot of change.assignmentSnapshots) {
-        const user = usersById.get(String(snapshot.userId));
-        if (!user) continue;
-        user.bus_no = snapshot.beforeBusNo
-          ? restoredBusByNo.get(String(snapshot.beforeBusNo).toUpperCase()) || snapshot.beforeBusNo
-          : null;
-        if (session) await user.save({ session });
-        else await user.save();
-      }
-    });
-
-    change.status = "rolled_back";
-    change.rolledBackAt = new Date();
-    await change.save();
-
-    for (const snapshot of change.assignmentSnapshots) {
+    const rollbackRecipients = change.assignmentSnapshots.flatMap((snapshot) => {
       const user = usersById.get(String(snapshot.userId));
-      if (!user) continue;
+      if (!user) return [];
       const restoredBus = snapshot.beforeBusNo
-        ? buses.find((bus) =>
-          [bus.bus_no, bus.preview_number].some(
+        ? buses.find((candidate) =>
+          [candidate.bus_no, candidate.preview_number].some(
             (identifier) =>
               String(identifier || "").toUpperCase() ===
               String(snapshot.beforeBusNo).toUpperCase(),
@@ -1507,41 +2065,158 @@ async function rollbackTemporaryBusChange(req, res) {
       const message = restoredBus
         ? `The temporary bus change has ended. Your previous assignment to Bus ${restoredBus.preview_number ?? restoredBus.bus_no} is restored.`
         : "The temporary bus change has ended. You do not have a bus assignment; please contact administration.";
-      await notifyBusChange(user, {
-        type: restoredBus ? "bus_change_rolled_back" : "bus_unassigned",
-        message,
-        oldBusNo: snapshot.afterBusNo,
-        newBusNo: snapshot.beforeBusNo,
-        oldPreview: change.targetPreview,
-        newPreview: restoredBus?.preview_number ?? null,
-        assignmentBusNo: snapshot.beforeBusNo,
+      return [{
+        user_id: user._id,
+        notification: {
+          type: restoredBus ? "bus_change_rolled_back" : "bus_unassigned",
+          message,
+          old_bus_no: snapshot.afterBusNo,
+          new_bus_no: snapshot.beforeBusNo,
+          old_preview: change.targetPreview,
+          new_preview: restoredBus?.preview_number ?? null,
+        },
+      }];
+    });
+    const previousBusStates = buses.map((bus) => bus.toObject());
+    const previousAssignments = change.assignmentSnapshots.map((snapshot) => ({
+      user_id: snapshot.userId,
+      bus_no: usersById.get(String(snapshot.userId))?.bus_no ?? null,
+      assignment_revision:
+        usersById.get(String(snapshot.userId))?.assignmentRevision ?? 0,
+    }));
+    const assignmentSnapshotsByUserId = new Map(
+      change.assignmentSnapshots.map((snapshot) => [
+        String(snapshot.userId),
+        snapshot,
+      ]),
+    );
+    const result = await runBusMutation({
+      req,
+      operation: "rollback",
+      request,
+      resourceId: change._id,
+      expectedVersion,
+      mutate: async (session) => {
+        const restoredBuses = [];
+        for (const snapshot of change.busSnapshots) {
+          const bus = busesById.get(String(snapshot.busId));
+          restoreBusSnapshot(bus, snapshot);
+          restoredBuses.push(await saveBusAtRevision(
+            bus,
+            busVersions.get(String(bus._id)),
+            session,
+          ));
+        }
+        await updateStudentAssignmentsAtRevision(
+          change.assignmentSnapshots
+            .filter((snapshot) => snapshot.beforeBusNo !== snapshot.afterBusNo)
+            .map((snapshot) => usersById.get(String(snapshot.userId)))
+            .filter(Boolean),
+          (user) => {
+            const snapshot = assignmentSnapshotsByUserId.get(String(user._id));
+            return snapshot?.beforeBusNo
+              ? restoredBusByNo.get(String(snapshot.beforeBusNo).toUpperCase()) ||
+                  snapshot.beforeBusNo
+              : null;
+          },
+          session,
+          "A rider assignment changed while the bus change was being rolled back. Reload and retry.",
+        );
+        const changeUpdate = await BusChange.updateOne(
+          { _id: change._id, status: { $in: ["applying", "active"] } },
+          { $set: { status: "rolled_back", rolledBackAt: new Date() } },
+          session ? { session } : {},
+        );
+        if (changeUpdate.matchedCount !== 1) {
+          const error = new Error(
+            "This temporary bus change has already been updated.",
+          );
+          error.code = "BUS_CHANGE_CONFLICT";
+          error.statusCode = 409;
+          throw error;
+        }
+      await recordAssignmentMutation({
+        session,
+        actorId: req.user?.id,
+        action: "temporary-bus-change-rolled-back",
+        resourceId: change._id,
+        requestId: idempotencyKey,
+        busRevisionBefore: expectedVersion,
+        busRevisionAfter: expectedVersion + 1,
+        recipients: rollbackRecipients,
+        previousState: { buses: previousBusStates, assignments: previousAssignments },
+        newState: {
+          buses: restoredBuses,
+          assignments: change.assignmentSnapshots.map((snapshot) => ({
+            user_id: snapshot.userId,
+            bus_no: snapshot.beforeBusNo,
+            assignment_revision:
+              (usersById.get(String(snapshot.userId))?.assignmentRevision ?? 0) +
+              (snapshot.beforeBusNo !== snapshot.afterBusNo ? 1 : 0),
+          })),
+          status: "rolled_back",
+        },
       });
-    }
+        return {
+          response: {
+            message: `Bus ${change.sourcePreview ?? change.sourceBusNo} restored to its normal service.`,
+            notifiedStudents: change.assignmentSnapshots.length,
+          },
+          resourceVersion: expectedVersion + 1,
+        };
+      },
+    });
 
     const io = getIO();
-    if (io) {
-      io.emit("bus-update", {
-        actionType: "BUS_RESTORED",
-        previewNumber: change.sourcePreview,
-      });
+    if (io && !result.duplicate) {
+      try {
+        io.emit("bus-update", {
+          actionType: "BUS_RESTORED",
+          previewNumber: change.sourcePreview,
+        });
+      } catch (error) {
+        logSafeError("Bus rollback websocket broadcast deferred", error);
+      }
     }
     return res.json({
       success: true,
-      message: `Bus ${change.sourcePreview ?? change.sourceBusNo} restored to its normal service.`,
-      notifiedStudents: change.assignmentSnapshots.length,
+      ...result.response,
+      duplicate: result.duplicate,
     });
   } catch (error) {
     logSafeError("Rollback temporary bus change failed", error);
-    return res.status(500).json({
+    return res.status(error.statusCode || 500).json({
       success: false,
-      error: "Could not roll back this temporary bus change.",
+      error: error.statusCode
+        ? error.message
+        : "Could not roll back this temporary bus change.",
+      ...(error.code ? { code: error.code } : {}),
     });
   }
 }
 
 async function changeBus(req, res, alterationType) {
-  let change;
   try {
+    const { expectedVersion } = getMutationHeaders(req);
+    const request = {
+      sourceBusNo: normalizeBusNumber(req.params.busNo),
+      targetBusNo: normalizeBusNumber(req.body?.newBusNo),
+      alterationType,
+      routeSource: req.body?.routeSource ?? null,
+      routesByPlan: req.body?.routesByPlan ?? null,
+      expectedVersion,
+      expectedVersions: req.body?.expectedVersions || {},
+    };
+    const replay = await getBusMutationReplay(
+      req,
+      alterationType,
+      request,
+      expectedVersion,
+    );
+    if (replay) {
+      return res.json({ success: true, ...replay.response, duplicate: true });
+    }
+
     const sourceBus = await findBusByIdentifier(req.params.busNo);
     const targetBus = await findBusByIdentifier(req.body?.newBusNo);
 
@@ -1552,6 +2227,12 @@ async function changeBus(req, res, alterationType) {
     if (!targetBus) {
       return res.status(404).json({ success: false, error: 'New bus not found.' });
     }
+    const busVersions = getExpectedBusVersions(
+      req,
+      [sourceBus, targetBus],
+      sourceBus,
+      expectedVersion,
+    );
 
     if (sourceBus._id.equals(targetBus._id)) {
       return res.status(400).json({ success: false, error: 'Choose a different bus.' });
@@ -1660,6 +2341,7 @@ async function changeBus(req, res, alterationType) {
       });
     }
     let alterationRoutes = [];
+    const pendingStops = [];
     if (routeSource === "custom") {
       try {
         alterationRoutes = normalizeAlterationRoutes(routesByPlan);
@@ -1710,12 +2392,13 @@ async function changeBus(req, res, alterationType) {
           stop = matches[0] || createdStops.get(key);
         }
         if (!stop) {
-          stop = await StopMaster.create({
+          stop = {
             stopId: `STOP-${randomUUID()}`,
             name: route.stop_name.trim().replace(/\s+/g, " "),
             source: "EXISTING_STOP",
             status: "PENDING",
-          });
+          };
+          pendingStops.push(stop);
           createdStops.set(key, stop);
         }
         route.stopId = stop.stopId;
@@ -1798,95 +2481,15 @@ async function changeBus(req, res, alterationType) {
     ].map((user) => ({
       userId: user._id,
       beforeBusNo: user.bus_no ?? null,
+      beforeAssignmentRevision: user.assignmentRevision ?? 0,
       afterBusNo: assignmentByUserId.has(String(user._id))
         ? assignmentByUserId.get(String(user._id))
         : user.bus_no ?? null,
+      afterAssignmentRevision: assignmentByUserId.has(String(user._id))
+        ? (user.assignmentRevision ?? 0) + 1
+        : user.assignmentRevision ?? 0,
     }));
     const busSnapshots = [snapshotBus(sourceBus), snapshotBus(targetBus)];
-    change = await BusChange.create({
-      type: alterationType,
-      status: "applying",
-      sourceBusId: sourceBus._id,
-      sourceBusNo: sourceBus.bus_no,
-      sourcePreview: sourceBus.preview_number,
-      targetBusId: targetBus._id,
-      targetBusNo: targetBus.bus_no,
-      targetPreview: targetBus.preview_number,
-      routeSource: isCombined ? routeSource : null,
-      busSnapshots,
-      assignmentSnapshots,
-      affectedUsersCount: assignmentSnapshots.length,
-    });
-
-    await runGpsConfigurationMutation(async (session) => {
-      if (targetCanBeReused) {
-        targetBus.status = "active";
-        targetBus.altered_to_bus_id = null;
-        targetBus.altered_to_preview = null;
-        targetBus.alteration_type = null;
-        targetBus.alteration_route_source = null;
-        targetBus.alteration_routes = [];
-        targetBus.altered_at = null;
-        targetBus.combined_route_source = null;
-        targetBus.combined_routes = [];
-        if (session) await targetBus.save({ session });
-        else await targetBus.save();
-      }
-
-      if (isCombined) {
-        targetBus.combined_route_source = routeSource;
-        targetBus.combined_routes = selectedRoutes.map((route) => ({
-          plan_name: route.plan_name,
-          stop_name: route.stop_name,
-          stop_order: route.stop_order,
-          stopId: route.stopId || null,
-          arrival_time: route.arrival_time || null,
-        }));
-        if (session) await targetBus.save({ session });
-        else await targetBus.save();
-        sourceBus.status = "active";
-        sourceBus.altered_to_bus_id = null;
-        sourceBus.altered_to_preview = null;
-        sourceBus.alteration_type = null;
-        sourceBus.alteration_route_source = null;
-        sourceBus.alteration_routes = [];
-        sourceBus.altered_at = null;
-        sourceBus.combined_route_source = null;
-        sourceBus.combined_routes = [];
-        if (session) await sourceBus.save({ session });
-        else await sourceBus.save();
-      } else {
-        sourceBus.status = "inactive";
-        sourceBus.altered_to_bus_id = targetBus._id;
-        sourceBus.altered_to_preview = targetBus.preview_number ?? null;
-        sourceBus.alteration_type = "alter";
-        sourceBus.alteration_route_source = null;
-        sourceBus.alteration_routes = [];
-        sourceBus.altered_at = new Date();
-        if (session) await sourceBus.save({ session });
-        else await sourceBus.save();
-      }
-
-      for (const [userId, busNo] of assignmentByUserId) {
-        await User.updateOne(
-          { _id: userId },
-          { $set: { bus_no: busNo } },
-          session ? { session } : {},
-        );
-      }
-    });
-    if (isCombined) {
-      const remainingSourceUsers = await findStudentsAssignedToBus(sourceBus);
-      if (remainingSourceUsers.length) {
-        change.status = "active";
-        await change.save();
-        return res.status(409).json({
-          success: false,
-          error: `Combination is incomplete: ${remainingSourceUsers.length} rider(s) remain on source Bus ${sourceBus.preview_number ?? sourceBus.bus_no}. Reassign them so it has 0 riders, then retry or roll back.`,
-        });
-      }
-    }
-
     const uniqueUsers = new Map(
       [...sourceUsers, ...targetUsers].map((user) => [String(user._id), user]),
     );
@@ -1899,70 +2502,187 @@ async function changeBus(req, res, alterationType) {
               : "the uploaded combined route's"
         } stops and timings; open Home and tap View Stops to see the route.`
       : `For your bus service, use Bus ${targetBus.preview_number}. Continue following Bus ${sourceBus.preview_number}'s original stops and timings; open Home and tap View Stops to see them.`;
-    for (const user of uniqueUsers.values()) {
+    const propagationRecipients = [...uniqueUsers.values()].map((user) => {
       const isSourceRider = sourceUsers.some(
         (sourceUser) => String(sourceUser._id) === String(user._id),
       );
-      if (isSourceRider) {
-        await notifyBusChange(user, {
+      return {
+        user_id: user._id,
+        notification: {
           type: isCombined ? "bus_combined" : "bus_altered",
-          message: isCombined
-            ? previewMessage
-            : `For your bus service, use Bus ${targetBus.preview_number}. Continue following Bus ${sourceBus.preview_number}'s original stops and timings; open Home and tap View Stops to see them.`,
-          oldBusNo: sourceBus.bus_no,
-          newBusNo: targetBus.bus_no,
+          message: isSourceRider && !isCombined
+            ? `For your bus service, use Bus ${targetBus.preview_number}. Continue following Bus ${sourceBus.preview_number}'s original stops and timings; open Home and tap View Stops to see them.`
+            : previewMessage,
+          old_bus_no: sourceBus.bus_no,
+          new_bus_no: targetBus.bus_no,
+          old_preview: sourceBus.preview_number,
+          new_preview: targetBus.preview_number,
+        },
+      };
+    });
+    const previousBusStates = [sourceBus.toObject(), targetBus.toObject()];
+    const result = await runBusMutation({
+      req,
+      operation: alterationType,
+      request,
+      resourceId: sourceBus._id,
+      expectedVersion,
+      mutate: async (session) => {
+        if (pendingStops.length) {
+          await StopMaster.create(
+            pendingStops,
+            session ? { session } : {},
+          );
+        }
+        const [change] = await BusChange.create(
+          [{
+            type: alterationType,
+            status: "active",
+            sourceBusId: sourceBus._id,
+            sourceBusNo: sourceBus.bus_no,
+            sourcePreview: sourceBus.preview_number,
+            targetBusId: targetBus._id,
+            targetBusNo: targetBus.bus_no,
+            targetPreview: targetBus.preview_number,
+            routeSource: isCombined ? routeSource : null,
+            busSnapshots,
+            assignmentSnapshots,
+            affectedUsersCount: assignmentSnapshots.length,
+          }],
+          session ? { session } : {},
+        );
+
+        if (targetCanBeReused) {
+          targetBus.status = "active";
+          targetBus.altered_to_bus_id = null;
+          targetBus.altered_to_preview = null;
+          targetBus.alteration_type = null;
+          targetBus.alteration_route_source = null;
+          targetBus.alteration_routes = [];
+          targetBus.altered_at = null;
+          targetBus.combined_route_source = null;
+          targetBus.combined_routes = [];
+        }
+
+        if (isCombined) {
+          targetBus.combined_route_source = routeSource;
+          targetBus.combined_routes = selectedRoutes.map((route) => ({
+            plan_name: route.plan_name,
+            stop_name: route.stop_name,
+            stop_order: route.stop_order,
+            stopId: route.stopId || null,
+            arrival_time: route.arrival_time || null,
+          }));
+          sourceBus.status = "active";
+          sourceBus.altered_to_bus_id = null;
+          sourceBus.altered_to_preview = null;
+          sourceBus.alteration_type = null;
+          sourceBus.alteration_route_source = null;
+          sourceBus.alteration_routes = [];
+          sourceBus.altered_at = null;
+          sourceBus.combined_route_source = null;
+          sourceBus.combined_routes = [];
+        } else {
+          sourceBus.status = "inactive";
+          sourceBus.altered_to_bus_id = targetBus._id;
+          sourceBus.altered_to_preview = targetBus.preview_number ?? null;
+          sourceBus.alteration_type = "alter";
+          sourceBus.alteration_route_source = null;
+          sourceBus.alteration_routes = [];
+          sourceBus.altered_at = new Date();
+        }
+
+        const updatedTarget = await saveBusAtRevision(
+          targetBus,
+          busVersions.get(String(targetBus._id)),
+          session,
+        );
+        const updatedSource = await saveBusAtRevision(
+          sourceBus,
+          busVersions.get(String(sourceBus._id)),
+          session,
+        );
+
+        await updateStudentAssignmentsAtRevision(
+          sourceUsers,
+          (user) => assignmentByUserId.get(String(user._id)),
+          session,
+          "A rider assignment changed while the bus change was being applied. Reload and retry.",
+        );
+
+        await recordAssignmentMutation({
+          session,
+          actorId: req.user?.id,
+          action: isCombined ? "buses-combined" : "bus-replaced",
+          resourceId: change._id,
+          requestId: getMutationHeaders(req).idempotencyKey,
+          busRevisionBefore: expectedVersion,
+          busRevisionAfter: updatedSource.revision,
+          recipients: propagationRecipients,
+          previousState: {
+            buses: previousBusStates,
+            assignments: assignmentSnapshots.map((snapshot) => ({
+              user_id: snapshot.userId,
+              bus_no: snapshot.beforeBusNo,
+              assignment_revision: snapshot.beforeAssignmentRevision,
+            })),
+          },
+          newState: {
+            buses: [updatedSource, updatedTarget],
+            assignments: assignmentSnapshots.map((snapshot) => ({
+              user_id: snapshot.userId,
+              bus_no: snapshot.afterBusNo,
+              assignment_revision: snapshot.afterAssignmentRevision,
+            })),
+            status: "active",
+          },
+        });
+
+        return {
+          response: {
+            message: previewMessage,
+            sourceBusNo: sourceBus.bus_no,
+            newBusNo: targetBus.bus_no,
+            sourcePreview: sourceBus.preview_number,
+            newPreview: targetBus.preview_number,
+            notifiedStudents: uniqueUsers.size,
+            temporaryChangeId: String(change._id),
+            sourceRevision: updatedSource.revision,
+            targetRevision: updatedTarget.revision,
+          },
+          resourceVersion: updatedSource.revision,
+        };
+      },
+    });
+    const io = getIO();
+    if (io && !result.duplicate) {
+      try {
+        io.emit("bus-update", {
+          actionType: isCombined ? "BUS_COMBINED" : "BUS_ALTERED",
           oldPreview: sourceBus.preview_number,
           newPreview: targetBus.preview_number,
-          assignmentBusNo: targetBus.bus_no,
         });
-        continue;
+      } catch (error) {
+        logSafeError("Temporary bus change websocket broadcast deferred", error);
       }
-      await notifyBusChange(user, {
-        type: isCombined ? "bus_combined" : "bus_altered",
-        message: previewMessage,
-        oldBusNo: sourceBus.bus_no,
-        newBusNo: targetBus.bus_no,
-        oldPreview: sourceBus.preview_number,
-        newPreview: targetBus.preview_number,
-        assignmentBusNo:
-          assignmentByUserId.get(String(user._id)) ?? user.bus_no,
-      });
-    }
-    change.status = "active";
-    await change.save();
-
-    const io = getIO();
-    if (io) {
-      io.emit("bus-update", {
-        actionType: isCombined ? "BUS_COMBINED" : "BUS_ALTERED",
-        oldPreview: sourceBus.preview_number,
-        newPreview: targetBus.preview_number,
-      });
     }
 
     res.json({
       success: true,
-      message: previewMessage,
-      sourceBusNo: sourceBus.bus_no,
-      newBusNo: targetBus.bus_no,
-      sourcePreview: sourceBus.preview_number,
-      newPreview: targetBus.preview_number,
-      notifiedStudents: uniqueUsers.size,
-      temporaryChangeId: String(change._id),
+      ...result.response,
+      duplicate: result.duplicate,
     });
   } catch (error) {
     logSafeError(`${alterationType} bus failed`, error);
-    if (change && change.status !== "rolled_back") {
-      change.status = "active";
-      try {
-        await change.save();
-      } catch (recordError) {
-        logSafeError("Could not mark partial bus change for rollback", recordError);
-      }
-    }
-    res.status(500).json({
+    const statusCode = error.statusCode || (error.code === 11000 ? 409 : 500);
+    res.status(statusCode).json({
       success: false,
-      error: `Failed to ${alterationType} the bus.`,
+      error: error.statusCode
+        ? error.message
+        : error.code === 11000
+          ? "Bus number, preview number, or GPS device ID is already in use."
+          : `Failed to ${alterationType} the bus.`,
+      ...(error.code ? { code: error.code } : {}),
     });
   }
 }
@@ -1977,6 +2697,22 @@ async function combineBus(req, res) {
 
 async function restoreAlteredBus(req, res) {
   try {
+    const { expectedVersion } = getMutationHeaders(req);
+    const request = {
+      busNo: normalizeBusNumber(req.params.busNo),
+      operation: "restore-altered",
+      expectedVersion,
+    };
+    const replay = await getBusMutationReplay(
+      req,
+      "restore-altered",
+      request,
+      expectedVersion,
+    );
+    if (replay) {
+      return res.json({ success: true, ...replay.response, duplicate: true });
+    }
+
     const bus = await findBusByIdentifier(req.params.busNo);
     if (!bus) {
       return res.status(404).json({ success: false, error: "Bus not found." });
@@ -1998,62 +2734,136 @@ async function restoreAlteredBus(req, res) {
     const notificationType =
       alterationType === "combine" ? "bus_combined" : "bus_altered";
     const users = await findStudentsAssignedToBus(bus);
-    bus.status = "active";
-    bus.altered_to_bus_id = null;
-    bus.altered_to_preview = null;
-    bus.alteration_type = null;
-    bus.alteration_route_source = null;
-    bus.alteration_routes = [];
-    bus.altered_at = null;
-    await saveBusWithGpsBarrier(bus);
-
+    const previousState = {
+      status: bus.status,
+      altered_to_bus_id: bus.altered_to_bus_id,
+      altered_to_preview: bus.altered_to_preview,
+      alteration_type: bus.alteration_type,
+      bus_no: bus.bus_no,
+      preview_number: bus.preview_number,
+      revision: bus.revision ?? 0,
+      assignments: users.map((user) => ({
+        user_id: user._id,
+        bus_no: user.bus_no,
+        assignment_revision: user.assignmentRevision ?? 0,
+      })),
+    };
     const message =
       alterationType === "combine"
         ? `The combined service with bus ${previousPreview ?? "replacement"} has ended. Your original bus plans and stops are restored.`
         : `The bus alteration with bus ${previousPreview ?? "replacement"} has ended. Your original bus is restored.`;
-    const notifications = users.map((user) => ({
-      user_id: user._id,
-      type: notificationType,
-      message,
-      old_bus_no: replacementBus?.bus_no ?? null,
-      new_bus_no: bus.bus_no,
-      old_preview: previousPreview,
-      new_preview: bus.preview_number ?? null,
-    }));
-    if (notifications.length) await Notification.insertMany(notifications);
+    const result = await runBusMutation({
+      req,
+      operation: "restore-altered",
+      request,
+      resourceId: bus._id,
+      expectedVersion,
+      mutate: async (session) => {
+        const updatedBus = await updateBusAtRevision(
+          bus,
+          expectedVersion,
+          {
+            status: "active",
+            altered_to_bus_id: null,
+            altered_to_preview: null,
+            alteration_type: null,
+            alteration_route_source: null,
+            alteration_routes: [],
+            altered_at: null,
+          },
+          session,
+        );
+        await updateStudentAssignmentsAtRevision(
+          users,
+          () => undefined,
+          session,
+          "A rider assignment changed while the altered bus was being restored. Reload and retry.",
+        );
+      await recordAssignmentMutation({
+        session,
+        actorId: req.user?.id,
+        action: "altered-bus-restored",
+        resourceId: bus._id,
+        requestId: getMutationHeaders(req).idempotencyKey,
+        busRevisionBefore: expectedVersion,
+        busRevisionAfter: updatedBus.revision,
+        recipients: users.map((user) => ({
+          user_id: user._id,
+          notification: {
+            type: notificationType,
+            message,
+            old_bus_no: replacementBus?.bus_no ?? null,
+            new_bus_no: bus.bus_no,
+            old_preview: previousPreview,
+            new_preview: bus.preview_number ?? null,
+          },
+        })),
+        previousState,
+        newState: {
+          status: updatedBus.status,
+          altered_to_bus_id: null,
+          altered_to_preview: null,
+          alteration_type: null,
+          bus_no: updatedBus.bus_no,
+          preview_number: updatedBus.preview_number,
+          revision: updatedBus.revision,
+          assignments: users.map((user) => ({
+            user_id: user._id,
+            bus_no: user.bus_no,
+            assignment_revision: (user.assignmentRevision ?? 0) + 1,
+          })),
+        },
+      });
+        return {
+          response: {
+            message,
+            previewNumber: updatedBus.preview_number,
+            notifiedStudents: users.length,
+            revision: updatedBus.revision,
+          },
+          resourceVersion: updatedBus.revision,
+        };
+      },
+    });
 
     const io = getIO();
-    if (io) {
-      users.forEach((user) => {
-        io.to(`user_${user._id.toString()}`).emit("notification", {
-          type: notificationType,
-          message,
-          oldPreview: previousPreview,
-          newPreview: bus.preview_number ?? null,
+    if (io && !result.duplicate) {
+      try {
+        io.emit("bus-update", {
+          actionType: "BUS_RESTORED",
+          previewNumber: bus.preview_number,
         });
-      });
-      io.emit("bus-update", {
-        actionType: "BUS_RESTORED",
-        previewNumber: bus.preview_number,
-      });
+      } catch (error) {
+        logSafeError("Bus restore websocket broadcast deferred", error);
+      }
     }
     return res.json({
       success: true,
-      message,
-      previewNumber: bus.preview_number,
-      notifiedStudents: users.length,
+      ...result.response,
+      duplicate: result.duplicate,
     });
   } catch (error) {
     logSafeError("Restore altered bus failed", error);
-    return res
-      .status(500)
-      .json({ success: false, error: "Failed to restore combined bus." });
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.statusCode ? error.message : "Failed to restore combined bus.",
+      ...(error.code ? { code: error.code } : {}),
+    });
   }
 }
 
 // ================= GET BUS ROUTES (PLANS + STOPS) =================
 async function getBusRoutes(req, res) {
   try {
+    if (String(req.user?.role || "").toLowerCase() === "student") {
+      const assignment = await resolveStudentAssignment(req.user.id, {
+        includeStops: true,
+      });
+      return res.json(
+        assignment.publicSnapshot || getPublicAssignmentSnapshot(assignment),
+      );
+    }
+
     const { busNo } = req.params;
 
     const bus = await findBusByIdentifier(busNo);
@@ -2142,6 +2952,37 @@ async function updateBusDetails(req, res) {
   try {
     const { busNo } = req.params;
     const { previewNumber, gpsDeviceId, regNo } = req.body;
+    const { idempotencyKey, expectedVersion } = getMutationHeaders(req);
+    const update = {};
+    if (previewNumber !== undefined) update.preview_number = previewNumber || null;
+    if (gpsDeviceId !== undefined && gpsDeviceId !== null && gpsDeviceId !== "") {
+      update.gps_device_id = gpsDeviceId;
+    }
+    if (regNo !== undefined) update.reg_no = regNo || null;
+    if (!Object.keys(update).length) {
+      return res.status(400).json({
+        success: false,
+        error: "Provide at least one bus detail to update.",
+      });
+    }
+    const scope = `bus-details:${String(req.user?.id || "")}`;
+    const request = {
+      busNo: normalizeBusNumber(busNo),
+      update,
+      expectedVersion,
+    };
+    const replay = await checkIdempotentReplay({
+      scope,
+      idempotencyKey,
+      request,
+      expectedVersion,
+    });
+    if (replay) {
+      return res.status(200).json({
+        ...replay.response,
+        duplicate: true,
+      });
+    }
 
     const bus = await Bus.findOne({ bus_no: normalizeBusNumber(busNo) });
     if (!bus) {
@@ -2150,7 +2991,7 @@ async function updateBusDetails(req, res) {
         .json({ success: false, error: `Bus ${busNo} not found` });
     }
 
-    if (previewNumber !== undefined) {
+    if (Object.hasOwn(update, "preview_number")) {
       if (previewNumber !== null && previewNumber !== "") {
         const exists = await Bus.findOne({
           preview_number: previewNumber,
@@ -2162,14 +3003,9 @@ async function updateBusDetails(req, res) {
             .json({ success: false, error: "Preview number already in use" });
         }
       }
-      bus.preview_number = previewNumber || null;
     }
 
-    if (
-      gpsDeviceId !== undefined &&
-      gpsDeviceId !== null &&
-      gpsDeviceId !== ""
-    ) {
+    if (Object.hasOwn(update, "gps_device_id")) {
       const exists = await Bus.findOne({
         gps_device_id: gpsDeviceId,
         bus_no: { $ne: bus.bus_no },
@@ -2179,26 +3015,116 @@ async function updateBusDetails(req, res) {
           .status(400)
           .json({ success: false, error: "GPS device ID already in use" });
       }
-      bus.gps_device_id = gpsDeviceId;
     }
 
-    if (regNo !== undefined) bus.reg_no = regNo || null;
-
-    await saveBusWithGpsBarrier(bus);
-
-    res.json({
-      success: true,
-      message: "Bus details updated successfully",
-      bus: {
-        busNo: bus.bus_no,
-        previewNumber: bus.preview_number,
-        gpsDeviceId: bus.gps_device_id,
-        regNo: bus.reg_no,
+    const result = await runIdempotentMutation({
+      scope,
+      idempotencyKey,
+      actorId: req.user?.id,
+      request,
+      resourceId: bus._id,
+      expectedVersion,
+      mutate: async (session) => {
+        const query = Bus.findOneAndUpdate(
+          {
+          $and: [
+            { _id: bus._id },
+            expectedVersion === 0
+              ? {
+                  $or: [
+                    { revision: 0 },
+                    { revision: { $exists: false } },
+                  ],
+                }
+              : { revision: expectedVersion },
+          ],
+          },
+          {
+          $set: update,
+          $inc: { revision: 1 },
+          },
+          {
+          new: true,
+          runValidators: true,
+          ...(session ? { session } : {}),
+          },
+        );
+        const updatedBus = await query.lean();
+        if (!updatedBus) {
+          const error = new Error(
+          "The bus changed. Reload before applying this update.",
+          );
+          error.code = "BUS_REVISION_CONFLICT";
+          error.statusCode = 409;
+          throw error;
+        }
+        if (
+          Object.hasOwn(update, "gps_device_id") &&
+          String(bus.gps_device_id || "") !== String(updatedBus.gps_device_id || "")
+        ) {
+          await BusLiveLocation.deleteOne(
+            { bus_id: bus._id },
+            session ? { session } : {},
+          );
+        }
+        const affectedUsers = await findStudentsAssignedToBus(bus);
+        const previousState = {
+          bus_no: bus.bus_no,
+          preview_number: bus.preview_number,
+          gps_device_id: bus.gps_device_id,
+          reg_no: bus.reg_no,
+          revision: bus.revision ?? 0,
+        };
+        await recordAssignmentMutation({
+          session,
+          actorId: req.user?.id,
+          action: "bus-details-updated",
+          resourceId: bus._id,
+          requestId: idempotencyKey,
+          busRevisionBefore: bus.revision ?? 0,
+          busRevisionAfter: updatedBus.revision,
+          recipients: affectedUsers.map((user) => ({
+          user_id: user._id,
+          notification: null,
+          })),
+          previousState,
+          newState: {
+          bus_no: updatedBus.bus_no,
+          preview_number: updatedBus.preview_number,
+          gps_device_id: updatedBus.gps_device_id,
+          reg_no: updatedBus.reg_no,
+          revision: updatedBus.revision,
+          },
+        });
+        return {
+          response: {
+          success: true,
+          message: "Bus details updated successfully",
+          bus: {
+            busNo: updatedBus.bus_no,
+            previewNumber: updatedBus.preview_number,
+            gpsDeviceId: updatedBus.gps_device_id,
+            regNo: updatedBus.reg_no,
+            revision: updatedBus.revision,
+          },
+          },
+          resourceVersion: updatedBus.revision,
+        };
       },
+    });
+    return res.status(200).json({
+      ...result.response,
+      duplicate: result.duplicate,
     });
   } catch (error) {
     logSafeError("Update bus details failed", error);
-    res.status(500).json({ success: false, error: "Internal server error." });
+    return res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.statusCode
+        ? error.message
+        : "Internal server error.",
+      ...(error.code ? { code: error.code } : {}),
+    });
   }
 }
 
@@ -2228,6 +3154,14 @@ async function getLiveLocation(req, res) {
   try {
     const { busNo } = req.params;
     const normalizedBusNo = normalizeBusNumber(busNo ?? "");
+    if (String(req.user?.role || "").toLowerCase() === "student") {
+      const assignment = await resolveStudentAssignment(req.user.id, {
+        includeStops: req.query?.gpsOnly !== "true",
+      });
+      return res.status(200).json(
+        assignment.publicSnapshot || getPublicAssignmentSnapshot(assignment),
+      );
+    }
     if (req.query?.gpsOnly === "true") {
       return await getGpsLocationSnapshot(req, res, busNo, normalizedBusNo);
     }
@@ -2499,9 +3433,43 @@ async function getGpsLocationSnapshot(req, res, busNo, normalizedBusNo) {
   });
 }
 
+async function getMyAssignment(req, res) {
+  try {
+    if (String(req.user?.role || "").toLowerCase() !== "student") {
+      return res.status(403).json({
+        success: false,
+        error: "This endpoint is available to students only.",
+      });
+    }
+    const assignment = await resolveStudentAssignment(req.user.id, {
+      includeStops: true,
+    });
+    return res.status(200).json(
+      assignment.publicSnapshot || getPublicAssignmentSnapshot(assignment),
+    );
+  } catch (error) {
+    logSafeError("Get student assignment failed", error);
+    return res.status(500).json({
+      success: false,
+      error: "Could not load your current bus assignment.",
+    });
+  }
+}
+
 // ================= TRACK BY PREVIEW =================
 async function trackByPreview(req, res) {
   try {
+    if (
+      !["primary_admin", "superadmin"].includes(
+        String(req.user?.role || "").toLowerCase(),
+      )
+    ) {
+      return res.status(403).json({
+        success: false,
+        error: "Preview tracking is restricted to administrators.",
+      });
+    }
+
     const { previewNumber } = req.params;
 
     // Accept string or numeric preview numbers (e.g. "4" or 4).
@@ -2629,7 +3597,6 @@ module.exports = {
   getRoutesForBus,
   getAssignedBusRoutes,
   getIncomingBusChanges,
-  uploadBusRoutes,
   updateBusNumber,
   getAllBuses,
   getBusesForPlan,
@@ -2645,6 +3612,7 @@ module.exports = {
   getBusRoutes,
   getPlans,
   getLiveLocation,
+  getMyAssignment,
   trackByPreview,
   alterBus,
   combineBus,

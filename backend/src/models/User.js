@@ -30,6 +30,16 @@ const userSchema = new mongoose.Schema(
       default: null,
       set: normalizeBusNumber,
     },
+    resourceVersion: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+    assignmentRevision: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
     is_active: {
       type: Boolean,
       default: true
@@ -56,11 +66,29 @@ const userSchema = new mongoose.Schema(
       default: null
     }
   },
-  { timestamps: true }
+  { timestamps: true, optimisticConcurrency: true }
 );
 
 // Hash password before saving (Mongoose 9 async middleware — no next callback)
 userSchema.pre('save', async function () {
+  const modifiedPaths = this.modifiedPaths();
+  if (
+    !this.isNew &&
+    modifiedPaths.some(
+      (path) =>
+        !['resourceVersion', 'assignmentRevision', '__v', 'updatedAt'].includes(path),
+    )
+  ) {
+    this.resourceVersion = Math.max(0, Number(this.resourceVersion) || 0) + 1;
+    if (
+      modifiedPaths.some((path) =>
+        ['bus_no', 'role', 'is_active', 'deleted_by_user'].includes(path),
+      )
+    ) {
+      this.assignmentRevision =
+        Math.max(0, Number(this.assignmentRevision) || 0) + 1;
+    }
+  }
   if (!this.isModified('password_hash')) return;
   const salt = await bcrypt.genSalt(12);
   this.password_hash = await bcrypt.hash(this.password_hash, salt);

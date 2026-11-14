@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   View,
   Text,
@@ -31,6 +31,10 @@ import {
 import { fetchJson, getErrorMessage } from "../../utils/errorHandler";
 import { getDisplayBusNumber } from "../../utils/busDisplay";
 import { stopApi } from "../../api/stopApi";
+import {
+  createMutationKey,
+  getMutationAttempt,
+} from "../../utils/mutationKey";
 
 const SCREEN_WIDTH = Dimensions.get("window").width;
 // Calculate item width for exactly 5 per row with clean spacing
@@ -46,14 +50,6 @@ const normalizePlans = (plans) => {
   }
   return out;
 };
-
-const normalizeSheetHeader = (value) =>
-  String(value || "").trim().toLowerCase().replace(/[^a-z]/g, "");
-
-const expandPipeRow = (row) =>
-  row.length === 1 && String(row[0] || "").includes("|")
-    ? String(row[0]).split("|").map((cell) => cell.trim())
-    : row;
 
 export default function AddBusesScreen() {
   const { token, user } = useAuth();
@@ -92,6 +88,12 @@ export default function AddBusesScreen() {
   const [editDeviceId, setEditDeviceId] = useState("");
   const [editRegNo, setEditRegNo] = useState("");
   const [savingDetails, setSavingDetails] = useState(false);
+  const detailsMutation = useRef({ key: null, signature: null });
+  const addBusMutation = useRef({ key: null, signature: null });
+  const routesMutation = useRef({ key: null, signature: null });
+  const busChangeMutation = useRef({ key: null, signature: null });
+  const restoreMutation = useRef({ key: null, signature: null });
+  const deleteMutation = useRef({ key: null, signature: null });
 
   // Edit routes modal
   const [showEditRoutesModal, setShowEditRoutesModal] = useState(false);
@@ -143,10 +145,25 @@ export default function AddBusesScreen() {
           onPress: async () => {
             setRestoringBus(true);
             try {
-              await busApi.restoreAltered(token, selectedBus.busNo);
+              const mutation = {
+                busNo: selectedBus.busNo,
+                expectedVersion: selectedBus.revision ?? 0,
+              };
+              const idempotencyKey = getMutationAttempt(
+                restoreMutation,
+                mutation,
+              );
+              await busApi.restoreAltered(
+                token,
+                selectedBus.busNo,
+                mutation.expectedVersion,
+                idempotencyKey,
+              );
+              restoreMutation.current = { key: null, signature: null };
               setShowOptionsModal(false);
               await loadBuses();
             } catch (error) {
+              if (error?.status === 409) await loadBuses();
               Alert.alert(
                 "Restore failed",
                 getErrorMessage(error, "Could not restore bus."),
@@ -245,8 +262,15 @@ export default function AddBusesScreen() {
         deviceId: deviceId.trim(),
         regNo: null,
         routesByPlan: resolvedRoutes || {},
+        expectedVersion: 0,
       };
-      await importBusRoutesExcelJson({ token, busPayload: payload });
+      const idempotencyKey = getMutationAttempt(addBusMutation, payload);
+      await importBusRoutesExcelJson({
+        token,
+        busPayload: payload,
+        idempotencyKey,
+      });
+      addBusMutation.current = { key: null, signature: null };
       Alert.alert("Success", "Bus added successfully. Stops without coordinates can be added later from the Stop Master sheet.");
       setShowAddModal(false);
       setBusNo("");
@@ -256,6 +280,7 @@ export default function AddBusesScreen() {
       setExcelFileName("");
       loadBuses();
     } catch (e) {
+      if (e?.status === 409) await loadBuses();
       Alert.alert("Failed", getErrorMessage(e, "Could not add the bus."));
     } finally {
       setAddingBus(false);
@@ -271,6 +296,7 @@ export default function AddBusesScreen() {
 
   // ---------- Edit details ----------
   const openEditDetails = () => {
+    detailsMutation.current = { key: null, signature: null };
     setEditPreviewNumber(selectedBus?.previewNumber || "");
     setEditDeviceId(
       selectedBus?.gpsDeviceId || selectedBus?.gps_device_id || "",
@@ -281,17 +307,32 @@ export default function AddBusesScreen() {
   };
 
   const handleSaveDetails = async () => {
+    const payload = {
+      previewNumber: editPreviewNumber.trim() || null,
+      gpsDeviceId: editDeviceId.trim(),
+      regNo: editRegNo.trim() || null,
+      expectedVersion: selectedBus?.revision ?? 0,
+    };
+    const signature = JSON.stringify(payload);
+    if (
+      !detailsMutation.current.key ||
+      detailsMutation.current.signature !== signature
+    ) {
+      detailsMutation.current = {
+        key: createMutationKey(),
+        signature,
+      };
+    }
     setSavingDetails(true);
     try {
       await busApi.updateBusDetails(token, selectedBus.busNo, {
-        previewNumber: editPreviewNumber.trim() || null,
-        gpsDeviceId: editDeviceId.trim(),
-        regNo: editRegNo.trim() || null,
-      });
+        ...payload,
+      }, detailsMutation.current.key);
       Alert.alert("Success", "Bus details updated");
       setShowEditDetailsModal(false);
       loadBuses();
     } catch (e) {
+      if (e?.status === 409) await loadBuses();
       Alert.alert(
         "Failed",
         getErrorMessage(e, "Could not update bus details."),
@@ -312,20 +353,22 @@ export default function AddBusesScreen() {
   const saveEditedRoutes = async (resolvedRoutes) => {
     setSavingRoutes(true);
     try {
-      await importBusRoutesExcelJson({
-        token,
-        busPayload: {
-          busNo: selectedBus.busNo,
-          previewNumber: selectedBus.previewNumber || null,
-          deviceId: selectedBus.gpsDeviceId || selectedBus.gps_device_id || "",
-          regNo: selectedBus.regNo || null,
-          routesByPlan: resolvedRoutes,
-          replaceRoutes: true,
-        },
-      });
+      const payload = {
+        busNo: selectedBus.busNo,
+        previewNumber: selectedBus.previewNumber || null,
+        deviceId: selectedBus.gpsDeviceId || selectedBus.gps_device_id || "",
+        regNo: selectedBus.regNo || null,
+        routesByPlan: resolvedRoutes,
+        replaceRoutes: true,
+        expectedVersion: selectedBus.revision ?? 0,
+      };
+      const idempotencyKey = getMutationAttempt(routesMutation, payload);
+      await importBusRoutesExcelJson({ token, busPayload: payload, idempotencyKey });
+      routesMutation.current = { key: null, signature: null };
       Alert.alert("Success", "Routes updated");
       setShowEditRoutesModal(false);
     } catch (e) {
+      if (e?.status === 409) await loadBuses();
       Alert.alert("Failed", getErrorMessage(e, "Could not update the routes."));
     } finally {
       setSavingRoutes(false);
@@ -429,103 +472,6 @@ export default function AddBusesScreen() {
     }
   };
 
-  const pickAndUploadStopCoordinateSheet = async () => {
-    setCoordinateSheetBusy(true);
-    try {
-      const result = await DocumentPicker.getDocumentAsync({
-        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        copyToCacheDirectory: true,
-      });
-      if (result.canceled) return;
-      const file = result.assets?.[0];
-      if (!file) throw new Error("No Excel file was selected.");
-
-      const { workbook } = await readExcelFile(file);
-      const sheetName = workbook.SheetNames?.[0];
-      const worksheet = sheetName ? workbook.Sheets[sheetName] : null;
-      if (!worksheet) throw new Error("The Excel file has no worksheets.");
-      const rows = XLSX.utils
-        .sheet_to_json(worksheet, { header: 1, defval: "" })
-        .map(expandPipeRow);
-      const headers = rows[0] || [];
-      const findColumn = (names) =>
-        headers.findIndex((header) => names.includes(normalizeSheetHeader(header)));
-      const stopIdColumn = findColumn(["stopid"]);
-      const nameColumn = findColumn(["stopname", "stops", "stop", "name"]);
-      const longitudeColumn = findColumn([
-        "longitude",
-        "long",
-        "x",
-        "xcoordinate",
-        "xcoordinatelongitude",
-      ]);
-      const latitudeColumn = findColumn([
-        "latitude",
-        "lat",
-        "y",
-        "ycoordinate",
-        "ycoordinatelatitude",
-      ]);
-      if (
-        nameColumn < 0 ||
-        longitudeColumn < 0 ||
-        latitudeColumn < 0
-      ) {
-        throw new Error(
-          "Use columns for Stop, Lat (Latitude), and Long (Longitude).",
-        );
-      }
-
-      const stops = rows
-        .slice(1)
-        .map((row) => ({
-          stopId:
-            stopIdColumn < 0 ? "" : String(row[stopIdColumn] || "").trim(),
-          name: String(row[nameColumn] || "").trim(),
-          longitude: row[longitudeColumn],
-          latitude: row[latitudeColumn],
-        }))
-        .filter((row) =>
-          [row.name, row.latitude, row.longitude].some(
-            (value) => value !== null && value !== undefined && String(value).trim() !== "",
-          ),
-        );
-      if (!stops.length) throw new Error("The sheet contains no stop rows.");
-
-      const resultData = await stopApi.importCoordinates(token, stops);
-      const summary = resultData.summary || {};
-      const issues = (resultData.rowResults || []).filter((row) =>
-        ["not_found", "ambiguous", "invalid"].includes(row.status),
-      );
-      const issueDetails = issues
-        .slice(0, 5)
-        .map(
-          (row) =>
-            `Row ${row.row} (${row.name || "unnamed"}): ${row.reason || row.status}`,
-        )
-        .join("\n");
-      Alert.alert(
-        issues.length ? "Stop sheet not fully imported" : "Stops replaced",
-        `${(summary.updated || 0) + (summary.missingCoordinates || 0)} stop(s) saved from this sheet, including ${summary.added || 0} new stop(s). ${summary.updated || 0} have coordinates, ${summary.missingCoordinates || 0} have blank coordinates, and ${summary.removed || 0} old stop(s) were removed.${issueDetails ? `\n\n${issueDetails}` : ""}`,
-      );
-    } catch (error) {
-      const rowIssues = (error?.rowResults || [])
-        .filter((row) => ["not_found", "ambiguous", "invalid"].includes(row.status))
-        .slice(0, 5)
-        .map(
-          (row) =>
-            `Row ${row.row} (${row.name || "unnamed"}): ${row.reason || row.status}`,
-        )
-        .join("\n");
-      Alert.alert(
-        "Upload failed",
-        `${getErrorMessage(error, "Could not import the Stop Master sheet.")}${rowIssues ? `\n\n${rowIssues}` : ""}`,
-      );
-    } finally {
-      setCoordinateSheetBusy(false);
-    }
-  };
-
   const saveAlteration = async (routeSource, resolvedRoutes) => {
     if (!alterTargetBus) return;
     setAlteringBus(true);
@@ -533,19 +479,34 @@ export default function AddBusesScreen() {
       const changeBus = busChangeMode === "combine"
         ? busApi.combineBus
         : busApi.alterBus;
+      const expectedVersion = selectedBus.revision ?? 0;
+      const expectedVersions = {
+        [selectedBus.busNo]: expectedVersion,
+        [alterTargetBus.busNo]: alterTargetBus.revision ?? 0,
+      };
+      const routeOptions = busChangeMode === "combine"
+        ? {
+            routeSource,
+            ...(routeSource === "custom"
+              ? { routesByPlan: resolvedRoutes }
+              : {}),
+          }
+        : {};
+      const idempotencyKey = getMutationAttempt(busChangeMutation, {
+        mode: busChangeMode,
+        sourceBusNo: selectedBus.busNo,
+        targetBusNo: alterTargetBus.busNo,
+        expectedVersions,
+        routeOptions,
+      });
       const result = await changeBus(
         token,
         selectedBus.busNo,
         alterTargetBus.busNo,
-        busChangeMode === "combine"
-          ? {
-              routeSource,
-              ...(routeSource === "custom"
-                ? { routesByPlan: resolvedRoutes }
-                : {}),
-            }
-          : {},
+        routeOptions,
+        { expectedVersion, expectedVersions, idempotencyKey },
       );
+      busChangeMutation.current = { key: null, signature: null };
       setShowAlterModal(false);
       setShowRouteChoiceModal(false);
       await loadBuses();
@@ -554,6 +515,7 @@ export default function AddBusesScreen() {
         `${result.message} ${result.notifiedStudents} student(s) notified.`,
       );
     } catch (e) {
+      if (e?.status === 409) await loadBuses();
       Alert.alert(
         "Failed",
         getErrorMessage(
@@ -619,16 +581,27 @@ export default function AddBusesScreen() {
           style: "destructive",
           onPress: async () => {
             try {
-              await fetchJson(
-                API_BASE_URL + "/api/bus/delete-bus/" + selectedBus?.busNo,
-                {
-                  method: "DELETE",
-                  headers: { Authorization: "Bearer " + token },
-                },
+              const expectedVersion = selectedBus?.revision ?? 0;
+              const expectedVersions = Object.fromEntries(
+                buses
+                  .filter((bus) => bus.busNo && Number.isSafeInteger(bus.revision))
+                  .map((bus) => [bus.busNo, bus.revision]),
               );
+              const idempotencyKey = getMutationAttempt(deleteMutation, {
+                busNo: selectedBus?.busNo,
+                expectedVersion,
+                expectedVersions,
+              });
+              await busApi.deleteBus(token, selectedBus?.busNo, {
+                expectedVersion,
+                expectedVersions,
+                idempotencyKey,
+              });
+              deleteMutation.current = { key: null, signature: null };
               setShowOptionsModal(false);
               loadBuses();
             } catch (e) {
+              if (e?.status === 409) await loadBuses();
               Alert.alert(
                 "Error",
                 getErrorMessage(e, "Could not delete the bus."),
@@ -698,7 +671,7 @@ export default function AddBusesScreen() {
                   Stop Master coordinates
                 </Text>
                 <Text style={styles.coordinateSheetDescription}>
-                  Upload columns named Stop Name, Latitude, and Longitude. Leave coordinates blank for stops without them; at least one stop must have both coordinates. This sheet replaces the saved stop list, so omitted stops are removed.
+                  Download the current Stop Master coordinates for review. Coordinate uploads are temporarily disabled until revision-checked transactional import is available.
                 </Text>
                 <TouchableOpacity
                   style={styles.optionButton}
@@ -712,20 +685,6 @@ export default function AddBusesScreen() {
                   />
                   <Text style={styles.optionText}>
                     {coordinateSheetBusy ? "Working..." : "Download Stops Excel"}
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={styles.optionButton}
-                  onPress={pickAndUploadStopCoordinateSheet}
-                  disabled={coordinateSheetBusy}
-                >
-                  <Ionicons
-                    name="cloud-upload-outline"
-                    size={20}
-                    color={COLORS.primary}
-                  />
-                  <Text style={styles.optionText}>
-                    {coordinateSheetBusy ? "Working..." : "Upload Coordinates Excel"}
                   </Text>
                 </TouchableOpacity>
               </View>

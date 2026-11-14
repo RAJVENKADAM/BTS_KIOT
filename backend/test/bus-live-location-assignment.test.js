@@ -7,6 +7,8 @@ const BusLiveLocation = require("../src/models/BusLiveLocation");
 const BusRoute = require("../src/models/BusRoute");
 const PlanMapping = require("../src/models/PlanMapping");
 const StopMaster = require("../src/models/StopMaster");
+const User = require("../src/models/User");
+const GpsWorkerOwnership = require("../src/models/GpsWorkerOwnership");
 const {
   getLiveLocation,
   trackByPreview,
@@ -64,6 +66,8 @@ async function withModelMocks(mocks, run) {
     busRouteFind: BusRoute.find,
     planMappingFindOne: PlanMapping.findOne,
     stopMasterFind: StopMaster.find,
+    userFindById: User.findById,
+    gpsWorkerOwnershipFindById: GpsWorkerOwnership.findById,
   };
 
   AppSetting.findOne = mocks.appSettingFindOne;
@@ -80,6 +84,9 @@ async function withModelMocks(mocks, run) {
         : null,
     );
   StopMaster.find = mocks.stopMasterFind || (() => emptyQuery());
+  User.findById = mocks.userFindById || (() => valueQuery(null));
+  GpsWorkerOwnership.findById =
+    mocks.gpsWorkerOwnershipFindById || (() => valueQuery(null));
 
   try {
     await run();
@@ -92,6 +99,8 @@ async function withModelMocks(mocks, run) {
     BusRoute.find = originals.busRouteFind;
     PlanMapping.findOne = originals.planMappingFindOne;
     StopMaster.find = originals.stopMasterFind;
+    User.findById = originals.userFindById;
+    GpsWorkerOwnership.findById = originals.gpsWorkerOwnershipFindById;
   }
 }
 
@@ -102,6 +111,7 @@ test("returns the altered bus identity and GPS for an assigned bus", async () =>
     _id: sourceId,
     bus_no: "BUS-12",
     preview_number: "12",
+    status: "active",
     altered_to_bus_id: replacementId,
     alteration_type: "alter",
   };
@@ -109,6 +119,7 @@ test("returns the altered bus identity and GPS for an assigned bus", async () =>
     _id: replacementId,
     bus_no: "BUS-21",
     preview_number: "21",
+    status: "active",
     altered_to_bus_id: null,
   };
   const location = {
@@ -117,12 +128,31 @@ test("returns the altered bus identity and GPS for an assigned bus", async () =>
     longitude: 78,
     is_online: true,
     source: "gps",
+    providerTimestamp: new Date(),
   };
 
   await withModelMocks(
     {
       appSettingFindOne: () => ({ lean: async () => null }),
       busFindOne: async () => sourceBus,
+      userFindById: () => ({
+        select() {
+          return this;
+        },
+        lean: async () => ({
+          _id: "student-1",
+          role: "student",
+          is_active: true,
+          deleted_by_user: false,
+          bus_no: "BUS-12",
+        }),
+      }),
+      busFindById: () => ({
+        select() {
+          return this;
+        },
+        lean: async () => replacementBus,
+      }),
       busFind: (filter) =>
         emptyQuery(
           filter._id
@@ -136,7 +166,10 @@ test("returns the altered bus identity and GPS for an assigned bus", async () =>
     async () => {
       const response = createResponse();
       await getLiveLocation(
-        { params: { busNo: "BUS-12" }, user: { role: "student" } },
+        {
+          params: { busNo: "BUS-999" },
+          user: { id: "student-1", role: "student" },
+        },
         response,
       );
 
@@ -146,8 +179,8 @@ test("returns the altered bus identity and GPS for an assigned bus", async () =>
       assert.equal(response.payload.latitude, 11.5);
       assert.equal(response.payload.longitude, 78);
       assert.equal(response.payload.gpsOfflineThresholdMs, 180_000);
-      assert.equal(response.payload.alteration.originalPreview, undefined);
-      assert.match(response.payload.alteration.message, /use Bus 21/);
+      assert.equal(response.payload.isReplacementRoute, true);
+      assert.equal(response.payload.routeBusPreviewNumber, "12");
       assert.equal("bus_no" in response.payload, false);
     },
   );
@@ -161,18 +194,21 @@ test("returns the mapped location bus identity after a global plan change", asyn
     _id: assignedId,
     bus_no: "BUS-12",
     preview_number: "12",
+    status: "active",
     altered_to_bus_id: null,
   };
   const routeBus = {
     _id: routeId,
     bus_no: "BUS-21",
     preview_number: "21",
+    status: "active",
     altered_to_bus_id: null,
   };
   const locationBus = {
     _id: locationId,
     bus_no: "BUS-31",
     preview_number: "31",
+    status: "active",
     altered_to_bus_id: null,
   };
   const busesById = new Map([
@@ -185,12 +221,25 @@ test("returns the mapped location bus identity after a global plan change", asyn
     longitude: 78.1,
     is_online: true,
     source: "gps",
+    providerTimestamp: new Date(),
   };
 
   await withModelMocks(
     {
       appSettingFindOne: () => ({ lean: async () => ({ value: "PLAN B" }) }),
       busFindOne: async () => assignedBus,
+      userFindById: () => ({
+        select() {
+          return this;
+        },
+        lean: async () => ({
+          _id: "student-1",
+          role: "student",
+          is_active: true,
+          deleted_by_user: false,
+          bus_no: "BUS-12",
+        }),
+      }),
       busFind: (filter) =>
         emptyQuery(
           filter._id
@@ -211,7 +260,10 @@ test("returns the mapped location bus identity after a global plan change", asyn
     async () => {
       const response = createResponse();
       await getLiveLocation(
-        { params: { busNo: "BUS-12" }, user: { role: "student" } },
+        {
+          params: { busNo: "BUS-999" },
+          user: { id: "student-1", role: "student" },
+        },
         response,
       );
 
@@ -220,8 +272,7 @@ test("returns the mapped location bus identity after a global plan change", asyn
       assert.equal(response.payload.previewNumber, "31");
       assert.equal(response.payload.latitude, 11.6);
       assert.equal(response.payload.longitude, 78.1);
-      assert.match(response.payload.alteration.message, /use Bus 31/);
-      assert.match(response.payload.alteration.message, /Bus 21's stops/);
+      assert.equal(response.payload.routeBusPreviewNumber, "21");
     },
   );
 });
@@ -277,7 +328,7 @@ test("track-by-preview retains its public response shape and bus isolation", asy
     async () => {
       const response = createResponse();
       await trackByPreview(
-        { params: { previewNumber: "12" }, user: { role: "student" } },
+        { params: { previewNumber: "12" }, user: { role: "primary_admin" } },
         response,
       );
 
@@ -286,6 +337,29 @@ test("track-by-preview retains its public response shape and bus isolation", asy
       assert.equal(response.payload.busNo, "12");
       assert.equal("bus_no" in response.payload, false);
       assert.equal(response.payload.status, "offline");
+    },
+  );
+});
+
+test("students cannot access fleet preview tracking", async () => {
+  let busReads = 0;
+  await withModelMocks(
+    {
+      appSettingFindOne: () => ({ lean: async () => null }),
+      busFindOne: async () => {
+        busReads++;
+        return null;
+      },
+      liveLocationFindOne: async () => null,
+    },
+    async () => {
+      const response = createResponse();
+      await trackByPreview(
+        { params: { previewNumber: "12" }, user: { role: "student" } },
+        response,
+      );
+      assert.equal(response.statusCode, 403);
+      assert.equal(busReads, 0);
     },
   );
 });
@@ -351,7 +425,7 @@ test("GPS-only location snapshot is authenticated and performs only projected in
         {
           params: { busNo: "BUS-12" },
           query: { gpsOnly: "true" },
-          user: { role: "student" },
+          user: { role: "primary_admin" },
         },
         response,
       );
@@ -409,7 +483,7 @@ test("GPS-only location snapshot rejects an unknown bus without reading location
         {
           params: { busNo: "UNKNOWN" },
           query: { gpsOnly: "true" },
-          user: { role: "student" },
+          user: { role: "primary_admin" },
         },
         response,
       );
@@ -481,7 +555,7 @@ test("GPS-only snapshot resolves active-plan location mapping without loading ro
         {
           params: { busNo: "BUS-12" },
           query: { gpsOnly: "true" },
-          user: { role: "student" },
+          user: { role: "primary_admin" },
         },
         response,
       );

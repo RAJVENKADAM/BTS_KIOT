@@ -1,8 +1,7 @@
 const express = require('express');
-const multer = require('multer');
-
 const BusController = require('../controllers/bus.controller');
 const PlanMappingController = require('../controllers/planMapping.controller');
+const AssignmentPropagationController = require('../controllers/assignmentPropagation.controller');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth');
 const {
   parseBusRoutesWorkbookUpload,
@@ -12,10 +11,31 @@ const {
 const router = express.Router();
 
 router.get(
+  '/assignment-propagation-jobs',
+  authenticateToken,
+  authorizeRoles('primary_admin', 'superadmin'),
+  AssignmentPropagationController.listAssignmentPropagationJobs,
+);
+
+router.post(
+  '/assignment-propagation-jobs/:jobId/replay',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  AssignmentPropagationController.replayAssignmentPropagationJob,
+);
+
+router.get(
   '/plan-mappings',
   authenticateToken,
   authorizeRoles('superadmin'),
   PlanMappingController.getPlanMappingData,
+);
+
+router.get(
+  '/plan-mapping-audit',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  PlanMappingController.getPlanMappingAudit,
 );
 
 router.post(
@@ -41,39 +61,6 @@ router.delete(
 
 /**
  * -----------------------
- * MULTER CONFIG
- * -----------------------
- */
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, 'uploads/'),
-  filename: (req, file, cb) => {
-    const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
-    const name = Date.now() + '-' + safeName;
-    cb(null, name);
-  }
-});
-
-const upload = multer({
-  storage,
-  limits: {
-    fileSize: 10 * 1024 * 1024,
-    fields: 50,
-    parts: 60,
-    fieldSize: 256 * 1024,
-  },
-  fileFilter: (req, file, cb) => {
-    if (
-      file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
-      file.originalname.toLowerCase().endsWith('.xlsx')
-    ) {
-      return cb(null, true);
-    }
-    return cb(new Error('Only Excel files are allowed'));
-  },
-});
-
-/**
- * -----------------------
  * ADMIN ROUTES
  * -----------------------
  */
@@ -82,11 +69,12 @@ router.post(
   '/upload-bus-routes',
   authenticateToken,
   authorizeRoles('superadmin'),
-  upload.single('file'),
-  BusController.uploadBusRoutes
+  (_req, res) => res.status(410).json({
+    success: false,
+    code: 'LEGACY_IMPORT_RETIRED',
+    error: 'This bus import endpoint has been retired. Use POST /api/bus/import-routes.',
+  }),
 );
-
-// createBus - use uploadBusRoutes instead
 
 router.put(
   '/update-bus-number/:busNo',
@@ -166,10 +154,11 @@ router.put(
   BusController.restoreAlteredBus
 );
 
-// Any authenticated user can fetch plans + stops for a bus (Home screen)
+// Students are constrained to their resolved assignment inside the controller.
 router.get(
   '/routes/:busNo',
   authenticateToken,
+  authorizeRoles('student', 'primary_admin', 'superadmin'),
   BusController.getBusRoutes
 );
 
@@ -221,19 +210,28 @@ router.put(
 router.get(
   '/get-all-buses',
   authenticateToken,
+  authorizeRoles('primary_admin', 'superadmin'),
   BusController.getAllBuses
 );
 
 router.get(
   '/plan-buses/:plan',
   authenticateToken,
+  authorizeRoles('primary_admin', 'superadmin'),
   BusController.getBusesForPlan
 );
 
 router.get(
   '/track-by-preview/:previewNumber',
   authenticateToken,
+  authorizeRoles('primary_admin', 'superadmin'),
   BusController.trackByPreview
+);
+
+router.get(
+  '/my-assignment',
+  authenticateToken,
+  BusController.getMyAssignment
 );
 
 // getRouteStops and getCurrentPlan routes removed - functions not defined
@@ -241,6 +239,7 @@ router.get(
 router.get(
   '/location/:busNo',
   authenticateToken,
+  authorizeRoles('student', 'primary_admin', 'superadmin'),
   BusController.getLiveLocation
 );
 

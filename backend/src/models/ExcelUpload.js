@@ -19,6 +19,11 @@ const excelUploadSchema = new mongoose.Schema(
       type: Boolean,
       default: true
     },
+    revision: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
     import_status: {
       type: String,
       enum: ['processing', 'completed', 'partial', 'failed'],

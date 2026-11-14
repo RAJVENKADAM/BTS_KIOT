@@ -19,30 +19,42 @@ function assertStagingTarget(env = process.env) {
     String(env.NODE_ENV || "").toLowerCase() === "production" ||
     String(process.env.NODE_ENV || "").toLowerCase() === "production"
   ) {
-    throw new StagingTargetError("Refusing GPS ownership provisioning when NODE_ENV=production.");
+    throw new StagingTargetError(
+      "Refusing GPS ownership provisioning when NODE_ENV=production.",
+    );
   }
   if (env.BTMS_DATABASE_ENVIRONMENT !== "staging") {
-    throw new StagingTargetError("Set BTMS_DATABASE_ENVIRONMENT=staging to identify the target.");
+    throw new StagingTargetError(
+      "Set BTMS_DATABASE_ENVIRONMENT=staging to identify the target.",
+    );
   }
   if (env.BTMS_STAGING_DB_NAME !== STAGING_DATABASE_NAME) {
-    throw new StagingTargetError(`Set BTMS_STAGING_DB_NAME=${STAGING_DATABASE_NAME} exactly.`);
+    throw new StagingTargetError(
+      `Set BTMS_STAGING_DB_NAME=${STAGING_DATABASE_NAME} exactly.`,
+    );
   }
   if (!env.MONGODB_URI || !String(env.MONGODB_URI).trim()) {
-    throw new StagingTargetError("MONGODB_URI is required; its value will not be displayed.");
+    throw new StagingTargetError(
+      "MONGODB_URI is required; its value will not be displayed.",
+    );
   }
 
   let uri;
   try {
     uri = new URL(env.MONGODB_URI);
   } catch {
-    throw new StagingTargetError("MONGODB_URI is invalid; its value will not be displayed.");
+    throw new StagingTargetError(
+      "MONGODB_URI is invalid; its value will not be displayed.",
+    );
   }
   if (
     !["mongodb:", "mongodb+srv:"].includes(uri.protocol) ||
     !uri.username ||
     !uri.password
   ) {
-    throw new StagingTargetError("MONGODB_URI must be a credentialed MongoDB staging URI.");
+    throw new StagingTargetError(
+      "MONGODB_URI must be a credentialed MongoDB staging URI.",
+    );
   }
   const authSources = [...uri.searchParams.entries()]
     .filter(([name]) => name.toLowerCase() === "authsource")
@@ -59,18 +71,27 @@ function assertStagingTarget(env = process.env) {
     throw new StagingTargetError("MONGODB_URI has an invalid database path.");
   }
   if (databaseName.toLowerCase() === "bts_db") {
-    throw new StagingTargetError("Refusing to provision the production database.");
+    throw new StagingTargetError(
+      "Refusing to provision the production database.",
+    );
   }
   if (databaseName !== STAGING_DATABASE_NAME) {
-    throw new StagingTargetError("MONGODB_URI database path is not the expected staging database.");
+    throw new StagingTargetError(
+      "MONGODB_URI database path is not the expected staging database.",
+    );
   }
   if (uri.hostname.toLowerCase() !== STAGING_MONGODB_HOST) {
-    throw new StagingTargetError("MONGODB_URI hostname is not the expected staging Atlas host.");
+    throw new StagingTargetError(
+      "MONGODB_URI hostname is not the expected staging Atlas host.",
+    );
   }
   return databaseName;
 }
 
-function isValidOwnershipRecord(document, { allowMissingConfigVersion = false } = {}) {
+function isValidOwnershipRecord(
+  document,
+  { allowMissingConfigVersion = false } = {},
+) {
   const isFiniteDate = (value) =>
     value instanceof Date && Number.isFinite(value.getTime());
   const configVersionValid =
@@ -155,11 +176,15 @@ async function initialize({
         throw new Error("GPS worker ownership is active; no changes made.");
       }
       if (
-        !isValidOwnershipRecord(existing, { allowMissingConfigVersion: true }) ||
+        !isValidOwnershipRecord(existing, {
+          allowMissingConfigVersion: true,
+        }) ||
         existing.state !== "inactive" ||
         existing.ownerId !== null
       ) {
-        throw new Error("Existing GPS worker ownership record is invalid or active; no changes made.");
+        throw new Error(
+          "Existing GPS worker ownership record is invalid or active; no changes made.",
+        );
       }
       if (existing.configVersion === undefined) {
         const upgrade = await collection.updateOne(
@@ -173,7 +198,9 @@ async function initialize({
           { writeConcern: { w: "majority" } },
         );
         if (upgrade.matchedCount !== 1) {
-          throw new Error("GPS ownership record changed during provisioning; no further changes made.");
+          throw new Error(
+            "GPS ownership record changed during provisioning; no further changes made.",
+          );
         }
         const upgraded = await collection.findOne({ _id: OWNERSHIP_ID });
         if (
@@ -181,12 +208,18 @@ async function initialize({
           upgraded.state !== "inactive" ||
           upgraded.ownerId !== null
         ) {
-          throw new Error("GPS ownership record upgrade could not be verified.");
+          throw new Error(
+            "GPS ownership record upgrade could not be verified.",
+          );
         }
-        logger.info("Added the GPS configuration version to the inactive ownership record.");
+        logger.info(
+          "Added the GPS configuration version to the inactive ownership record.",
+        );
         return;
       }
-      logger.info("GPS worker ownership record already exists; no changes made.");
+      logger.info(
+        "GPS worker ownership record already exists; no changes made.",
+      );
     };
 
     const existing = await collection.findOne({ _id: OWNERSHIP_ID });
@@ -213,7 +246,9 @@ async function initialize({
       if (error?.code !== 11000) throw error;
       const concurrentRecord = await collection.findOne({ _id: OWNERSHIP_ID });
       if (!concurrentRecord) {
-        throw new Error("Concurrent GPS ownership initialization produced invalid state.");
+        throw new Error(
+          "Concurrent GPS ownership initialization produced invalid state.",
+        );
       }
       await handleExistingRecord(concurrentRecord);
       logger.info("GPS worker ownership record was created concurrently.");
@@ -227,7 +262,10 @@ async function initialize({
 if (require.main === module) {
   require("dotenv").config();
   initialize().catch((error) => {
-    console.error("GPS worker ownership provisioning failed:", getSafeErrorDetails(error));
+    console.error(
+      "GPS worker ownership provisioning failed:",
+      getSafeErrorDetails(error),
+    );
     process.exitCode = 1;
   });
 }

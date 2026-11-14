@@ -6,6 +6,10 @@ const { getIO } = require("../socket");
 const normalizeBusNumber = require("../utils/normalizeBusNumber");
 const { logSafeError } = require("../utils/safeErrorLog");
 const { logSocketDiagnostic } = require("../utils/socketDiagnostics");
+const {
+  getPublicAssignmentSnapshot,
+  resolveStudentAssignment,
+} = require("../services/studentBusAssignment");
 
 // Models are required lazily to avoid importing mongoose before the DB is ready.
 const getBus = () => require("../models/Bus");
@@ -30,6 +34,7 @@ function registerTrackSocketHandlers({
   io = getIO(),
   BusModel = getBus(),
   BusLiveLocationModel = getBusLiveLocation(),
+  resolveStudentAssignmentFn = resolveStudentAssignment,
 } = {}) {
   if (!io) return;
   const activePreviewLookups = new Map();
@@ -86,6 +91,60 @@ function registerTrackSocketHandlers({
     let disconnectState = null;
     const pendingPreviewRooms = new Map();
     socket.join(`user_${authenticatedUserId}`);
+    const isStudent = String(socket.user?.role || "").toLowerCase() === "student";
+    const isAdministrator = ["primary_admin", "superadmin"].includes(
+      String(socket.user?.role || "").toLowerCase(),
+    );
+
+    if (isStudent) {
+      void (async () => {
+        try {
+          let assignment = await resolveStudentAssignmentFn(
+            authenticatedUserId,
+            { includeStops: false },
+          );
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            if (disconnected || socket.connected === false) return;
+            const authorizedBusId =
+              assignment.assignmentStatus === "assigned"
+                ? String(assignment.effectiveBus?._id || "")
+                : "";
+            const assignedRooms = [...socket.rooms].filter((room) =>
+              room.startsWith("assigned_bus_"),
+            );
+            await Promise.all(
+              assignedRooms
+                .filter((room) => room !== `assigned_bus_${authorizedBusId}`)
+                .map((room) => socket.leave(room)),
+            );
+            if (authorizedBusId) {
+              await socket.join(`assigned_bus_${authorizedBusId}`);
+            }
+            const confirmed = await resolveStudentAssignmentFn(
+              authenticatedUserId,
+              { includeStops: true },
+            );
+            const confirmedBusId =
+              confirmed.assignmentStatus === "assigned"
+                ? String(confirmed.effectiveBus?._id || "")
+                : "";
+            if (confirmedBusId === authorizedBusId) {
+              socket.emit(
+                "assigned-bus-update",
+                confirmed.publicSnapshot ||
+                  getPublicAssignmentSnapshot(confirmed),
+              );
+              return;
+            }
+            assignment = confirmed;
+          }
+          throw new Error("Student assignment changed repeatedly during socket setup.");
+        } catch (error) {
+          logSafeError("Student socket assignment resolution failed", error);
+          socket.disconnect(true);
+        }
+      })();
+    }
 
     socket.on("join-user", (userId) => {
       if (userId && String(userId) === authenticatedUserId) {
@@ -93,8 +152,9 @@ function registerTrackSocketHandlers({
       }
     });
     // Join a room for a specific preview number to receive live updates.
-    // Use preview_ prefix to avoid exposing internal bus_no to clients.
+    // Students are subscribed only to the server-resolved effective bus room.
     socket.on("join-bus", async (previewNumber) => {
+      if (!isAdministrator) return;
       const identifier = normalizeSocketIdentifier(previewNumber);
       if (!identifier || disconnected) return;
       const room = `preview_${identifier}`;
@@ -141,6 +201,7 @@ function registerTrackSocketHandlers({
 
     // Leave a room for a specific preview
     socket.on("leave-bus", async (previewNumber) => {
+      if (!isAdministrator) return;
       const identifier = normalizeSocketIdentifier(previewNumber);
       if (!identifier) return;
       pendingPreviewRooms.delete(identifier);
@@ -157,8 +218,11 @@ function registerTrackSocketHandlers({
     // Client requests the latest location for a bus (search by bus_no or preview).
     // Response payload deliberately avoids exposing internal bus_no. Returns previewNumber and location only.
     socket.on("request-bus-location", async (busIdentifier) => {
-      const identifier = normalizeSocketIdentifier(busIdentifier);
-      if (!identifier || disconnected) return;
+      if (disconnected) return;
+      const identifier = isStudent
+        ? null
+        : normalizeSocketIdentifier(busIdentifier);
+      if (!isStudent && !identifier) return;
       const now = Date.now();
       if (now - locationWindowStarted >= 60_000) {
         locationWindowStarted = now;
@@ -166,11 +230,40 @@ function registerTrackSocketHandlers({
       }
       locationRequests += 1;
       if (locationRequests > 30) {
-        return socket.emit("locationUpdate", {
-            previewNumber: identifier,
-          error: "Too many location requests",
-        });
+        return socket.emit(
+          isStudent ? "assigned-bus-update" : "locationUpdate",
+          {
+            success: false,
+            ...(identifier ? { previewNumber: identifier } : {}),
+            error: "Too many location requests",
+          },
+        );
       }
+      if (isStudent) {
+        try {
+          const assignment = await resolveStudentAssignmentFn(
+            authenticatedUserId,
+            { includeStops: true },
+          );
+          if (!disconnected && socket.connected !== false) {
+            socket.emit(
+              "assigned-bus-update",
+              assignment.publicSnapshot || getPublicAssignmentSnapshot(assignment),
+            );
+          }
+        } catch (error) {
+          logSafeError("Student location reconciliation failed", error);
+          if (!disconnected && socket.connected !== false) {
+            socket.emit("assigned-bus-update", {
+              success: false,
+              assignmentStatus: "unavailable",
+              gpsStatus: "unavailable",
+            });
+          }
+        }
+        return;
+      }
+      if (!isAdministrator) return;
       try {
         // Resolve bus by bus_no first, then by preview_number.
         let bus = await BusModel.findOne({

@@ -1,5 +1,7 @@
 const assert = require("node:assert/strict");
 const { after, test } = require("node:test");
+const AdministrativeChangeAudit = require("../src/models/AdministrativeChangeAudit");
+const AssignmentPropagationOutbox = require("../src/models/AssignmentPropagationOutbox");
 const Bus = require("../src/models/Bus");
 const BusLiveLocation = require("../src/models/BusLiveLocation");
 const BusRoute = require("../src/models/BusRoute");
@@ -9,9 +11,24 @@ const BusChange = require("../src/models/BusChange");
 const { deleteBus } = require("../src/controllers/bus.controller");
 const { setIO } = require("../src/socket");
 const { mockGpsOwnershipTransactions } = require("./helpers/gpsOwnershipTransactionMock.cjs");
+const { mockMutationIdempotency } = require("./helpers/mutationIdempotencyMock.cjs");
 
 const gpsOwnershipTransactions = mockGpsOwnershipTransactions();
-after(() => gpsOwnershipTransactions.restore());
+const mutationIdempotency = mockMutationIdempotency();
+const originalAuditCreate = AdministrativeChangeAudit.create;
+const originalOutboxUpdateOne = AssignmentPropagationOutbox.updateOne;
+const outboxRecords = [];
+AdministrativeChangeAudit.create = async () => [];
+AssignmentPropagationOutbox.updateOne = async (filter, update) => {
+  outboxRecords.push({ filter, update });
+  return { upsertedCount: 1 };
+};
+after(() => {
+  gpsOwnershipTransactions.restore();
+  mutationIdempotency.restore();
+  AdministrativeChangeAudit.create = originalAuditCreate;
+  AssignmentPropagationOutbox.updateOne = originalOutboxUpdateOne;
+});
 
 function createResponse() {
   return {
@@ -30,23 +47,39 @@ function createResponse() {
 test("permanently deletes a bus and cleans up its dependent records", async () => {
   const originals = {
     busFindOne: Bus.findOne,
+    busFind: Bus.find,
     changeFindOne: BusChange.findOne,
     busUpdateMany: Bus.updateMany,
     busDeleteOne: Bus.deleteOne,
     userFind: User.find,
-    userUpdateMany: User.updateMany,
+    userUpdateOne: User.updateOne,
     mappingUpdateMany: PlanMapping.updateMany,
     mappingDeleteMany: PlanMapping.deleteMany,
     routeDeleteMany: BusRoute.deleteMany,
     locationDeleteMany: BusLiveLocation.deleteMany,
   };
-  const bus = { _id: "bus-id", bus_no: "BUS-12" };
+  const bus = {
+    _id: "bus-id",
+    bus_no: "BUS-12",
+    toObject() {
+      return { _id: this._id, bus_no: this.bus_no };
+    },
+  };
   const calls = [];
   const notifications = [];
 
   Bus.findOne = async (filter) => {
     calls.push(["bus.findOne", filter]);
     return bus;
+  };
+  Bus.find = (...args) => {
+    calls.push(["bus.find", ...args]);
+    return ({
+    select() {
+      return this;
+    },
+    lean: async () => [],
+    });
   };
   BusChange.findOne = (filter) => ({
     select: async () => {
@@ -60,19 +93,25 @@ test("permanently deletes a bus and cleans up its dependent records", async () =
       select() {
         return this;
       },
-      lean: async () => [{ _id: "student-1" }, { _id: "student-2" }],
+      lean: async () => [
+        { _id: "student-1", bus_no: "BUS-12" },
+        { _id: "student-2", bus_no: "BUS-12" },
+      ],
     };
   };
-  User.updateMany = async (...args) => {
-    calls.push(["user.updateMany", ...args]);
-    return { modifiedCount: 2 };
+  User.updateOne = async (...args) => {
+    calls.push(["user.updateOne", ...args]);
+    return { matchedCount: 1 };
   };
   PlanMapping.updateMany = async (...args) => calls.push(["mapping.updateMany", ...args]);
   PlanMapping.deleteMany = async (...args) => calls.push(["mapping.deleteMany", ...args]);
   Bus.updateMany = async (...args) => calls.push(["bus.updateMany", ...args]);
   BusRoute.deleteMany = async (...args) => calls.push(["route.deleteMany", ...args]);
   BusLiveLocation.deleteMany = async (...args) => calls.push(["location.deleteMany", ...args]);
-  Bus.deleteOne = async (...args) => calls.push(["bus.deleteOne", ...args]);
+  Bus.deleteOne = async (...args) => {
+    calls.push(["bus.deleteOne", ...args]);
+    return { deletedCount: 1 };
+  };
   setIO({
     to(room) {
       return {
@@ -85,7 +124,16 @@ test("permanently deletes a bus and cleans up its dependent records", async () =
 
   try {
     const response = createResponse();
-    await deleteBus({ params: { busNo: "BUS-12" } }, response);
+    await deleteBus(
+      {
+        params: { busNo: "BUS-12" },
+        body: { expectedVersion: 0 },
+        user: { id: "64a000000000000000000099" },
+        get: (name) =>
+          name === "Idempotency-Key" ? "bus-delete-test-001" : undefined,
+      },
+      response,
+    );
 
     assert.equal(response.statusCode, 200);
     assert.equal(response.payload.success, true);
@@ -93,40 +141,52 @@ test("permanently deletes a bus and cleans up its dependent records", async () =
       "bus.findOne",
       "busChange.findOne",
       "user.find",
-      "user.updateMany",
+      "bus.find",
+      "user.updateOne",
+      "user.updateOne",
       "mapping.updateMany",
       "mapping.deleteMany",
-      "bus.updateMany",
       "route.deleteMany",
       "location.deleteMany",
       "bus.deleteOne",
     ]);
-    assert.equal(calls[2][1].bus_no.test("bus-12"), true);
-    assert.equal(calls[3][1].bus_no.test("bus-12"), true);
-    assert.deepEqual(calls[3][2], { $set: { bus_no: null } });
-    assert.deepEqual(calls[4][1], { member_bus_ids: bus._id });
-    assert.deepEqual(calls[4][2], { $pull: { member_bus_ids: bus._id } });
-    assert.deepEqual(calls[5][1], { root_bus_id: bus._id });
-    assert.deepEqual(calls[7][1], { bus_id: bus._id });
+    const userFindCall = calls.find(([name]) => name === "user.find");
+    const userUpdateCall = calls.find(([name]) => name === "user.updateOne");
+    const assignmentPatterns = userFindCall[1].bus_no.$in;
+    assert.equal(assignmentPatterns[0].test("bus-12"), true);
+    assert.deepEqual(userUpdateCall[1].$and[0], { _id: "student-1" });
+    assert.deepEqual(userUpdateCall[1].$and[1], { bus_no: "BUS-12" });
+    assert.deepEqual(userUpdateCall[1].$and[2], {
+      $or: [
+        { assignmentRevision: 0 },
+        { assignmentRevision: { $exists: false } },
+      ],
+    });
+    assert.deepEqual(userUpdateCall[2], {
+      $inc: { assignmentRevision: 1 },
+      $set: { bus_no: null },
+    });
+    assert.deepEqual(calls[6][1], { member_bus_ids: bus._id });
+    assert.deepEqual(calls[6][2], { $pull: { member_bus_ids: bus._id } });
+    assert.deepEqual(calls[7][1], { root_bus_id: bus._id });
     assert.deepEqual(calls[8][1], { bus_id: bus._id });
-    assert.deepEqual(calls[9][1], { _id: bus._id });
-    assert.deepEqual(notifications, ["student-1", "student-2"].map((id) => ({
-      room: `user_${id}`,
-      event: "notification",
-      payload: {
-        type: "bus_unassigned",
-        message: "Your bus assignment was removed.",
-        assignmentBusNo: null,
-      },
-    })));
+    assert.deepEqual(calls[9][1], { bus_id: bus._id });
+    assert.equal(calls[10][0], "bus.deleteOne");
+    assert.deepEqual(notifications, []);
+    assert.equal(outboxRecords.at(-1).update.$setOnInsert.operation, "bus-deleted");
+    assert.deepEqual(
+      outboxRecords.at(-1).update.$setOnInsert.recipients.map((item) => item.user_id),
+      ["student-1", "student-2"],
+    );
   } finally {
     setIO(null);
     Bus.findOne = originals.busFindOne;
+    Bus.find = originals.busFind;
     BusChange.findOne = originals.changeFindOne;
     Bus.updateMany = originals.busUpdateMany;
     Bus.deleteOne = originals.busDeleteOne;
     User.find = originals.userFind;
-    User.updateMany = originals.userUpdateMany;
+    User.updateOne = originals.userUpdateOne;
     PlanMapping.updateMany = originals.mappingUpdateMany;
     PlanMapping.deleteMany = originals.mappingDeleteMany;
     BusRoute.deleteMany = originals.routeDeleteMany;
@@ -145,7 +205,15 @@ test("does not delete related records when the bus does not exist", async () => 
 
   try {
     const response = createResponse();
-    await deleteBus({ params: { busNo: "MISSING" } }, response);
+    await deleteBus(
+      {
+        params: { busNo: "MISSING" },
+        body: { expectedVersion: 0 },
+        user: { id: "64a000000000000000000099" },
+        get: () => "bus-delete-missing-001",
+      },
+      response,
+    );
 
     assert.equal(response.statusCode, 404);
     assert.equal(cleanupCalled, false);

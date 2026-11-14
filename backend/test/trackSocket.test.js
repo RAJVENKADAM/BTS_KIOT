@@ -3,7 +3,11 @@ const { performance } = require("node:perf_hooks");
 const test = require("node:test");
 const { registerTrackSocketHandlers } = require("../src/socket/trackSocket");
 
-function createHarness({ active = true, lookupDelayMs = 0 } = {}) {
+function createHarness({
+  active = true,
+  lookupDelayMs = 0,
+  resolveStudentAssignmentFn,
+} = {}) {
   const ioHandlers = {};
   const queries = [];
   const io = {
@@ -36,7 +40,12 @@ function createHarness({ active = true, lookupDelayMs = 0 } = {}) {
       throw new Error("Unexpected location lookup");
     },
   };
-  registerTrackSocketHandlers({ io, BusModel, BusLiveLocationModel });
+  registerTrackSocketHandlers({
+    io,
+    BusModel,
+    BusLiveLocationModel,
+    resolveStudentAssignmentFn,
+  });
   return { ioHandlers, queries };
 }
 
@@ -44,7 +53,7 @@ function createSocket(id) {
   const events = {};
   return {
     id,
-    user: { id: `student-${id}` },
+    user: { id: `student-${id}`, role: "primary_admin" },
     connected: true,
     rooms: new Set(),
     events,
@@ -85,6 +94,44 @@ test("connection adds the authenticated user room and invalid preview inputs are
   assert.ok(socket.rooms.has("user_student-one"));
   assert.equal(socket.rooms.has("user_another-student"), false);
   assert.equal(harness.queries.length, 0);
+});
+
+test("students can join only their resolved bus and cannot request another bus", async () => {
+  const resolvedUsers = [];
+  const snapshot = { success: true, busNo: "21", gpsStatus: "fresh" };
+  const harness = createHarness({
+    resolveStudentAssignmentFn: async (userId) => {
+      resolvedUsers.push(userId);
+      return {
+        assignmentStatus: "assigned",
+        effectiveBus: { _id: "authorized-bus-id" },
+        publicSnapshot: snapshot,
+      };
+    },
+  });
+  const socket = createSocket("assigned-student");
+  socket.user = { id: "student-42", role: "student" };
+  await connectSocket(harness, socket);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  await socket.events["join-bus"]("another-bus-preview");
+  await socket.events["request-bus-location"]("another-bus-id");
+
+  assert.deepEqual(resolvedUsers, [
+    "student-42",
+    "student-42",
+    "student-42",
+  ]);
+  assert.ok(socket.rooms.has("assigned_bus_authorized-bus-id"));
+  assert.equal(socket.rooms.has("preview_another-bus-preview"), false);
+  assert.equal(harness.queries.length, 0);
+  assert.deepEqual(
+    socket.emissions.map(({ event, payload }) => ({ event, payload })),
+    [
+      { event: "assigned-bus-update", payload: snapshot },
+      { event: "assigned-bus-update", payload: snapshot },
+    ],
+  );
 });
 
 test("repeated preview joins do one active-bus lookup and one room join", async () => {

@@ -350,6 +350,50 @@ test("selection changes invalidate a pending snapshot and buffered live event", 
   assert.equal(reconciler.getState().latestLocation, null);
 });
 
+test("assignment change clears the old bus location before reconciling an unavailable new bus", () => {
+  const reconciler = createGpsLocationReconciler();
+  const busOneKey = "bus:BUS-1";
+  const busOneGeneration = reconciler.select(busOneKey);
+  const busOneLocation = {
+    busNo: "BUS-1",
+    previewNumber: "1",
+    locationVersion: "10",
+    latitude: 11.55,
+    longitude: 78.02,
+  };
+  assert.equal(
+    reconciler.reconcileSnapshot(
+      busOneKey,
+      busOneLocation,
+      busOneGeneration,
+    ).location,
+    busOneLocation,
+  );
+
+  const busTwoKey = "bus:BUS-2";
+  const busTwoGeneration = reconciler.select(busTwoKey);
+  assert.equal(reconciler.getState().latestLocation, null);
+
+  const busTwoSnapshot = {
+    busNo: "BUS-2",
+    previewNumber: "2",
+    gpsStatus: "unavailable",
+    latitude: null,
+    longitude: null,
+  };
+  const result = reconciler.reconcileSnapshot(
+    busTwoKey,
+    busTwoSnapshot,
+    busTwoGeneration,
+  );
+
+  assert.equal(result.accepted, true);
+  assert.equal(result.location.busNo, "BUS-2");
+  assert.equal(result.location.gpsStatus, "unavailable");
+  assert.equal(result.location.latitude, null);
+  assert.equal(result.location.longitude, null);
+});
+
 test("unmount or logout invalidates pending snapshots", () => {
   const reconciler = createGpsLocationReconciler();
   const key = "bus:KIOT-3";

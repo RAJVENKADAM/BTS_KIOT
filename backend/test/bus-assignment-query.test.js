@@ -13,6 +13,9 @@ test("assignment lookup preserves supported normalized bus number formats", asyn
       select() {
         return this;
       },
+      lean() {
+        return Promise.resolve([]);
+      },
     };
   };
 
@@ -45,6 +48,9 @@ test("numeric leading-zero assignments use their normalized stored number", asyn
     return {
       select() {
         return this;
+      },
+      lean() {
+        return Promise.resolve([]);
       },
     };
   };

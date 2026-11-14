@@ -1,11 +1,21 @@
 const assert = require("node:assert/strict");
 const { after, test } = require("node:test");
+const AdministrativeChangeAudit = require("../src/models/AdministrativeChangeAudit");
+const AssignmentPropagationOutbox = require("../src/models/AssignmentPropagationOutbox");
 const User = require("../src/models/User");
 const excelUserService = require("../src/services/excelUserService");
 const { mockGpsOwnershipTransactions } = require("./helpers/gpsOwnershipTransactionMock.cjs");
 
 const gpsOwnershipTransactions = mockGpsOwnershipTransactions();
-after(() => gpsOwnershipTransactions.restore());
+const originalAuditCreate = AdministrativeChangeAudit.create;
+const originalOutboxUpdateOne = AssignmentPropagationOutbox.updateOne;
+AdministrativeChangeAudit.create = async () => [];
+AssignmentPropagationOutbox.updateOne = async () => ({ upsertedCount: 1 });
+after(() => {
+  gpsOwnershipTransactions.restore();
+  AdministrativeChangeAudit.create = originalAuditCreate;
+  AssignmentPropagationOutbox.updateOne = originalOutboxUpdateOne;
+});
 
 test("legacy spreadsheet processing projects only required fields and matches rows in memory", async () => {
   const originalFind = User.find;

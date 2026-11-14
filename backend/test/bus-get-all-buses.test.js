@@ -141,7 +141,7 @@ test("bus list uses projections and grouped student counts without changing admi
 
 test("bus list preserves the public response privacy projection", async () => {
   const setup = createMocks({
-    role: "student",
+    role: "primary_admin",
     buses: [
       {
         _id: "bus-1",
@@ -182,6 +182,30 @@ test("bus list preserves the public response privacy projection", async () => {
   });
 
   assert.equal(setup.captured.pipeline, undefined);
+});
+
+test("students cannot enumerate fleet data", async () => {
+  const setup = createMocks({
+    role: "student",
+    buses: [],
+    locations: [],
+    studentCounts: [],
+  });
+
+  await withModelMocks(
+    {
+      ...setup.mocks,
+      busFind: () => {
+        throw new Error("Student fleet access must not query buses");
+      },
+    },
+    async () => {
+      const response = createResponse();
+      await getAllBuses(setup.request, response);
+      assert.equal(response.statusCode, 403);
+      assert.equal(response.payload.success, false);
+    },
+  );
 });
 
 test("user schema declares the index required by the admin assignment aggregate", () => {

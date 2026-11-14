@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Alert, TextInput } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import Card from './UI/Card';
 import { COLORS, RADIUS, SHADOWS } from '../theme';
 import { Body, MutedText, Header as TypographyHeader } from './UI/Typography';
 import { normalizeBusPreview } from '../utils/busDisplay';
+import { createMutationKey } from '../utils/mutationKey';
 
 export default function UserCard({
   user,
@@ -12,13 +13,81 @@ export default function UserCard({
   onEdit,
 }) {
   const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const mutationKeyRef = useRef(null);
+  const deleteMutationKeyRef = useRef(null);
+  const savingRef = useRef(false);
+  const deletingRef = useRef(false);
   const [draft, setDraft] = useState({
     name: user?.name ?? '',
     role: user?.role ?? 'student',
     bus_no: user?.bus_no ?? '',
   });
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
+    if (deletingRef.current) return;
+    const key = deleteMutationKeyRef.current || createMutationKey();
+    deleteMutationKeyRef.current = key;
+    deletingRef.current = true;
+    setDeleting(true);
+    try {
+      const completed = await onDelete?.(user, key);
+      if (completed === false) {
+        deleteMutationKeyRef.current = null;
+        return;
+      }
+      deleteMutationKeyRef.current = null;
+    } catch {
+      deleteMutationKeyRef.current = key;
+    } finally {
+      deletingRef.current = false;
+      setDeleting(false);
+    }
+  };
+
+  const save = async () => {
+    if (savingRef.current) return;
+    if (!draft.name.trim()) {
+      Alert.alert('Validation', 'Name is required');
+      return;
+    }
+    const key = mutationKeyRef.current || createMutationKey();
+    mutationKeyRef.current = key;
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      await onEdit?.(user, {
+        name: draft.name.trim(),
+        role: draft.role,
+        bus_no: draft.bus_no.trim() ? draft.bus_no.trim() : null,
+      }, key);
+      mutationKeyRef.current = null;
+      setEditing(false);
+    } catch {
+      mutationKeyRef.current = key;
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  };
+
+  const updateDraft = (field, value) => {
+    mutationKeyRef.current = null;
+    setDraft((current) => ({ ...current, [field]: value }));
+  };
+
+  const beginEditing = () => {
+    mutationKeyRef.current = null;
+    setEditing(true);
+  };
+
+  const cancelEditing = () => {
+    mutationKeyRef.current = null;
+    setEditing(false);
+  };
+
+  const showDeleteConfirmation = () => {
     Alert.alert(
       'Deactivate user',
       `Deactivate ${user?.name || 'this user'}?`,
@@ -27,23 +96,10 @@ export default function UserCard({
         {
           text: 'Deactivate',
           style: 'destructive',
-          onPress: () => onDelete?.(user),
+          onPress: handleDelete,
         },
       ]
     );
-  };
-
-  const save = () => {
-    if (!draft.name.trim()) {
-      Alert.alert('Validation', 'Name is required');
-      return;
-    }
-    onEdit?.(user, {
-      name: draft.name.trim(),
-      role: draft.role,
-      bus_no: draft.bus_no.trim() ? draft.bus_no.trim() : null,
-    });
-    setEditing(false);
   };
 
   return (
@@ -67,14 +123,14 @@ export default function UserCard({
               <TextInput
                 style={styles.input}
                 value={draft.name}
-                onChangeText={(t) => setDraft((d) => ({ ...d, name: t }))}
+                onChangeText={(t) => updateDraft('name', t)}
                 placeholder="Name"
               />
 
               <TextInput
                 style={styles.input}
                 value={draft.role}
-                onChangeText={(t) => setDraft((d) => ({ ...d, role: t }))}
+                onChangeText={(t) => updateDraft('role', t)}
                 placeholder="Role (student/primary_admin/superadmin)"
                 autoCapitalize="none"
               />
@@ -82,7 +138,7 @@ export default function UserCard({
               <TextInput
                 style={styles.input}
                 value={String(draft.bus_no ?? '')}
-                onChangeText={(t) => setDraft((d) => ({ ...d, bus_no: t }))}
+                onChangeText={(t) => updateDraft('bus_no', t)}
                 placeholder="Bus number"
                 autoCapitalize="characters"
               />
@@ -93,19 +149,19 @@ export default function UserCard({
         <View style={styles.actions}>
           {editing ? (
             <>
-              <TouchableOpacity style={[styles.actionBtn, styles.saveBtn]} onPress={save}>
-                <Text style={styles.saveText}>Save</Text>
+              <TouchableOpacity style={[styles.actionBtn, styles.saveBtn]} onPress={save} disabled={saving}>
+                <Text style={styles.saveText}>{saving ? 'Saving…' : 'Save'}</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={[styles.actionBtn, styles.cancelBtn]} onPress={() => setEditing(false)}>
+              <TouchableOpacity style={[styles.actionBtn, styles.cancelBtn]} onPress={cancelEditing}>
                 <Text style={styles.cancelText}>Cancel</Text>
               </TouchableOpacity>
             </>
           ) : (
             <>
-              <TouchableOpacity style={[styles.actionBtn, styles.editBtn]} onPress={() => setEditing(true)}>
+              <TouchableOpacity style={[styles.actionBtn, styles.editBtn]} onPress={beginEditing}>
                 <Text style={styles.editText}>Edit</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={[styles.actionBtn, styles.deleteBtn]} onPress={handleDelete}>
+              <TouchableOpacity style={[styles.actionBtn, styles.deleteBtn]} onPress={showDeleteConfirmation} disabled={deleting}>
                 <Text style={styles.deleteText}>Delete</Text>
               </TouchableOpacity>
             </>

@@ -4,13 +4,25 @@ const bcrypt = require("bcryptjs");
 const XLSX = require("xlsx");
 const ExcelUpload = require("../src/models/ExcelUpload");
 const User = require("../src/models/User");
-const { importUsers, IMPORT_BATCH_SIZE } = require("../src/controllers/importUsers.controller");
+const {
+  importUsers: importUsersController,
+  IMPORT_BATCH_SIZE,
+} = require("../src/controllers/importUsers.controller");
 const { parseUserWorkbookUpload } = require("../src/middleware/spreadsheetImport");
 const ownershipService = require("../src/services/gpsWorkerOwnership");
+const assignmentPropagation = require("../src/services/assignmentPropagation");
 const { mockGpsOwnershipTransactions } = require("./helpers/gpsOwnershipTransactionMock.cjs");
+const importLedger = require("../src/services/importLedger");
 
 const gpsOwnershipTransactions = mockGpsOwnershipTransactions();
 after(() => gpsOwnershipTransactions.restore());
+
+let requestSequence = 0;
+async function importUsers(req, res) {
+  req.headers ||= {};
+  req.headers["idempotency-key"] ||= `test-import-${++requestSequence}`;
+  return importUsersController(req, res);
+}
 
 function responseDouble() {
   return {
@@ -37,6 +49,11 @@ function createRows(count) {
   }));
 }
 
+function operationEmail(operation) {
+  return operation.insertOne?.document?.email ||
+    operation.updateOne?.filter?.email;
+}
+
 async function withImportMocks(
   run,
   { bulkWrite, existingUsers = [], hash, find } = {},
@@ -48,7 +65,128 @@ async function withImportMocks(
     updateUpload: ExcelUpload.updateOne,
     deleteUpload: ExcelUpload.deleteOne,
     hash: bcrypt.hash,
+    recordAssignmentMutation: assignmentPropagation.recordAssignmentMutation,
+    ledger: Object.fromEntries(
+      [
+        "createOrResumeImport",
+        "claimNextRow",
+        "completeClaimedRow",
+        "failClaimedRow",
+        "releaseClaimedRow",
+        "finalizeImport",
+        "getImportRows",
+        "setBusinessUploadId",
+      ].map((name) => [name, importLedger[name]]),
+    ),
   };
+  const operations = new Map();
+  importLedger.createOrResumeImport = async ({
+    actorId,
+    importType,
+    idempotencyKey,
+    rows,
+  }) => {
+    const uploadId = `${actorId}:${importType}:${idempotencyKey}`;
+    let operation = operations.get(uploadId);
+    if (!operation) {
+      operation = {
+        uploadId,
+        status: "processing",
+        rows: rows.map((row, index) => ({
+          _id: `${uploadId}:${index + 1}`,
+          operation_id: uploadId,
+          row_number: row.rowNumber,
+          source_row_number: row.sourceRowNumber,
+          normalized_identity: row.identity,
+          input: row.input,
+          expected_version: row.expectedVersion,
+          expected_assignment_revision: row.expectedAssignmentRevision,
+          status: row.initialStatus || "pending",
+          retryable: false,
+          attempt_count: 0,
+          last_error_category: row.errorCategory || null,
+          last_error: row.error || null,
+        })),
+        result: null,
+      };
+      operations.set(uploadId, operation);
+    }
+    return {
+      operation,
+      uploadId,
+      staging: false,
+    };
+  };
+  importLedger.claimNextRow = async (uploadId, owner) => {
+    const operation = operations.get(uploadId);
+    const row = operation?.rows.find((item) =>
+      item.status === "pending" ||
+      (item.status === "failed" && item.retryable),
+    );
+    if (!row) return null;
+    row.status = "processing";
+    row.claim_owner = owner;
+    row.attempt_count += 1;
+    return { ...row };
+  };
+  importLedger.completeClaimedRow = async ({
+    uploadId,
+    rowId,
+    owner,
+    resultResourceId,
+    result,
+  }) => {
+    const row = operations.get(uploadId)?.rows.find((item) => item._id === rowId);
+    assert.equal(row?.claim_owner, owner);
+    row.status = "completed";
+    row.input = null;
+    row.result_resource_id = resultResourceId;
+    row.result = result;
+    row.claim_owner = null;
+  };
+  importLedger.failClaimedRow = async ({
+    uploadId,
+    claimedRowId,
+    owner,
+    category,
+    message,
+    conflict,
+    retryable,
+  }) => {
+    const row = operations.get(uploadId)?.rows.find(
+      (item) => item._id === claimedRowId,
+    );
+    if (row?.claim_owner !== owner) return;
+    row.status = conflict ? "conflict" : "failed";
+    row.last_error_category = category;
+    row.last_error = message;
+    row.retryable = Boolean(retryable);
+    row.input = conflict ? null : row.input;
+    row.claim_owner = null;
+  };
+  importLedger.releaseClaimedRow = async (uploadId, rowId, owner) => {
+    const row = operations.get(uploadId)?.rows.find((item) => item._id === rowId);
+    if (row?.claim_owner !== owner) return;
+    row.status = "pending";
+    row.claim_owner = null;
+  };
+  importLedger.setBusinessUploadId = async (uploadId, businessUploadId) => {
+    operations.get(uploadId).business_upload_id = businessUploadId;
+  };
+  importLedger.finalizeImport = async (uploadId, result) => {
+    const operation = operations.get(uploadId);
+    if (result) operation.result = result;
+    const unfinished = operation.rows.some(
+      (row) => row.status === "pending" || row.status === "processing",
+    );
+    const failed = operation.rows.some(
+      (row) => row.status === "failed" || row.status === "conflict",
+    );
+    operation.status = unfinished ? "processing" : failed ? "partial" : "completed";
+    return { ...operation, rows: undefined };
+  };
+  importLedger.getImportRows = async (uploadId) =>
+    operations.get(uploadId).rows.map((row) => ({ ...row }));
   const batches = [];
   let uploadDeleted = false;
   const uploadUpdates = [];
@@ -76,6 +214,7 @@ async function withImportMocks(
     assert.equal(rounds, 10);
     return `synthetic-hash:${password}`;
   });
+  assignmentPropagation.recordAssignmentMutation = async () => {};
 
   try {
     await run({
@@ -90,6 +229,11 @@ async function withImportMocks(
     ExcelUpload.updateOne = originals.updateUpload;
     ExcelUpload.deleteOne = originals.deleteUpload;
     bcrypt.hash = originals.hash;
+    assignmentPropagation.recordAssignmentMutation =
+      originals.recordAssignmentMutation;
+    for (const [name, fn] of Object.entries(originals.ledger)) {
+      importLedger[name] = fn;
+    }
   }
 }
 
@@ -114,7 +258,7 @@ test("large JSON imports hash and persist sequential bounded batches", async () 
       "completed",
     );
     assert.ok(batches.every((batch) =>
-      batch.every((operation) => operation.updateOne.filter.email),
+      batch.every((operation) => operationEmail(operation)),
     ));
   });
 });
@@ -234,10 +378,10 @@ test("Redis import commits each row once and reports mixed row failures without 
     }, {
       bulkWrite: async (operations, options) => {
         calls.push({
-          emails: operations.map((operation) => operation.updateOne.filter.email),
+          emails: operations.map(operationEmail),
           session: options.session,
         });
-        if (operations[0].updateOne.filter.email === "student1@example.test") {
+        if (operationEmail(operations[0]) === "student1@example.test") {
           const error = new Error("rejected row");
           error.writeErrors = [{ index: 0 }];
           throw error;
@@ -277,7 +421,7 @@ test("Redis import stops on an uncertain row without retrying it or later rows",
       ]);
     }, {
       bulkWrite: async (operations) => {
-        const email = operations[0].updateOne.filter.email;
+        const email = operationEmail(operations[0]);
         calls.push(email);
         if (email === "student1@example.test") {
           throw new Error("ambiguous transaction result");
@@ -456,10 +600,9 @@ test("a failed first database batch is reported and leaves no upload record", as
     );
 
     assert.equal(response.statusCode, 500);
-    assert.equal(response.payload.summary.insertedRows, 0);
-    assert.equal(response.payload.summary.failedRows, 150);
-    assert.equal(response.payload.summary.completed, false);
-    assert.equal(state.uploadDeleted, true);
+    assert.equal(response.payload.error, "Could not initialize the import. Please retry with the same key and content.");
+    assert.equal(response.payload.summary, undefined);
+    assert.equal(state.uploadDeleted, false);
   }, {
     find: () => {
       throw new Error("simulated database read failure before writes");
@@ -475,7 +618,7 @@ test("unknown bulk-write outcomes retain a non-success upload record for reconci
       response,
     );
 
-    assert.equal(response.statusCode, 500);
+    assert.equal(response.statusCode, 202);
     assert.equal(response.payload.summary.outcomeUnknown, true);
     assert.equal(response.payload.summary.partial, true);
     assert.equal(state.uploadDeleted, false);
@@ -497,11 +640,14 @@ test("middle and final batch write errors produce accurate partial summaries", a
           response,
         );
 
-        assert.equal(response.statusCode, 200);
+        assert.equal(response.statusCode, 202);
         assert.equal(response.payload.summary.totalRows, 250);
-        assert.equal(response.payload.summary.insertedRows, 249);
+        assert.equal(
+          response.payload.summary.insertedRows,
+          failedBatch === 1 ? 100 : 200,
+        );
         assert.equal(response.payload.summary.failedRows, 1);
-        assert.equal(response.payload.summary.completed, true);
+        assert.equal(response.payload.summary.completed, false);
         assert.equal(response.payload.summary.partial, true);
         assert.equal(
           uploadUpdates[0][1].$set.import_status,
@@ -511,7 +657,7 @@ test("middle and final batch write errors produce accurate partial summaries", a
           response.payload.summary.rowResults[0].index,
           failedBatch * IMPORT_BATCH_SIZE + 3,
         );
-        assert.equal(batches.length, 3);
+        assert.equal(batches.length, failedBatch + 1);
       }, {
         bulkWrite: async (operations, _options, batchIndex) => {
           if (batchIndex === failedBatch) {
@@ -526,7 +672,7 @@ test("middle and final batch write errors produce accurate partial summaries", a
   }
 });
 
-test("an import retry uses email-keyed upserts rather than creating duplicate identities", async () => {
+test("user creation uses an explicit unique insert identity", async () => {
   await withImportMocks(async ({ batches }) => {
     const users = createRows(1);
     const response = responseDouble();
@@ -536,9 +682,9 @@ test("an import retry uses email-keyed upserts rather than creating duplicate id
     );
 
     assert.equal(
-      batches[0][0].updateOne.filter.email,
+      batches[0][0].insertOne.document.email,
       users[0].email,
     );
-    assert.equal(batches[0][0].updateOne.upsert, true);
+    assert.equal(batches[0][0].insertOne.document.resourceVersion, 0);
   });
 });

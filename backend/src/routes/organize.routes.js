@@ -1,31 +1,17 @@
 const express = require('express');
-const multer = require('multer');
-const { uploadExcelUsers } = require('../controllers/organize.controller');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth');
-const { reserveImportCapacity } = require('../middleware/importAdmission');
 
 const router = express.Router();
 
-// Configure multer for memory storage (required for Expo Go compatibility)
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: {
-    fileSize: 10 * 1024 * 1024,
-    fields: 50,
-    parts: 60,
-    fieldSize: 256 * 1024,
-  },
-  fileFilter: (req, file, cb) => {
-    if (file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
-      file.originalname.toLowerCase().endsWith('.xlsx')) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only Excel files are allowed'));
-    }
-  }
-});
-
-// Superadmin only routes
-router.post('/upload-excel-users', authenticateToken, authorizeRoles('superadmin'), reserveImportCapacity, upload.single('file'), uploadExcelUsers);
+router.post(
+  '/upload-excel-users',
+  authenticateToken,
+  authorizeRoles('superadmin'),
+  (_req, res) => res.status(410).json({
+    success: false,
+    code: 'LEGACY_IMPORT_RETIRED',
+    error: 'This Excel import endpoint has been retired. Use POST /api/superadmin/import-users-excel.',
+  }),
+);
 
 module.exports = router;

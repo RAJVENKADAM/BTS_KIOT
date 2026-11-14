@@ -15,6 +15,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../context/AuthContext";
 import planMappingApi from "../api/planMappingApi";
 import { COLORS, RADIUS, SPACING } from "../theme";
+import { getErrorMessage } from "../utils/errorHandler";
 
 const PLANS = ["PLAN A", "PLAN B", "PLAN C", "PLAN D"];
 
@@ -49,7 +50,7 @@ function PlanMappingScreen() {
       };
       setData(nextData);
     } catch (requestError) {
-      setError(requestError.message || "Could not load plan mappings.");
+      setError(getErrorMessage(requestError, "Could not load plan mappings."));
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -178,9 +179,10 @@ function PlanMappingScreen() {
       setMessage("Cluster saved. Rider assignments remain unchanged.");
       await load(true);
     } catch (requestError) {
+      if (requestError?.status === 409) await load(true);
       const uncovered = requestError.data?.uncoveredBuses;
       setError(
-        `${requestError.message || "Could not save this cluster."}${
+        `${getErrorMessage(requestError, "Could not save this cluster.")}${
           uncovered?.length
             ? ` Buses needing another assignment: ${uncovered.map((bus) => `Bus ${bus}`).join(", ")}.`
             : ""
@@ -245,7 +247,8 @@ function PlanMappingScreen() {
       setMessage("Root route updated. Riders in this cluster have been notified.");
       await load(true);
     } catch (requestError) {
-      setError(requestError.message || "Could not update the root route.");
+      if (requestError?.status === 409) await load(true);
+      setError(getErrorMessage(requestError, "Could not update the root route."));
     } finally {
       setSaving(false);
     }
@@ -269,7 +272,8 @@ function PlanMappingScreen() {
               setMessage("Cluster deleted.");
               await load(true);
             } catch (requestError) {
-              setError(requestError.message || "Could not delete this cluster.");
+              if (requestError?.status === 409) await load(true);
+              setError(getErrorMessage(requestError, "Could not delete this cluster."));
             } finally {
               setSaving(false);
             }

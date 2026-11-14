@@ -1,9 +1,7 @@
 const express = require('express');
-const multer = require('multer');
 const {
   getAllExcelUploads,
   getExcelUpload,
-  reuploadExcel,
   deleteExcelUpload,
   getUsersByExcelUpload
 } = require('../controllers/excelManagement.controller');
@@ -11,30 +9,17 @@ const { authenticateToken, authorizeRoles } = require('../middleware/auth');
 
 const router = express.Router();
 
-// Configure multer for memory storage
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: {
-    fileSize: 10 * 1024 * 1024,
-    fields: 50,
-    parts: 60,
-    fieldSize: 256 * 1024,
-  },
-  fileFilter: (req, file, cb) => {
-    if (file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
-      file.originalname.toLowerCase().endsWith('.xlsx')) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only Excel files are allowed'));
-    }
-  }
-});
-
 // Superadmin only routes
 router.get('/', authenticateToken, authorizeRoles('superadmin'), getAllExcelUploads);
 router.get('/:id', authenticateToken, authorizeRoles('superadmin'), getExcelUpload);
 router.get('/:id/users', authenticateToken, authorizeRoles('superadmin'), getUsersByExcelUpload);
-router.put('/:id', authenticateToken, authorizeRoles('superadmin'), upload.single('file'), reuploadExcel);
+router.put('/:id', authenticateToken, authorizeRoles('superadmin'), (_req, res) =>
+  res.status(410).json({
+    success: false,
+    code: 'EXCEL_UPLOAD_REUPLOAD_RETIRED',
+    error: 'This endpoint only changed upload metadata. Use the supported user import workflow to apply a new spreadsheet.',
+  }),
+);
 router.delete('/:id', authenticateToken, authorizeRoles('superadmin'), deleteExcelUpload);
 
 module.exports = router;

@@ -1,7 +1,6 @@
 const Bus = require("../models/Bus");
 const BusLiveLocation = require("../models/BusLiveLocation");
 const GpsDevice = require("../models/GpsDevice");
-const User = require("../models/User");
 const { randomUUID } = require("node:crypto");
 const { performance } = require("node:perf_hooks");
 const gpsService = require("../services/gpsService");
@@ -108,28 +107,14 @@ function getBusLocation(bus, locationMap, registeredDevice) {
   return null;
 }
 
-function buildUsersByBus(assignedUsers) {
-  const usersByBus = new Map();
-  for (const user of assignedUsers) {
-    const busNumber = String(user.bus_no || "").trim().toUpperCase();
-    if (!busNumber) continue;
-    const users = usersByBus.get(busNumber) || new Set();
-    users.add(String(user._id));
-    usersByBus.set(busNumber, users);
-  }
-  return usersByBus;
-}
-
-function getLocationPublicationRooms(bus, usersByBus, location) {
+function getLocationPublicationRooms(bus) {
   const rooms = new Set();
+  if (bus._id != null) {
+    rooms.add(`assigned_bus_${String(bus._id)}`);
+  }
   if (bus.preview_number != null) {
     rooms.add(`preview_${String(bus.preview_number)}`);
   }
-  const assignedUserIds =
-    usersByBus.get(String(bus.bus_no || "").trim().toUpperCase()) ||
-    new Set();
-  for (const userId of assignedUserIds) rooms.add(`user_${userId}`);
-  if (location.user_id) rooms.add(`user_${String(location.user_id)}`);
   return [...rooms];
 }
 
@@ -157,7 +142,6 @@ class GpsSyncWorker {
     BusModel = Bus,
     LiveLocationModel = BusLiveLocation,
     GpsDeviceModel = null,
-    UserModel = User,
     service = gpsService,
     setIntervalFn = setInterval,
     clearIntervalFn = clearInterval,
@@ -165,7 +149,6 @@ class GpsSyncWorker {
     this.Bus = BusModel;
     this.BusLiveLocation = LiveLocationModel;
     this.GpsDevice = GpsDeviceModel;
-    this.User = UserModel;
     this.gpsService = service;
     this.setIntervalFn = setIntervalFn;
     this.clearIntervalFn = clearIntervalFn;
@@ -502,11 +485,9 @@ class GpsSyncWorker {
       durationMs: null,
       providerDurationMs: null,
       busQueryDurationMs: null,
-      studentQueryDurationMs: null,
       locationReadDurationMs: null,
       locationWriteDurationMs: 0,
       activeBusCount: null,
-      assignedStudentCount: null,
       normalizedProviderRecordCount: null,
       successfulWrites: 0,
       acceptedProviderUpdates: 0,
@@ -661,26 +642,8 @@ class GpsSyncWorker {
           )
           .lean(),
       );
-      const userRead = timedRead("studentQueryDurationMs", () =>
-        this.User.find({
-          role: "student",
-          is_active: true,
-          bus_no: { $nin: [null, ""] },
-        })
-          .select("_id bus_no")
-          .lean(),
-      );
-      let buses;
-      let assignedUsers;
-      try {
-        [buses, assignedUsers] = await Promise.all([busRead, userRead]);
-      } catch (error) {
-        await Promise.allSettled([busRead, userRead]);
-        throw error;
-      }
+      const buses = await busRead;
       metrics.activeBusCount = buses.length;
-      metrics.assignedStudentCount = assignedUsers.length;
-      const usersByBus = buildUsersByBus(assignedUsers);
       const devicesByBus = new Map(
         activeGpsDevices.map((device) => [String(device.bus_id), device]),
       );
@@ -907,11 +870,7 @@ class GpsSyncWorker {
             };
           }
 
-          const publicationRooms = getLocationPublicationRooms(
-            bus,
-            usersByBus,
-            previousLocation || {},
-          );
+          const publicationRooms = getLocationPublicationRooms(bus);
           const publicationStateChanged =
             !previousLocation ||
             previousLocation.is_online !== update.is_online ||
@@ -1040,7 +999,7 @@ class GpsSyncWorker {
 const gpsSyncWorker = new GpsSyncWorker({ GpsDeviceModel: GpsDevice });
 gpsSyncWorker.GpsSyncWorker = GpsSyncWorker;
 gpsSyncWorker.getBusLocation = getBusLocation;
-gpsSyncWorker.buildUsersByBus = buildUsersByBus;
+gpsSyncWorker.getLocationPublicationRooms = getLocationPublicationRooms;
 gpsSyncWorker.GPS_SYNC_INTERVAL_MS = GPS_SYNC_INTERVAL_MS;
 
 module.exports = gpsSyncWorker;

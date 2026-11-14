@@ -77,7 +77,6 @@ const {
 } = require("../utils/gpsLocationPolicy.cjs");
 const { getPreviewRoomIds } = require("../utils/socketConnectionPolicy.cjs");
 const { subscribeSocketEvent } = require("../utils/socketSubscription.cjs");
-const { createGpsSnapshotPoller } = require("../utils/gpsSnapshotPolling.cjs");
 
 const KIOT_LAT = 11.554528;
 const KIOT_LNG = 78.019759;
@@ -98,9 +97,12 @@ const calculateDistance = (lat1, lng1, lat2, lng2) => {
 
 const HomeScreen = () => {
   const { token, user, updateUserData } = useAuth();
+  const isFleetAdmin = ["primary_admin", "superadmin"].includes(
+    String(user?.role || "").toLowerCase(),
+  );
   const navigation = useNavigation();
   const isFocused = useIsFocused();
-  const { error, refreshBuses, getSocket } = useBus();
+  const { assignment, error, getSocket } = useBus();
   const socket = getSocket ? getSocket() : null;
 
   const [searchQuery, setSearchQuery] = useState("");
@@ -207,19 +209,20 @@ const HomeScreen = () => {
       if (!reconciliation.accepted) return;
       latestGpsOrderRef.current = getLocationOrder(data);
 
-      const hasIncomingCoordinates = hasValidGpsCoordinates(data);
+      const hasFreshCoordinates =
+        hasValidGpsCoordinates(data) && !isGpsStale(data);
       const nextBusData = {
         ...(currentBusData || {}),
         ...data,
         busNo: data.busNo ?? data.bus_no ?? selected,
         bus_no: data.bus_no ?? selected,
         previewNumber: data.previewNumber ?? currentPreview ?? undefined,
-        latitude: hasIncomingCoordinates
+        latitude: hasFreshCoordinates
           ? data.latitude
-          : currentBusData?.latitude ?? null,
-        longitude: hasIncomingCoordinates
+          : null,
+        longitude: hasFreshCoordinates
           ? data.longitude
-          : currentBusData?.longitude ?? null,
+          : null,
         speed: data.speed ?? currentBusData?.speed ?? 0,
         source: data.source || currentBusData?.source || "gps",
         isBusActiveInCurrentPlan:
@@ -234,8 +237,7 @@ const HomeScreen = () => {
         !!nextBusData.notActiveMessage;
       const live =
         !inactive &&
-        hasIncomingCoordinates &&
-        !isGpsStale(nextBusData);
+        hasFreshCoordinates;
       nextBusData._isOffline = !live;
       nextBusData._markerStatus = inactive
         ? "inactive"
@@ -260,7 +262,7 @@ const HomeScreen = () => {
       ].some((property) => !Object.is(currentBusData?.[property], nextBusData[property]));
       if (visibleLocationChanged) {
         setBusData(nextBusData);
-        setLastGoodLocation(nextBusData);
+        setLastGoodLocation(live ? nextBusData : null);
       }
       setLocationStatus(live ? "live" : "offline");
       setIsOffline(!live);
@@ -322,6 +324,79 @@ const HomeScreen = () => {
   const bottomSheetRef = useRef(null);
   const [showPlanInSheet, setShowPlanInSheet] = useState(false);
   const [planViewMode, setPlanViewMode] = useState(null); // 'activePlan' | 'stopsForBus' | null
+  const assignmentKeyRef = useRef(null);
+
+  useEffect(() => {
+    if (user?.role !== "student" || !assignment) return;
+
+    const assignedBusNo = assignment.busNo || null;
+    const previewNumber = assignment.previewNumber || null;
+    const nextKey = `${assignment.assignmentVersion || "0"}:${previewNumber || assignedBusNo || "none"}`;
+    if (assignmentKeyRef.current !== nextKey) {
+      assignmentKeyRef.current = nextKey;
+      gpsReconcilerRef.current.invalidate();
+      latestGpsOrderRef.current = getLocationOrder(null);
+      setRoutesData(null);
+      setLastGoodLocation(null);
+    }
+
+    const selectionKey = selectGpsTarget(assignedBusNo, previewNumber);
+    selectedBusNoRef.current = assignedBusNo;
+    selectedPreviewNumberRef.current = previewNumber;
+    setSelectedBusNo(assignedBusNo);
+    setSelectedPreviewNumber(previewNumber);
+
+    if (!assignedBusNo && !previewNumber) {
+      busDataRef.current = null;
+      setBusData(null);
+      setIsBusFound(false);
+      setIsOffline(false);
+      setLocationStatus("unavailable");
+      setMarkerStatus("inactive");
+      setTrackingError(
+        assignment.notActiveMessage || "No bus is currently assigned to you.",
+      );
+      return;
+    }
+
+    const hasFreshCoordinates =
+      assignment.gpsStatus === "fresh" &&
+      hasValidGpsCoordinates(assignment) &&
+      !isGpsStale(assignment);
+    const inactive = assignment.isBusActiveInCurrentPlan === false;
+    const nextBusData = {
+      ...assignment,
+      busNo: assignedBusNo,
+      previewNumber,
+      _isOffline: !hasFreshCoordinates,
+      _markerStatus: inactive
+        ? "inactive"
+        : hasFreshCoordinates
+          ? "moving"
+          : "offline",
+    };
+    busDataRef.current = nextBusData;
+    setBusData(nextBusData);
+    setIsBusFound(true);
+    setIsOffline(!hasFreshCoordinates);
+    setLocationStatus(hasFreshCoordinates ? "live" : "offline");
+    setMarkerStatus(nextBusData._markerStatus);
+    setTrackingError(
+      inactive
+        ? assignment.notActiveMessage || "Your assigned bus is unavailable."
+        : hasFreshCoordinates
+          ? null
+          : assignment.gpsStatus === "stale"
+            ? "GPS data is stale. Waiting for a fresh location."
+            : "No fresh GPS location is available for your assigned bus.",
+    );
+    if (hasFreshCoordinates) {
+      setLastGoodLocation(nextBusData);
+    } else {
+      setLastGoodLocation(null);
+    }
+    if (selectionKey) setNoBusFound(false);
+  }, [assignment, user?.role]);
 
   // Keep the expanded sheet below the profile and notification controls.
   const { height: SCREEN_HEIGHT } = Dimensions.get("window");
@@ -369,6 +444,7 @@ const HomeScreen = () => {
   const searchCounterRef = useRef(0);
 
   useEffect(() => {
+    if (!isFleetAdmin) return;
     busDataRef.current = null;
     setBusData(null);
     setLastGoodLocation(null);
@@ -398,10 +474,27 @@ const HomeScreen = () => {
       setSelectedPreviewNumber(null);
       setLocationStatus("idle");
     }
-  }, [user?.id, user?._id, user?.bus_no]);
+  }, [user?.id, user?._id, user?.bus_no, isFleetAdmin]);
+
+  useEffect(() => {
+    if (user?.role !== "student" || assignment) return;
+    busDataRef.current = null;
+    setBusData(null);
+    setLastGoodLocation(null);
+    setRoutesData(null);
+    setSelectedBusNo(null);
+    setSelectedPreviewNumber(null);
+    selectedBusNoRef.current = null;
+    selectedPreviewNumberRef.current = null;
+    setIsBusFound(false);
+    setIsOffline(false);
+    setLocationStatus("loading");
+    setTrackingError(null);
+  }, [user?.id, user?._id, user?.role, assignment]);
 
   const autoLoadedBusKeyRef = useRef(null);
   useEffect(() => {
+    if (!isFleetAdmin) return;
     const assignedBusNo = (user?.bus_no || "").trim().toUpperCase() || null;
     let snapshotGeneration = null;
     if (assignedBusNo) {
@@ -542,7 +635,12 @@ const HomeScreen = () => {
   }, [user?.id, user?._id, user?.bus_no, token]);
 
   useEffect(() => {
-    if (isFocused && hasBeenFocusedRef.current && socket?.connected) {
+    if (
+      isFleetAdmin &&
+      isFocused &&
+      hasBeenFocusedRef.current &&
+      socket?.connected
+    ) {
       const selectedIdentifier =
         selectedPreviewNumberRef.current || selectedBusNoRef.current;
       if (selectedIdentifier) {
@@ -550,10 +648,14 @@ const HomeScreen = () => {
       }
     }
     if (isFocused) hasBeenFocusedRef.current = true;
-  }, [isFocused, socket]);
+  }, [isFocused, socket, isFleetAdmin]);
 
   useEffect(() => {
-    if (!socket || (!selectedBusNo && !selectedPreviewNumber)) return;
+    if (
+      !isFleetAdmin ||
+      !socket ||
+      (!selectedBusNo && !selectedPreviewNumber)
+    ) return;
     if (!isFocused) return undefined;
     const roomIds = getPreviewRoomIds(selectedPreviewNumber, busData);
     roomIds.forEach((roomId) => {
@@ -569,6 +671,7 @@ const HomeScreen = () => {
     isFocused,
     selectedBusNo,
     selectedPreviewNumber,
+    isFleetAdmin,
     busData?.previewNumber,
     busData?.preview_number,
     busData?.effectivePreviewNumber,
@@ -581,7 +684,6 @@ const HomeScreen = () => {
     let recoveryTimer = null;
     let recoveryRequestInFlight = false;
     let disposed = false;
-    let poller;
     let scheduleRecovery = () => {};
 
     const getSelectedKey = () => {
@@ -633,7 +735,6 @@ const HomeScreen = () => {
 
         const reconciledData = reconciliation.location;
         const nextBusData = {
-          ...(busDataRef.current || {}),
           ...reconciledData,
           busNo:
             reconciledData.busNo ||
@@ -660,7 +761,7 @@ const HomeScreen = () => {
             : "offline";
         busDataRef.current = nextBusData;
         setBusData(nextBusData);
-        setLastGoodLocation(nextBusData);
+        setLastGoodLocation(live ? nextBusData : null);
         setLocationStatus(live ? "live" : "offline");
         setIsOffline(!live);
         setMarkerStatus(inactive ? "inactive" : live ? "moving" : "offline");
@@ -689,38 +790,23 @@ const HomeScreen = () => {
       }
     };
 
-    poller = createGpsSnapshotPoller({
-      request: refreshLocation,
-    });
-
     scheduleRecovery = () => {
       if (disposed || !getSelectedKey()) return;
       if (recoveryTimer) clearTimeout(recoveryTimer);
       recoveryTimer = setTimeout(
         () => {
           recoveryTimer = null;
-          void poller.refreshNow();
+          void refreshLocation();
         },
         getSocketRecoveryDelay(recoveryAttempt),
       );
     };
 
-    poller.start(getSelectedKey());
-    if (socket.connected) scheduleRecovery();
-
     const handleConnect = () => {
       if (!hasConnected) {
         hasConnected = true;
-        poller.start(getSelectedKey());
         return;
       }
-      const currentBusNo = selectedBusNoRef.current;
-      const currentPreview = selectedPreviewNumberRef.current;
-      const currentBusData = busDataRef.current;
-      if (!currentBusNo && !currentPreview) return;
-      getPreviewRoomIds(currentPreview, currentBusData).forEach((roomId) =>
-        socket.emit("join-bus", roomId),
-      );
       scheduleRecovery();
     };
 
@@ -732,7 +818,6 @@ const HomeScreen = () => {
     return () => {
       disposed = true;
       if (recoveryTimer) clearTimeout(recoveryTimer);
-      poller.stop();
       reconnectRequestRef.current += 1;
       unsubscribeConnect();
     };
@@ -749,6 +834,7 @@ const HomeScreen = () => {
     if (!socket || !user?.id) return;
     const handleNotification = (notification) => {
       setUnreadNotifications((count) => count + 1);
+      return;
       if (notification?.type === "plan_changed" && user?.bus_no) {
         const assignedBusNo = String(user.bus_no).toUpperCase();
         selectedBusNoRef.current = assignedBusNo;
@@ -923,6 +1009,7 @@ const HomeScreen = () => {
   useEffect(() => {
     if (!socket) return;
     const handleBusUpdate = (data) => {
+      if (!isFleetAdmin) return;
       if (!["PLAN_CHANGED", "PLAN_MAPPING_CHANGED", "BUS_ALTERED", "BUS_COMBINED"].includes(data?.actionType)) return;
       const identifier = selectedPreviewNumber || selectedBusNo || user?.bus_no;
       if (!identifier) return;
@@ -980,7 +1067,14 @@ const HomeScreen = () => {
         .catch((error) => console.error("Failed to refresh bus stops:", error));
     };
     return subscribeSocketEvent(socket, "bus-update", handleBusUpdate);
-  }, [socket, token, selectedBusNo, selectedPreviewNumber, user?.bus_no]);
+  }, [
+    socket,
+    token,
+    selectedBusNo,
+    selectedPreviewNumber,
+    user?.bus_no,
+    isFleetAdmin,
+  ]);
 
   useEffect(() => {
     if (!token) return;
@@ -1011,10 +1105,6 @@ const HomeScreen = () => {
       cancelled = true;
     };
   }, [selectedBusNo, token]);
-
-  useEffect(() => {
-    refreshBuses();
-  }, [refreshBuses]);
 
   const normalizeBusState = (state) => {
     const normalized = typeof state === "string" ? state.toLowerCase() : "";
@@ -1054,6 +1144,7 @@ const HomeScreen = () => {
   };
 
   const handleSearch = async () => {
+    if (!isFleetAdmin) return;
     const query = searchQuery.trim();
     if (!query) return;
     reconnectRequestRef.current += 1;
@@ -1259,6 +1350,7 @@ const HomeScreen = () => {
   };
 
   const handleClearSearch = useCallback(() => {
+    if (!isFleetAdmin) return;
     searchCounterRef.current += 1;
     reconnectRequestRef.current += 1;
     gpsReconcilerRef.current.invalidate();
@@ -1283,7 +1375,7 @@ const HomeScreen = () => {
     busStatusRef.current = "moving";
     selectedBusNoRef.current = null;
     closeAllOverlayPanels();
-  }, [closeAllOverlayPanels]);
+  }, [closeAllOverlayPanels, isFleetAdmin]);
 
   const shouldShowBusMarker = !!selectedBusNo || !!selectedPreviewNumber;
 
@@ -1299,8 +1391,10 @@ const HomeScreen = () => {
   const canViewBusStops =
     isBusFound && Boolean(selectedBusNo || selectedPreviewNumber);
   const assignedBusDisplay = getDisplayBusNumber({
-    previewNumber: user?.previewNumber ?? user?.preview_number,
-    busNo: user?.bus_no,
+    previewNumber: assignment
+      ? assignment.previewNumber
+      : user?.previewNumber ?? user?.preview_number,
+    busNo: assignment ? assignment.busNo : user?.bus_no,
   });
 
   const busCardContent = React.useMemo(() => {

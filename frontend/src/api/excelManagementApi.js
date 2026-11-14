@@ -8,6 +8,7 @@ import {
   isNetworkError,
   getErrorMessage,
 } from "../utils/errorHandler";
+import { createMutationKey } from "../utils/mutationKey";
 
 export const excelManagementApi = {
   // Get all Excel uploads
@@ -47,37 +48,8 @@ export const excelManagementApi = {
     }
   },
 
-  // Re-upload Excel file
-  reupload: async (token, id, file) => {
-    try {
-      const formData = new FormData();
-      formData.append("file", {
-        uri: file.uri,
-        name: file.name || "users.xlsx",
-        type:
-          file.type ||
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      });
-
-      const data = await fetchJson(
-        `${API_BASE_URL}/api/excel-management/${id}`,
-        {
-          method: "PUT",
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-          body: formData,
-        },
-      );
-      return data;
-    } catch (error) {
-      console.error("Re-upload Excel error:", error);
-      throw error;
-    }
-  },
-
   // Delete Excel upload
-  deleteUpload: async (token, id) => {
+  deleteUpload: async (token, id, expectedVersion, idempotencyKey) => {
     try {
       const data = await fetchJson(
         `${API_BASE_URL}/api/excel-management/${id}`,
@@ -86,7 +58,9 @@ export const excelManagementApi = {
           headers: {
             Authorization: `Bearer ${token}`,
             "Content-Type": "application/json",
+            "If-Match": `"${expectedVersion}"`,
           },
+          idempotencyKey,
         },
       );
       return data;
@@ -127,7 +101,19 @@ export const excelManagementApi = {
   },
 
   // Update user (superadmin)
-  updateUser: async (token, userId, payload) => {
+  updateUser: async (
+    token,
+    userId,
+    payload,
+    idempotencyKey = createMutationKey(),
+  ) => {
+    const body = {
+      ...payload,
+      expectedVersion: payload.expectedVersion,
+      ...(payload.bus_no !== undefined || payload.role !== undefined
+        ? { expectedAssignmentRevision: payload.assignmentRevision }
+        : {}),
+    };
     const data = await fetchJson(
       `${API_BASE_URL}/api/superadmin/users/${userId}`,
       {
@@ -136,18 +122,31 @@ export const excelManagementApi = {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(body),
+        idempotencyKey,
       },
     );
     return data;
   },
 
   // Deactivate user (superadmin)
-  deactivateUser: async (token, userId) => {
+  deactivateUser: async (
+    token,
+    user,
+    idempotencyKey = createMutationKey(),
+  ) => {
+    const userId = typeof user === "object" ? user.id : user;
+    const versionedUser = typeof user === "object" ? user : null;
     const data = await fetchJson(
       `${API_BASE_URL}/api/superadmin/users/${userId}`,
       {
         method: "DELETE",
+        idempotencyKey,
+        body: JSON.stringify({
+          expectedVersions: {
+            [userId]: versionedUser?.resourceVersion,
+          },
+        }),
         headers: {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",

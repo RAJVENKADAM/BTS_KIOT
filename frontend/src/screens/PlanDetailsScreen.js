@@ -22,7 +22,7 @@ export default function PlanDetailsScreen({ route, navigation }) {
     busNo,
   } = route.params || {};
 
-  const { token } = useAuth();
+  const { token, user } = useAuth();
 
   const [loading, setLoading] = useState(true);
   const [items, setItems] = useState([]);
@@ -57,6 +57,24 @@ export default function PlanDetailsScreen({ route, navigation }) {
       try {
         setLoading(true);
         setError(null);
+
+        if (user?.role === "student") {
+          const assignment = await busApi.getMyAssignment(token);
+          setItems(
+            assignment.busNo
+              ? [
+                  {
+                    ...assignment,
+                    busNo: assignment.busNo,
+                    previewNumber: assignment.previewNumber,
+                    stops: assignment.stops || [],
+                  },
+                ]
+              : [],
+          );
+          setPlanName("Your assigned bus");
+          return;
+        }
 
         const global = await busApi.getGlobalActivePlan(token);
 
@@ -107,7 +125,7 @@ export default function PlanDetailsScreen({ route, navigation }) {
         setLoading(false);
       }
     },
-    [token],
+    [token, user?.role],
   );
 
   /**

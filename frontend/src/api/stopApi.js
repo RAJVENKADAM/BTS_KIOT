@@ -13,10 +13,4 @@ export const stopApi = {
       timeoutMs: 60000,
     }),
 
-  importCoordinates: (token, stops) =>
-    fetchJson(`${API_BASE_URL}/api/stops/coordinates/import`, {
-      method: "POST",
-      headers: headersFor(token),
-      body: JSON.stringify({ stops }),
-    }),
 };

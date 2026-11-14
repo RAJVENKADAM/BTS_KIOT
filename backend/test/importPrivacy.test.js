@@ -5,6 +5,10 @@ const User = require("../src/models/User");
 const { importUsers } = require("../src/controllers/importUsers.controller");
 const ExcelUserService = require("../src/services/excelUserService");
 const { uploadExcelUsers } = require("../src/controllers/organize.controller");
+const { mockImportLedger } = require("./helpers/importLedgerMock.cjs");
+
+const importLedgerMock = mockImportLedger();
+test.after(() => importLedgerMock.restore());
 
 function responseDouble() {
   return {
@@ -34,6 +38,7 @@ test("invalid user import reports safe row errors without logging spreadsheet da
     await importUsers(
       {
         user: { id: "admin-id" },
+        get: () => "invalid-user-import-0001",
         body: {
           users: [{
             name: "Sensitive Student",

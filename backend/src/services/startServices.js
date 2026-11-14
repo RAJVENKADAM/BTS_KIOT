@@ -15,6 +15,7 @@ const singleton = {
   gpsLeaseRenewTimer: null,
   gpsLeaseLossPromise: null,
   gpsLocationPublisher: null,
+  assignmentPropagationStop: null,
 };
 
 const STARTUP_RETRY_DELAY_MS = 30_000;
@@ -160,6 +161,13 @@ async function performStartup(options = {}) {
     if (singleton.stopping) return;
 
     startGpsLocationPublisher(options);
+    if (!singleton.assignmentPropagationStop) {
+      const createWorker =
+        options.createAssignmentPropagationWorker ||
+        require("./assignmentPropagation").createAssignmentPropagationWorker;
+      singleton.assignmentPropagationStop = createWorker().start();
+      logStartupEvent("ASSIGNMENT_PROPAGATION_WORKER_STARTED");
+    }
 
     if (!gpsAllowed) {
       singleton.started = true;
@@ -280,6 +288,15 @@ async function stopDbDependentServices() {
     if (publisher) {
       try {
         await publisher.stop();
+      } catch (error) {
+        stopError ||= error;
+      }
+    }
+    const stopAssignmentPropagation = singleton.assignmentPropagationStop;
+    singleton.assignmentPropagationStop = null;
+    if (stopAssignmentPropagation) {
+      try {
+        stopAssignmentPropagation();
       } catch (error) {
         stopError ||= error;
       }
