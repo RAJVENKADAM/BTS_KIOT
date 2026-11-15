@@ -5,6 +5,7 @@
   const TOKEN_KEY = "btms_admin_token";
   const API_BASE_URL = String(window.BTMS_CONFIG?.API_BASE_URL || "").replace(/\/+$/, "");
   let planMappingSaveKeys = window.BTMS_IDEMPOTENCY.createKeyStore();
+  const requestKeyStore = window.BTMS_IDEMPOTENCY.createRequestKeyStore();
   const state = {
     token: sessionStorage.getItem(TOKEN_KEY),
     user: null,
@@ -56,7 +57,14 @@
     const { idempotencyKey, ...fetchOptions } = options;
     const headers = new Headers(fetchOptions.headers || {});
     if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
-    window.BTMS_IDEMPOTENCY.setHeader(headers, idempotencyKey);
+    const url = `${API_BASE_URL}${path}`;
+    const mutationSignature = requestKeyStore.prepare(
+      headers,
+      fetchOptions.method,
+      url,
+      fetchOptions.body,
+      idempotencyKey,
+    );
     const isFormData =
       typeof FormData !== "undefined" && fetchOptions.body instanceof FormData;
     if (fetchOptions.body && !isFormData && !headers.has("Content-Type")) {
@@ -64,7 +72,7 @@
     }
     let response;
     try {
-      response = await fetch(`${API_BASE_URL}${path}`, {
+      response = await fetch(url, {
         ...fetchOptions,
         headers,
         cache: "no-store",
@@ -88,6 +96,7 @@
         { data: payload, status: response.status },
       );
     }
+    requestKeyStore.complete(mutationSignature);
     return payload;
   }
 

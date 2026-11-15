@@ -11,12 +11,23 @@ const source = fs.readFileSync(
   "utf8",
 );
 
+class FormDataDouble {
+  constructor(entries) {
+    this.values = entries;
+  }
+
+  entries() {
+    return this.values[Symbol.iterator]();
+  }
+}
+
 function loadIdempotency() {
   let keyNumber = 0;
   const context = {
     Date,
     Math,
     Map,
+    FormData: FormDataDouble,
     crypto: {
       randomUUID: () => `00000000-0000-4000-8000-${String(++keyNumber).padStart(12, "0")}`,
     },
@@ -51,4 +62,88 @@ test("plan-mapping requests attach the key using the required header name", () =
     headers.get("idempotency-key"),
     "00000000-0000-4000-8000-000000000001",
   );
+});
+
+test("dashboard mutating requests attach stable keys until a successful completion", () => {
+  const idempotency = loadIdempotency();
+  const keyStore = idempotency.createRequestKeyStore();
+  const body = JSON.stringify({ expectedVersion: 4, name: "Bus A" });
+  const firstHeaders = new Map();
+  const firstSignature = keyStore.prepare(
+    { set: (name, value) => firstHeaders.set(name.toLowerCase(), value) },
+    "POST",
+    "/api/superadmin/users",
+    body,
+  );
+  const retryHeaders = new Map();
+  keyStore.prepare(
+    { set: (name, value) => retryHeaders.set(name.toLowerCase(), value) },
+    "POST",
+    "/api/superadmin/users",
+    body,
+  );
+
+  assert.ok(firstHeaders.get("idempotency-key").length >= 8);
+  assert.equal(
+    retryHeaders.get("idempotency-key"),
+    firstHeaders.get("idempotency-key"),
+  );
+  keyStore.complete(firstSignature);
+
+  const nextHeaders = new Map();
+  keyStore.prepare(
+    { set: (name, value) => nextHeaders.set(name.toLowerCase(), value) },
+    "POST",
+    "/api/superadmin/users",
+    body,
+  );
+  assert.notEqual(
+    nextHeaders.get("idempotency-key"),
+    firstHeaders.get("idempotency-key"),
+  );
+});
+
+test("dashboard read requests do not receive mutation keys", () => {
+  const idempotency = loadIdempotency();
+  const headers = new Map();
+  const signature = idempotency.createRequestKeyStore().prepare(
+    { set: (name, value) => headers.set(name.toLowerCase(), value) },
+    "GET",
+    "/api/bus/plan-mappings",
+  );
+
+  assert.equal(signature, null);
+  assert.equal(headers.has("idempotency-key"), false);
+});
+
+test("dashboard upload retries with the same file reuse their idempotency key", () => {
+  const idempotency = loadIdempotency();
+  const keyStore = idempotency.createRequestKeyStore();
+  const file = {
+    name: "routes.xlsx",
+    size: 1024,
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    lastModified: 100,
+  };
+  const createForm = () => new FormDataDouble([["file", file]]);
+  const firstHeaders = new Map();
+  const firstSignature = keyStore.prepare(
+    { set: (name, value) => firstHeaders.set(name.toLowerCase(), value) },
+    "POST",
+    "/api/bus/import-routes",
+    createForm(),
+  );
+  const retryHeaders = new Map();
+  keyStore.prepare(
+    { set: (name, value) => retryHeaders.set(name.toLowerCase(), value) },
+    "POST",
+    "/api/bus/import-routes",
+    createForm(),
+  );
+
+  assert.equal(
+    retryHeaders.get("idempotency-key"),
+    firstHeaders.get("idempotency-key"),
+  );
+  keyStore.complete(firstSignature);
 });
