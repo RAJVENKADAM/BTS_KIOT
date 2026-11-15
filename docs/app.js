@@ -9,8 +9,15 @@
   const state = {
     token: sessionStorage.getItem(TOKEN_KEY),
     user: null,
-    data: { activePlan: "PLAN A", buses: [], clusters: [], versions: {} },
+    data: {
+      activePlan: "PLAN A",
+      buses: [],
+      clusters: [],
+      versions: {},
+      globalPlanVersion: null,
+    },
     users: [],
+    userRevisions: new Map(),
     userPagination: null,
     userLoading: false,
     userLoadingMore: false,
@@ -49,6 +56,37 @@
     })[character]);
   const busName = (bus) =>
     `Bus ${bus?.previewNumber ?? bus?.busNo ?? "—"}`;
+  function requireRevision(value, label) {
+    const revision = Number(value);
+    if (!Number.isSafeInteger(revision) || revision < 0) {
+      throw new Error(`${label} version is unavailable. Refresh the dashboard and try again.`);
+    }
+    return revision;
+  }
+
+  function getBus(busNo) {
+    const normalized = normalizedBusNo(busNo);
+    return state.adminBuses.find(
+      (bus) => normalizedBusNo(bus.busNo) === normalized,
+    );
+  }
+
+  function getAllBusRevisions() {
+    return Object.fromEntries(state.adminBuses.map((bus) => [
+      bus.busNo,
+      requireRevision(bus.revision, `Bus ${bus.busNo}`),
+    ]));
+  }
+
+  function getUserRevisions(ids, field) {
+    return Object.fromEntries(ids.map((id) => {
+      const user = state.userRevisions.get(String(id));
+      if (!user) {
+        throw new Error("A selected user's version is unavailable. Refresh users and try again.");
+      }
+      return [String(id), requireRevision(user[field], "User")];
+    }));
+  }
 
   async function request(path, options = {}) {
     if (!API_BASE_URL) {
@@ -149,8 +187,15 @@
     adminUsersSearchTimer = null;
     state.token = null;
     state.user = null;
-    state.data = { activePlan: "PLAN A", buses: [], clusters: [] };
+    state.data = {
+      activePlan: "PLAN A",
+      buses: [],
+      clusters: [],
+      versions: {},
+      globalPlanVersion: null,
+    };
     state.users = [];
+    state.userRevisions.clear();
     state.userPagination = null;
     state.userLoading = false;
     state.userLoadingMore = false;
@@ -254,6 +299,7 @@
         buses: result.buses || [],
         clusters: result.clusters || [],
         versions: result.versions || {},
+        globalPlanVersion: globalPlan.version ?? result.globalPlanVersion ?? null,
       };
       if (!PLANS.includes(state.selectedPlan)) {
         state.selectedPlan = state.data.activePlan;
@@ -348,6 +394,12 @@
       state.users = append
         ? [...state.users, ...(result.users || [])]
         : result.users || [];
+      for (const user of result.users || []) {
+        state.userRevisions.set(String(user.id), {
+          resourceVersion: user.resourceVersion,
+          assignmentRevision: user.assignmentRevision,
+        });
+      }
       state.userPagination = result.pagination || null;
       state.userLoadError = "";
     } catch (error) {
@@ -1053,16 +1105,19 @@
     error.hidden = true;
     submit.disabled = true;
     submit.textContent = "Saving…";
-    const payload = {
-      ...state.form,
-      clusterName: byId("cluster-name").value.trim(),
-      rootBusId: byId("root-bus").value,
-      memberBusIds: [...document.querySelectorAll('input[name="memberBusIds"]:checked')].map((input) => input.value),
-      expectedVersion: state.data.versions[state.form.planName] ?? 0,
-    };
-    const body = JSON.stringify(payload);
-    const idempotencyKey = planMappingSaveKeys.get(body);
     try {
+      const payload = {
+        ...state.form,
+        clusterName: byId("cluster-name").value.trim(),
+        rootBusId: byId("root-bus").value,
+        memberBusIds: [...document.querySelectorAll('input[name="memberBusIds"]:checked')].map((input) => input.value),
+        expectedVersion: requireRevision(
+          state.data.versions[state.form.planName],
+          `Plan ${state.form.planName}`,
+        ),
+      };
+      const body = JSON.stringify(payload);
+      const idempotencyKey = planMappingSaveKeys.get(body);
       await request("/api/bus/plan-mappings", {
         method: "POST",
         body,
@@ -1087,7 +1142,15 @@
     const cluster = state.data.clusters.find((item) => item.id === clusterId);
     if (!cluster || !window.confirm(`Delete "${cluster.clusterName}"? Rider coverage will be checked before the cluster is removed.`)) return;
     try {
-      await request(`/api/bus/plan-mappings/${encodeURIComponent(clusterId)}`, { method: "DELETE" });
+      await request(`/api/bus/plan-mappings/${encodeURIComponent(clusterId)}`, {
+        method: "DELETE",
+        body: JSON.stringify({
+          expectedVersion: requireRevision(
+            state.data.versions[cluster.planName],
+            `Plan ${cluster.planName}`,
+          ),
+        }),
+      });
       showToast("Cluster deleted.");
       await loadData({ quiet: true });
     } catch (error) {
@@ -1107,12 +1170,20 @@
     try {
       const result = await request("/api/bus/global-plan", {
         method: "PUT",
-        body: JSON.stringify({ plan }),
+        body: JSON.stringify({
+          plan,
+          expectedVersion: requireRevision(
+            state.data.globalPlanVersion,
+            "Global plan",
+          ),
+        }),
       });
+      state.data.globalPlanVersion = result.version;
       if (result.activePlan !== plan) {
         throw new Error("The server did not confirm the selected operating service.");
       }
       const persistedPlan = await request("/api/bus/global-plan");
+      state.data.globalPlanVersion = persistedPlan.version ?? state.data.globalPlanVersion;
       if (persistedPlan.activePlan !== plan) {
         throw new Error(
           `The update response confirmed ${plan}, but the server still reports ${persistedPlan.activePlan || "an unknown plan"}. The active service was not verified.`,
@@ -1211,6 +1282,7 @@
     formData.set("previewNumber", String(formData.get("previewNumber") || "").trim());
     formData.set("deviceId", String(formData.get("deviceId") || "").trim());
     formData.set("regNo", String(formData.get("regNo") || "").trim());
+    formData.set("expectedVersion", "0");
 
     submit.disabled = true;
     submit.textContent = "Creating…";
@@ -1254,12 +1326,8 @@
       errorBox.hidden = false;
       return;
     }
-    const source = state.adminBuses.find(
-      (bus) => normalizedBusNo(bus.busNo) === normalizedBusNo(sourceBusNo),
-    );
-    const target = state.adminBuses.find(
-      (bus) => normalizedBusNo(bus.busNo) === normalizedBusNo(targetBusNo),
-    );
+    const source = getBus(sourceBusNo);
+    const target = getBus(targetBusNo);
     if (!source || activeRiderCount(source) === 0) {
       errorBox.textContent = "Choose a source bus with riders to move.";
       errorBox.hidden = false;
@@ -1285,6 +1353,10 @@
           method: "POST",
           body: JSON.stringify({
             newBusNo: targetBusNo,
+            expectedVersion: requireRevision(source.revision, `Bus ${source.busNo}`),
+            expectedVersions: {
+              [target.busNo]: requireRevision(target.revision, `Bus ${target.busNo}`),
+            },
           }),
         },
       );
@@ -1320,8 +1392,8 @@
       errorBox.hidden = false;
       return;
     }
-    const source = state.adminBuses.find((bus) => bus.busNo === sourceBusNo);
-    const target = state.adminBuses.find((bus) => bus.busNo === targetBusNo);
+    const source = getBus(sourceBusNo);
+    const target = getBus(targetBusNo);
     const routeLabel = routeSource === "source"
       ? "source bus stops"
       : routeSource === "target"
@@ -1338,11 +1410,28 @@
       if (routeSource === "custom") {
         body = new FormData(form);
       } else {
-        body = JSON.stringify({ newBusNo: targetBusNo, routeSource });
+        body = JSON.stringify({
+          newBusNo: targetBusNo,
+          routeSource,
+          expectedVersion: requireRevision(source.revision, `Bus ${source.busNo}`),
+          expectedVersions: {
+            [target.busNo]: requireRevision(target.revision, `Bus ${target.busNo}`),
+          },
+        });
       }
       if (body instanceof FormData) {
         body.set("newBusNo", targetBusNo);
         body.set("routeSource", routeSource);
+        body.set(
+          "expectedVersion",
+          String(requireRevision(source.revision, `Bus ${source.busNo}`)),
+        );
+        body.set(
+          "expectedVersions",
+          JSON.stringify({
+            [target.busNo]: requireRevision(target.revision, `Bus ${target.busNo}`),
+          }),
+        );
       }
       const result = await request(
         `/api/bus/combine-bus/${encodeURIComponent(sourceBusNo)}`,
@@ -1369,14 +1458,37 @@
     const description = `Restore ${busName({ previewNumber: change.sourcePreview, busNo: change.sourceBusNo })} to normal service? Its original routes and saved rider assignments will be restored.`;
     if (!window.confirm(description)) return;
     try {
+      const source = getBus(change.sourceBusNo);
       const result = isLegacy
         ? await request(
           `/api/bus/restore-altered/${encodeURIComponent(change.sourceBusNo)}`,
-          { method: "PUT" },
+          {
+            method: "PUT",
+            body: JSON.stringify({
+              expectedVersion: requireRevision(
+                source?.revision,
+                `Bus ${change.sourceBusNo}`,
+              ),
+            }),
+          },
         )
         : await request(
           `/api/bus/temporary-changes/${encodeURIComponent(changeId)}/rollback`,
-          { method: "POST", body: "{}" },
+          {
+            method: "POST",
+            body: JSON.stringify({
+              expectedVersion: requireRevision(
+                source?.revision,
+                `Bus ${change.sourceBusNo}`,
+              ),
+              expectedVersions: {
+                [change.targetBusNo]: requireRevision(
+                  getBus(change.targetBusNo)?.revision,
+                  `Bus ${change.targetBusNo}`,
+                ),
+              },
+            }),
+          },
         );
       showToast(`${result.message || "Temporary change rolled back."} ${Number(result.notifiedStudents || 0)} rider(s) notified.`);
       await loadData({ quiet: true });
@@ -1406,12 +1518,21 @@
     submit.disabled = true;
     submit.textContent = "Saving…";
     try {
+      const user = state.userRevisions.get(String(state.selectedUserId));
+      if (!user) {
+        throw new Error("This user's version is unavailable. Refresh users and try again.");
+      }
       await request(`/api/superadmin/users/${encodeURIComponent(state.selectedUserId)}`, {
         method: "PUT",
         body: JSON.stringify({
           name: form.elements.name.value.trim(),
           role: form.elements.role.value,
           bus_no: form.elements.bus_no.value.trim() || null,
+          expectedVersion: requireRevision(user.resourceVersion, "User"),
+          expectedAssignmentRevision: requireRevision(
+            user.assignmentRevision,
+            "User assignment",
+          ),
         }),
       });
       byId("edit-user-dialog").close();
@@ -1441,9 +1562,13 @@
     try {
       const result = await request("/api/superadmin/users", {
         method: "DELETE",
-        body: JSON.stringify({ ids }),
+        body: JSON.stringify({
+          ids,
+          expectedVersions: getUserRevisions(ids, "resourceVersion"),
+        }),
       });
       state.selectedUserIds.clear();
+      ids.forEach((id) => state.userRevisions.delete(id));
       showToast(result.message || "Selected user accounts deleted.");
       await loadAdminRecords();
     } catch (requestError) {
@@ -1466,9 +1591,15 @@
     try {
       const result = await request("/api/superadmin/users/bulk-role", {
         method: "POST",
-        body: JSON.stringify({ ids, role }),
+        body: JSON.stringify({
+          ids,
+          role,
+          expectedVersions: getUserRevisions(ids, "resourceVersion"),
+          expectedAssignmentRevisions: getUserRevisions(ids, "assignmentRevision"),
+        }),
       });
       state.selectedUserIds.clear();
+      ids.forEach((id) => state.userRevisions.delete(id));
       byId("bulk-user-role").value = "";
       showToast(result.message || "Selected user roles updated.");
       await loadAdminRecords();
@@ -1504,6 +1635,10 @@
           previewNumber: form.elements.previewNumber.value.trim() || null,
           gpsDeviceId: form.elements.gpsDeviceId.value.trim(),
           regNo: form.elements.regNo.value.trim() || null,
+          expectedVersion: requireRevision(
+            getBus(state.selectedBusNo)?.revision,
+            `Bus ${state.selectedBusNo}`,
+          ),
         }),
       });
       byId("edit-bus-dialog").close();
@@ -1552,6 +1687,10 @@
     submit.disabled = true;
     submit.textContent = "Updating…";
     try {
+      payload.set(
+        "expectedVersion",
+        String(requireRevision(bus.revision, `Bus ${bus.busNo}`)),
+      );
       const response = await request("/api/bus/import-routes", {
         method: "POST",
         body: payload,
@@ -1578,6 +1717,10 @@
     try {
       await request(`/api/bus/delete-bus/${encodeURIComponent(busNo)}`, {
         method: "DELETE",
+        body: JSON.stringify({
+          expectedVersion: requireRevision(bus.revision, `Bus ${bus.busNo}`),
+          expectedVersions: getAllBusRevisions(),
+        }),
       });
       showToast(`Bus ${busNo} deleted.`);
       await loadData({ quiet: true });

@@ -63,7 +63,14 @@ function getBusRevisionFilter(bus, expectedVersion) {
 }
 
 function getExpectedBusVersions(req, buses, primaryBus, primaryVersion) {
-  const supplied = req.body?.expectedVersions;
+  let supplied = req.body?.expectedVersions;
+  if (typeof supplied === "string") {
+    try {
+      supplied = JSON.parse(supplied);
+    } catch {
+      supplied = null;
+    }
+  }
   const normalized = new Map(
     Object.entries(
       supplied && typeof supplied === "object" && !Array.isArray(supplied)
