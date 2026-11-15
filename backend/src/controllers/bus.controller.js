@@ -1999,35 +1999,6 @@ async function rollbackTemporaryBusChange(req, res) {
       sourceBus,
       expectedVersion,
     );
-    if (change.type === "combine") {
-      const currentRiders = await findStudentsAssignedToBus(sourceBus);
-      if (currentRiders.length) {
-        return res.status(409).json({
-          success: false,
-          error: `Bus ${change.sourcePreview ?? change.sourceBusNo} now has ${currentRiders.length} rider(s). Reassign them so the bus has 0 riders before rolling back this combination.`,
-        });
-      }
-    }
-
-    const assignmentConflicts = change.assignmentSnapshots.filter((snapshot) => {
-      const user = usersById.get(String(snapshot.userId));
-      if (!user) return false;
-      const current = user.bus_no ? String(user.bus_no).toUpperCase() : null;
-      const before = snapshot.beforeBusNo
-        ? String(snapshot.beforeBusNo).toUpperCase()
-        : null;
-      const after = snapshot.afterBusNo
-        ? String(snapshot.afterBusNo).toUpperCase()
-        : null;
-      return current !== before && current !== after;
-    });
-    if (assignmentConflicts.length) {
-      return res.status(409).json({
-        success: false,
-        error: `${assignmentConflicts.length} affected rider(s) have since been reassigned. Resolve those assignments before rolling back.`,
-      });
-    }
-
     const newerChanges = await BusChange.find({
       _id: { $ne: change._id },
       status: { $in: ["applying", "active"] },
@@ -2048,6 +2019,33 @@ async function rollbackTemporaryBusChange(req, res) {
       return res.status(409).json({
         success: false,
         error: "Roll back the newer temporary change using this bus first, then retry.",
+      });
+    }
+
+    const currentRiders = await findStudentsAssignedToBus(sourceBus);
+    if (currentRiders.length) {
+      return res.status(409).json({
+        success: false,
+        error: `Bus ${change.sourcePreview ?? change.sourceBusNo} currently has ${currentRiders.length} rider(s), so it cannot be restored safely. Reassign them to a confirmed available bus that serves their current route, then retry when this bus has 0 riders. No rider assignments were changed.`,
+      });
+    }
+
+    const assignmentConflicts = change.assignmentSnapshots.filter((snapshot) => {
+      const user = usersById.get(String(snapshot.userId));
+      if (!user) return false;
+      const current = user.bus_no ? String(user.bus_no).toUpperCase() : null;
+      const before = snapshot.beforeBusNo
+        ? String(snapshot.beforeBusNo).toUpperCase()
+        : null;
+      const after = snapshot.afterBusNo
+        ? String(snapshot.afterBusNo).toUpperCase()
+        : null;
+      return current !== before && current !== after;
+    });
+    if (assignmentConflicts.length) {
+      return res.status(409).json({
+        success: false,
+        error: `${assignmentConflicts.length} affected rider(s) have since been reassigned. Resolve those assignments before rolling back.`,
       });
     }
 
