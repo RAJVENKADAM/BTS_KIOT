@@ -101,6 +101,10 @@ function installStores(type, riderCount) {
             userId: "64a000000000000000000022",
             beforeBusNo: "BUS-2",
             afterBusNo: "BUS-2",
+          }, {
+            userId: "64a000000000000000000023",
+            beforeBusNo: "BUS-2",
+            afterBusNo: "BUS-2",
           }]
         : []),
     ],
@@ -136,13 +140,17 @@ function installStores(type, riderCount) {
       : [
           {
             _id: "64a000000000000000000021",
-            bus_no: "BUS-2",
+            bus_no: "BUS-3",
             assignmentRevision: 2,
           },
           ...(type === "combine"
             ? [{
                 _id: "64a000000000000000000022",
                 bus_no: "BUS-2",
+                assignmentRevision: 2,
+              }, {
+                _id: "64a000000000000000000023",
+                bus_no: "BUS-3",
                 assignmentRevision: 2,
               }]
             : []),
@@ -212,11 +220,10 @@ test("alter and combine rollback require an empty original source bus", async ()
       assert.equal(emptyResponse.payload.success, true);
       assert.equal(emptyStores.changeStatus, "rolled_back");
       assert.deepEqual(emptyStores.busWrites, ["BUS-1", "BUS-2"]);
-      assert.equal(emptyStores.assignmentWrites.length, 1);
-      assert.deepEqual(emptyStores.assignmentWrites[0].update, {
-        $inc: { assignmentRevision: 1 },
-        $set: { bus_no: "BUS-1" },
-      });
+      assert.deepEqual(
+        emptyStores.assignmentWrites.map((write) => write.update.$set.bus_no),
+        type === "alter" ? ["BUS-1"] : ["BUS-1", "BUS-2"],
+      );
     } finally {
       emptyStores.restore();
     }

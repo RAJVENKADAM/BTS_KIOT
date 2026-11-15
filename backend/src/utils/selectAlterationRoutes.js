@@ -14,6 +14,9 @@ function selectAlterationRoutes(
         stop_order: route.stop_order,
       };
       if (route.stopId) selectedRoute.stopId = route.stopId;
+      if (route.arrival_time != null) {
+        selectedRoute.arrival_time = route.arrival_time;
+      }
       return selectedRoute;
     });
   }

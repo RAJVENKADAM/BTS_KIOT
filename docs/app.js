@@ -637,35 +637,6 @@
     );
   }
 
-  function isReusableCombinedSource(bus) {
-    if (!bus || bus.status !== "active" || bus.isAltered || activeRiderCount(bus) !== 0) {
-      return false;
-    }
-    const busNo = normalizedBusNo(bus.busNo);
-    const relatedChanges = state.temporaryChanges.filter(
-      (change) =>
-        change.status !== "applying" &&
-        change.status !== "rolled_back" &&
-        [change.sourceBusNo, change.targetBusNo].some(
-          (identifier) => normalizedBusNo(identifier) === busNo,
-        ),
-    );
-    return relatedChanges.length > 0 && relatedChanges.every(
-      (change) =>
-        change.type === "combine" &&
-        normalizedBusNo(change.sourceBusNo) === busNo,
-    );
-  }
-
-  function reusableCombinedSources(excludedBusNos = []) {
-    const excluded = new Set(excludedBusNos.map(normalizedBusNo));
-    return state.adminBuses.filter(
-      (bus) =>
-        !excluded.has(normalizedBusNo(bus.busNo)) &&
-        isReusableCombinedSource(bus),
-    );
-  }
-
   function reusableTemporarySources(excludedBusNos = []) {
     const excluded = new Set(excludedBusNos.map(normalizedBusNo));
     return state.adminBuses.filter(
@@ -885,7 +856,7 @@
     let combineTargetNo = byId("combine-target")?.value;
     const combineSourceBuses = [
       ...activeBuses(),
-      ...reusableCombinedSources(),
+      ...reusableTemporarySources().filter((bus) => bus.status === "active"),
     ];
     if (!combineSourceBuses.some((bus) => normalizedBusNo(bus.busNo) === normalizedBusNo(combineSourceNo))) {
       combineSourceNo = "";

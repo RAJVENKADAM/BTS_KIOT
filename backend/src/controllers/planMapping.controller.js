@@ -119,9 +119,15 @@ async function getPlanMappingData(req, res) {
       routesByBusAndPlan.set(key, planRoutes);
     }
     for (const bus of buses) {
+      const savedAlterationRoutes =
+        bus.alteration_type === "alter" && bus.alteration_routes?.length
+          ? bus.alteration_routes
+          : [];
       const locationRoutes =
         bus.combined_route_source && bus.combined_routes?.length
           ? bus.combined_routes
+          : savedAlterationRoutes.length
+            ? savedAlterationRoutes
           : bus.alteration_route_source === "custom"
             ? bus.alteration_routes || []
             : [];
@@ -133,7 +139,8 @@ async function getPlanMappingData(req, res) {
         const key = `${id}:${plan}`;
         const hasExplicitRouteSource =
           bus.combined_route_source ||
-          bus.alteration_route_source === "custom";
+          bus.alteration_route_source === "custom" ||
+          savedAlterationRoutes.length > 0;
         if (hasExplicitRouteSource && !explicitRoutePlanKeys.has(key)) {
           routesByBusAndPlan.set(key, []);
           explicitRoutePlanKeys.add(key);

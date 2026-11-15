@@ -33,6 +33,23 @@ test("selects uploaded routes without exposing their database subdocuments", () 
   );
 });
 
+test("saved route snapshots keep their original stop times", () => {
+  const savedRoutes = [
+    {
+      plan_name: "PLAN A",
+      stop_name: "Original stop",
+      stop_order: 1,
+      stopId: "STOP-1",
+      arrival_time: "08:15AM",
+    },
+  ];
+
+  assert.deepEqual(
+    selectAlterationRoutes("custom", [], [], savedRoutes),
+    savedRoutes,
+  );
+});
+
 test("returns null when an existing change has no route selection", () => {
   assert.equal(
     selectAlterationRoutes(null, sourceRoutes, targetRoutes, customRoutes),

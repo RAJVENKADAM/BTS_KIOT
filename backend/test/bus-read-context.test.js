@@ -154,6 +154,41 @@ test("incoming bus lookup has a compound index declaration", () => {
   );
 });
 
+test("replacement buses use saved original routes after the source is reused", () => {
+  const targetBus = {
+    _id: "replacement",
+    alteration_type: "alter",
+    alteration_route_source: "custom",
+    alteration_routes: [{
+      plan_name: "PLAN A",
+      stop_name: "Original stop",
+      stop_order: 1,
+      stopId: "STOP-1",
+      arrival_time: "08:15AM",
+    }],
+  };
+  const context = {
+    routeRowsByBusId: new Map(),
+    stopsById: new Map([[
+      "STOP-1",
+      {
+        stopId: "STOP-1",
+        name: "Original stop",
+        latitude: 11,
+        longitude: 78,
+        status: "VERIFIED",
+      },
+    ]]),
+    incomingChangesByTarget: new Map(),
+  };
+
+  const [route] = getRoutesForBus(context, targetBus);
+
+  assert.equal(route.stop_name, "Original stop");
+  assert.equal(route.arrival_time, "08:15AM");
+  assert.equal(route.latitude, 11);
+});
+
 test("route and stop indexes cover the hot path reads", () => {
   const routeIndexes = BusRoute.schema.indexes().map(([fields]) => fields);
   const stopIndexes = StopMaster.schema.indexes().map(([fields]) => fields);

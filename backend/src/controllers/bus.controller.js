@@ -514,7 +514,9 @@ async function getRouteSelectionLabel(bus, incomingChanges, busesById) {
   if (!selectedChange) return null;
 
   if (selectedChange.alteration_route_source === "custom") {
-    return "Uploaded routes";
+    return selectedChange.alteration_type === "alter"
+      ? "Saved original routes"
+      : "Uploaded routes";
   }
   if (selectedChange.alteration_route_source === "source") {
     return `Bus ${selectedChange.preview_number ?? "selected"} routes`;
@@ -2030,24 +2032,16 @@ async function rollbackTemporaryBusChange(req, res) {
       });
     }
 
-    const assignmentConflicts = change.assignmentSnapshots.filter((snapshot) => {
+    const normalizeAssignmentBusNo = (busNo) =>
+      busNo == null || busNo === ""
+        ? null
+        : String(busNo).trim().toUpperCase();
+    const assignmentSnapshotsToRestore = change.assignmentSnapshots.filter((snapshot) => {
       const user = usersById.get(String(snapshot.userId));
       if (!user) return false;
-      const current = user.bus_no ? String(user.bus_no).toUpperCase() : null;
-      const before = snapshot.beforeBusNo
-        ? String(snapshot.beforeBusNo).toUpperCase()
-        : null;
-      const after = snapshot.afterBusNo
-        ? String(snapshot.afterBusNo).toUpperCase()
-        : null;
-      return current !== before && current !== after;
+      return normalizeAssignmentBusNo(user.bus_no) !==
+        normalizeAssignmentBusNo(snapshot.beforeBusNo);
     });
-    if (assignmentConflicts.length) {
-      return res.status(409).json({
-        success: false,
-        error: `${assignmentConflicts.length} affected rider(s) have since been reassigned. Resolve those assignments before rolling back.`,
-      });
-    }
 
     const restoredBusByNo = new Map(
       change.busSnapshots.map((snapshot) => [
@@ -2113,8 +2107,7 @@ async function rollbackTemporaryBusChange(req, res) {
           ));
         }
         await updateStudentAssignmentsAtRevision(
-          change.assignmentSnapshots
-            .filter((snapshot) => snapshot.beforeBusNo !== snapshot.afterBusNo)
+          assignmentSnapshotsToRestore
             .map((snapshot) => usersById.get(String(snapshot.userId)))
             .filter(Boolean),
           (user) => {
@@ -2157,7 +2150,11 @@ async function rollbackTemporaryBusChange(req, res) {
             bus_no: snapshot.beforeBusNo,
             assignment_revision:
               (usersById.get(String(snapshot.userId))?.assignmentRevision ?? 0) +
-              (snapshot.beforeBusNo !== snapshot.afterBusNo ? 1 : 0),
+              (normalizeAssignmentBusNo(
+                usersById.get(String(snapshot.userId))?.bus_no,
+              ) !== normalizeAssignmentBusNo(snapshot.beforeBusNo)
+                ? 1
+                : 0),
           })),
           status: "rolled_back",
         },
@@ -2242,12 +2239,6 @@ async function changeBus(req, res, alterationType) {
     if (sourceBus._id.equals(targetBus._id)) {
       return res.status(400).json({ success: false, error: 'Choose a different bus.' });
     }
-    if (sourceBus.altered_to_bus_id) {
-      return res.status(400).json({
-        success: false,
-        error: 'Restore this bus before choosing another replacement.',
-      });
-    }
     if (sourceBus.status !== 'active') {
       return res.status(400).json({
         success: false,
@@ -2279,6 +2270,12 @@ async function changeBus(req, res, alterationType) {
       activeChanges,
       sourceBus._id,
     );
+    if (sourceBus.altered_to_bus_id && !sourceCanBeReused) {
+      return res.status(400).json({
+        success: false,
+        error: 'Restore this bus before choosing another replacement.',
+      });
+    }
     const targetCanBeReused = isReusableTemporaryChangeSource(
       activeChanges,
       targetBus._id,
@@ -2448,6 +2445,15 @@ async function changeBus(req, res, alterationType) {
         error: "The selected route has no stops for today's service. Choose another route or map the users to an available bus.",
       });
     }
+    const savedAlterationRoutes = !isCombined
+      ? (await getEffectiveRoutesForAllPlans(sourceBus)).map((route) => ({
+          plan_name: route.plan_name,
+          stop_name: route.stop_name,
+          stop_order: route.stop_order,
+          stopId: route.stopId || null,
+          arrival_time: route.arrival_time || null,
+        }))
+      : [];
 
     const sourceUsers = await findStudentsAssignedToBus(sourceBus);
     const targetUsers = await findStudentsAssignedToBus(targetBus);
@@ -2588,13 +2594,18 @@ async function changeBus(req, res, alterationType) {
           sourceBus.combined_route_source = null;
           sourceBus.combined_routes = [];
         } else {
-          sourceBus.status = "inactive";
-          sourceBus.altered_to_bus_id = targetBus._id;
-          sourceBus.altered_to_preview = targetBus.preview_number ?? null;
-          sourceBus.alteration_type = "alter";
+          targetBus.alteration_type = "alter";
+          targetBus.alteration_route_source = "custom";
+          targetBus.alteration_routes = savedAlterationRoutes;
+          sourceBus.status = "active";
+          sourceBus.altered_to_bus_id = null;
+          sourceBus.altered_to_preview = null;
+          sourceBus.alteration_type = null;
           sourceBus.alteration_route_source = null;
           sourceBus.alteration_routes = [];
-          sourceBus.altered_at = new Date();
+          sourceBus.altered_at = null;
+          sourceBus.combined_route_source = null;
+          sourceBus.combined_routes = [];
         }
 
         const updatedTarget = await saveBusAtRevision(

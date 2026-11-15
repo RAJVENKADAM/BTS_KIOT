@@ -76,7 +76,8 @@ const busSchema = new mongoose.Schema(
         plan_name: { type: String, required: true },
         stop_name: { type: String, required: true },
         stop_order: { type: Number, required: true },
-        stopId: { type: String, required: true }
+        stopId: { type: String, default: null },
+        arrival_time: { type: String, default: null },
       }],
       default: []
     },
