@@ -770,6 +770,7 @@
     container.innerHTML = state.temporaryChanges.map((change) => {
       const isAlter = change.type === "alter";
       const isApplying = change.status === "applying";
+      const newerChange = findNewerTemporaryChange(change);
       const sourceBus = state.adminBuses.find(
         (bus) => normalizedBusNo(bus.busNo) === normalizedBusNo(change.sourceBusNo),
       );
@@ -814,7 +815,10 @@
                 : `Riders use ${escapeHtml(replacementName)}. Stops follow ${escapeHtml(routeChoice || "the selected combined route")}.`}</p>
               <small>${Number(change.affectedUsersCount || 0)} affected riders · ${escapeHtml(change.status === "applying" ? "Change is being applied" : new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(change.createdAt)))}</small>
             </div>
-            <button type="button" class="button button-quiet" data-rollback-change="${escapeHtml(change.id)}" data-legacy="${Boolean(change.legacy)}" ${isApplying ? "disabled" : ""}>${isApplying ? "Applying…" : "Rollback to normal"}</button>
+            ${newerChange
+              ? `<small>Roll back the newer change involving ${escapeHtml(busName({ busNo: newerChange.sourceBusNo, previewNumber: newerChange.sourcePreview }))} first.</small>`
+              : ""}
+            <button type="button" class="button button-quiet" data-rollback-change="${escapeHtml(change.id)}" data-legacy="${Boolean(change.legacy)}" ${isApplying || newerChange ? "disabled" : ""}>${isApplying ? "Applying…" : newerChange ? "Roll back newer change first" : "Rollback to normal"}</button>
           </div>
         </article>`;
     }).join("") + `
@@ -825,6 +829,26 @@
         ? `<p class="notice notice-error" role="alert">${escapeHtml(state.temporaryChangesError)}</p>`
         : ""}
     `;
+  }
+
+  function findNewerTemporaryChange(change) {
+    if (change.legacy) return null;
+    const changeIndex = state.temporaryChanges.findIndex(
+      (candidate) => candidate.id === change.id,
+    );
+    if (changeIndex <= 0) return null;
+    const relatedBusNos = new Set(
+      [change.sourceBusNo, change.targetBusNo]
+        .map(normalizedBusNo)
+        .filter(Boolean),
+    );
+    return state.temporaryChanges.slice(0, changeIndex).find((candidate) =>
+      !candidate.legacy &&
+      ["applying", "active"].includes(candidate.status) &&
+      [candidate.sourceBusNo, candidate.targetBusNo].some((busNo) =>
+        relatedBusNos.has(normalizedBusNo(busNo)),
+      ),
+    ) || null;
   }
 
   function renderBusChangePage() {
@@ -1452,11 +1476,11 @@
     }
   }
 
-  async function rollbackTemporaryChange(changeId, isLegacy) {
+  async function rollbackTemporaryChange(changeId, isLegacy, attempt = 0) {
     const change = state.temporaryChanges.find((item) => item.id === changeId);
     if (!change) return;
     const description = `Restore ${busName({ previewNumber: change.sourcePreview, busNo: change.sourceBusNo })} to normal service? Its original routes and saved rider assignments will be restored.`;
-    if (!window.confirm(description)) return;
+    if (attempt === 0 && !window.confirm(description)) return;
     try {
       const source = getBus(change.sourceBusNo);
       const result = isLegacy
@@ -1493,6 +1517,18 @@
       showToast(`${result.message || "Temporary change rolled back."} ${Number(result.notifiedStudents || 0)} rider(s) notified.`);
       await loadData({ quiet: true });
     } catch (error) {
+      if (error.data?.code === "BUS_REVISION_CONFLICT" && attempt === 0) {
+        await loadData({ quiet: true });
+        const refreshedChange = state.temporaryChanges.find(
+          (item) => item.id === changeId,
+        );
+        if (refreshedChange && !findNewerTemporaryChange(refreshedChange)) {
+          return rollbackTemporaryChange(changeId, isLegacy, attempt + 1);
+        }
+      }
+      if (error.status === 409) {
+        await loadData({ quiet: true });
+      }
       showToast(error.message || "Could not roll back this temporary change.", true);
     }
   }
