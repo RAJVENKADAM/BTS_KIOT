@@ -158,6 +158,41 @@ test("mapping changes persist an audit and outbox atomically and replay idempote
   }
 });
 
+test("plan-mapping mutations reject missing and invalid idempotency keys", async () => {
+  const stores = installStores();
+  let mutationCalls = 0;
+  const base = {
+    scope: "PLAN B",
+    expectedVersion: 0,
+    actorId: "64a000000000000000000099",
+    action: "plan-mapping-save",
+    request: { rootBusId: "bus-a" },
+    previousState: null,
+    newState: { rootBusId: "bus-a" },
+    mutate: async () => {
+      mutationCalls += 1;
+      return { response: { saved: true } };
+    },
+  };
+
+  try {
+    for (const idempotencyKey of [undefined, "", "short", "x".repeat(201)]) {
+      await assert.rejects(
+        runPlanMappingMutation({ ...base, idempotencyKey }),
+        {
+          statusCode: 400,
+          code: "PLAN_MAPPING_IDEMPOTENCY_KEY_REQUIRED",
+        },
+      );
+    }
+    assert.equal(mutationCalls, 0);
+    assert.equal(stores.audits.size, 0);
+    assert.equal(stores.revisions.size, 0);
+  } finally {
+    stores.restore();
+  }
+});
+
 test("global-plan no-ops retain the mapping revision while durably enforcing idempotency", async () => {
   const stores = installStores();
   const input = {

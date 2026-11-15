@@ -4,10 +4,11 @@
   const PLANS = ["PLAN A", "PLAN B", "PLAN C", "PLAN D"];
   const TOKEN_KEY = "btms_admin_token";
   const API_BASE_URL = String(window.BTMS_CONFIG?.API_BASE_URL || "").replace(/\/+$/, "");
+  let planMappingSaveKeys = window.BTMS_IDEMPOTENCY.createKeyStore();
   const state = {
     token: sessionStorage.getItem(TOKEN_KEY),
     user: null,
-    data: { activePlan: "PLAN A", buses: [], clusters: [] },
+    data: { activePlan: "PLAN A", buses: [], clusters: [], versions: {} },
     users: [],
     userPagination: null,
     userLoading: false,
@@ -52,17 +53,19 @@
     if (!API_BASE_URL) {
       throw new Error("Set API_BASE_URL in docs/config.js before using the dashboard.");
     }
-    const headers = new Headers(options.headers || {});
+    const { idempotencyKey, ...fetchOptions } = options;
+    const headers = new Headers(fetchOptions.headers || {});
     if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
+    window.BTMS_IDEMPOTENCY.setHeader(headers, idempotencyKey);
     const isFormData =
-      typeof FormData !== "undefined" && options.body instanceof FormData;
-    if (options.body && !isFormData && !headers.has("Content-Type")) {
+      typeof FormData !== "undefined" && fetchOptions.body instanceof FormData;
+    if (fetchOptions.body && !isFormData && !headers.has("Content-Type")) {
       headers.set("Content-Type", "application/json");
     }
     let response;
     try {
       response = await fetch(`${API_BASE_URL}${path}`, {
-        ...options,
+        ...fetchOptions,
         headers,
         cache: "no-store",
         mode: "cors",
@@ -241,6 +244,7 @@
         activePlan,
         buses: result.buses || [],
         clusters: result.clusters || [],
+        versions: result.versions || {},
       };
       if (!PLANS.includes(state.selectedPlan)) {
         state.selectedPlan = state.data.activePlan;
@@ -990,6 +994,7 @@
     hideNotice();
     const plan = state.selectedPlan;
     if (!PLANS.includes(plan) || plan === "PLAN A") return;
+    planMappingSaveKeys = window.BTMS_IDEMPOTENCY.createKeyStore();
     state.form = cluster
       ? {
           clusterId: cluster.id,
@@ -1044,12 +1049,17 @@
       clusterName: byId("cluster-name").value.trim(),
       rootBusId: byId("root-bus").value,
       memberBusIds: [...document.querySelectorAll('input[name="memberBusIds"]:checked')].map((input) => input.value),
+      expectedVersion: state.data.versions[state.form.planName] ?? 0,
     };
+    const body = JSON.stringify(payload);
+    const idempotencyKey = planMappingSaveKeys.get(body);
     try {
       await request("/api/bus/plan-mappings", {
         method: "POST",
-        body: JSON.stringify(payload),
+        body,
+        idempotencyKey,
       });
+      planMappingSaveKeys.complete(body);
       byId("cluster-dialog").close();
       state.form = null;
       showToast("Cluster saved. Service assignments are updated.");
@@ -1735,7 +1745,10 @@
     });
     byId("close-dialog").addEventListener("click", () => byId("cluster-dialog").close());
     byId("cancel-dialog").addEventListener("click", () => byId("cluster-dialog").close());
-    byId("cluster-dialog").addEventListener("close", () => { state.form = null; });
+    byId("cluster-dialog").addEventListener("close", () => {
+      state.form = null;
+      planMappingSaveKeys = window.BTMS_IDEMPOTENCY.createKeyStore();
+    });
 
     byId("global-plan-options").addEventListener("click", (event) => {
       const button = event.target.closest("[data-global-plan]");
