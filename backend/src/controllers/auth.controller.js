@@ -283,7 +283,9 @@ const getProfile = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    const user = await User.findById(userId).select('-password_hash').lean();
+    const user = await User.findById(userId)
+      .select('_id name email role bus_no is_active temp_password createdAt')
+      .lean();
 
     if (!user) {
       return res.status(404).json({

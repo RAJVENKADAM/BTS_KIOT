@@ -90,7 +90,7 @@ test("notification feed projects response fields and fetches unread count concur
       "_id type message old_preview new_preview is_bus_active read_at createdAt",
     );
     assert.deepEqual(sort, { createdAt: -1 });
-    assert.equal(limit, 50);
+    assert.equal(limit, 25);
     assert.equal(response.payload.unreadCount, 3);
     assert.deepEqual(response.payload.notifications[0], {
       id: record._id,

@@ -1,4 +1,7 @@
 const mongoose = require('mongoose');
+const {
+  invalidateNotificationUnreadCount,
+} = require('../utils/readCache');
 
 const notificationSchema = new mongoose.Schema(
   {
@@ -62,5 +65,47 @@ const notificationSchema = new mongoose.Schema(
 
 notificationSchema.index({ user_id: 1, createdAt: -1 });
 notificationSchema.index({ user_id: 1, read_at: 1, createdAt: -1 });
+
+const createdAtIndex = notificationSchema.indexes().find(
+  ([keys]) => Object.keys(keys).length === 1 && keys.createdAt === 1,
+);
+if (!createdAtIndex) {
+  notificationSchema.index(
+    { createdAt: 1 },
+    { expireAfterSeconds: 172800, name: 'notification_created_at_ttl' },
+  );
+}
+
+function invalidateForUserFilter(filter) {
+  const userIds = filter?.user_id;
+  if (userIds == null) {
+    invalidateNotificationUnreadCount();
+    return;
+  }
+  const values = Array.isArray(userIds.$in) ? userIds.$in : [userIds];
+  for (const userId of values) {
+    invalidateNotificationUnreadCount(userId);
+  }
+}
+
+notificationSchema.post('save', (notification) => {
+  invalidateNotificationUnreadCount(notification.user_id);
+});
+notificationSchema.post('insertMany', (notifications) => {
+  for (const notification of notifications) {
+    invalidateNotificationUnreadCount(notification.user_id);
+  }
+});
+for (const operation of [
+  'updateOne',
+  'updateMany',
+  'findOneAndUpdate',
+  'deleteOne',
+  'deleteMany',
+]) {
+  notificationSchema.post(operation, function invalidateUnreadCount() {
+    invalidateForUserFilter(this.getFilter());
+  });
+}
 
 module.exports = mongoose.model('Notification', notificationSchema);

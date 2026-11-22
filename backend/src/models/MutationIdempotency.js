@@ -19,6 +19,11 @@ const mutationIdempotencySchema = new mongoose.Schema(
   { timestamps: true, minimize: false, autoIndex: false },
 );
 
+mutationIdempotencySchema.index(
+  { createdAt: 1 },
+  { expireAfterSeconds: 86400, name: "mutation_idempotency_created_at_ttl" },
+);
+
 module.exports = mongoose.model(
   "MutationIdempotency",
   mutationIdempotencySchema,

@@ -1,6 +1,11 @@
 const Notification = require('../models/Notification');
 const mongoose = require('mongoose');
 const { logSafeError } = require('../utils/safeErrorLog');
+const {
+  invalidateNotificationUnreadCount,
+  isCacheEnabled,
+  notificationUnreadCountCache,
+} = require('../utils/readCache');
 
 async function getNotifications(req, res) {
   try {
@@ -9,7 +14,7 @@ async function getNotifications(req, res) {
       Notification.find({ user_id: userId })
         .select('_id type message old_preview new_preview is_bus_active read_at createdAt')
         .sort({ createdAt: -1 })
-        .limit(50)
+        .limit(25)
         .lean(),
       Notification.countDocuments({
         user_id: userId,
@@ -39,10 +44,17 @@ async function getNotifications(req, res) {
 
 async function getUnreadCount(req, res) {
   try {
-    const unreadCount = await Notification.countDocuments({
-      user_id: req.user.id,
-      read_at: null,
-    });
+    const userId = String(req.user.id);
+    let unreadCount = isCacheEnabled()
+      ? notificationUnreadCountCache.get(userId)
+      : undefined;
+    if (unreadCount === undefined) {
+      unreadCount = await Notification.countDocuments({
+        user_id: req.user.id,
+        read_at: null,
+      });
+      if (isCacheEnabled()) notificationUnreadCountCache.set(userId, unreadCount);
+    }
     res.json({ success: true, unreadCount });
   } catch (error) {
     logSafeError('getUnreadCount failed', error);
@@ -56,6 +68,7 @@ async function markNotificationsRead(req, res) {
       { user_id: req.user.id, read_at: null },
       { read_at: new Date() },
     );
+    invalidateNotificationUnreadCount(req.user.id);
     res.json({ success: true });
   } catch (error) {
     logSafeError('markNotificationsRead failed', error);
@@ -75,6 +88,7 @@ async function markNotificationRead(req, res) {
     if (!result.matchedCount) {
       return res.status(404).json({ success: false, error: 'Notification not found.' });
     }
+    invalidateNotificationUnreadCount(req.user.id);
     res.json({ success: true });
   } catch (error) {
     logSafeError('markNotificationRead failed', error);
@@ -95,6 +109,7 @@ async function deleteNotification(req, res) {
     if (!result.deletedCount) {
       return res.status(404).json({ success: false, error: 'Notification not found.' });
     }
+    invalidateNotificationUnreadCount(req.user.id);
     res.json({ success: true });
   } catch (error) {
     logSafeError('deleteNotification failed', error);
@@ -105,6 +120,7 @@ async function deleteNotification(req, res) {
 async function deleteAllNotifications(req, res) {
   try {
     await Notification.deleteMany({ user_id: req.user.id });
+    invalidateNotificationUnreadCount(req.user.id);
     res.json({ success: true });
   } catch (error) {
     logSafeError('deleteAllNotifications failed', error);

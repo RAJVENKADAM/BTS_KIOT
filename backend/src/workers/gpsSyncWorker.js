@@ -123,6 +123,67 @@ function getLocationPublicationRooms(bus) {
   return [...rooms];
 }
 
+function updateGpsReadCache(busId, bus, previousLocation, update) {
+  for (const view of ["full", "snapshot", "student"]) {
+    const cacheKey = gpsLocationCacheKey(busId, view);
+    const cachedEntry = gpsLocationCache.get(cacheKey);
+    const cachedLocation =
+      cachedEntry && typeof cachedEntry.then !== "function"
+        ? cachedEntry
+        : previousLocation || {};
+    gpsLocationCache.set(
+      cacheKey,
+      {
+        ...cachedLocation,
+        ...update,
+        bus_id: busId,
+        publicationPreviewNumber: bus.preview_number ?? null,
+        updatedAt:
+          update.lastUpdated ||
+          update.lastSuccessfulGpsUpdate ||
+          cachedLocation.updatedAt,
+      },
+      3_000,
+    );
+  }
+}
+
+function publishUnpersistedLocationUpdate(
+  bus,
+  previousLocation,
+  providerLocation,
+  now,
+  staleThresholdMs,
+) {
+  const io = require("../socket").getIO();
+  if (!io) return;
+
+  const rooms = getLocationPublicationRooms(bus);
+  let broadcaster = io;
+  for (const room of rooms) broadcaster = broadcaster.to(room);
+  const locationVersion =
+    previousLocation?.locationVersion == null
+      ? "0"
+      : String(previousLocation.locationVersion);
+  broadcaster.emit("locationUpdate", {
+    previewNumber: bus.preview_number ?? null,
+    latitude: providerLocation.latitude,
+    longitude: providerLocation.longitude,
+    speed: providerLocation.speed ?? 0,
+    status: "online",
+    source: previousLocation?.source || "gps",
+    is_online: true,
+    lastSuccessfulGpsUpdate: now,
+    lastUpdated: now,
+    providerTimestamp: new Date(providerLocation.providerTimestamp),
+    locationVersion,
+    gpsOfflineThresholdMs: staleThresholdMs,
+    eventId: `${String(bus._id)}:${locationVersion}:${new Date(
+      providerLocation.providerTimestamp,
+    ).getTime()}`,
+  });
+}
+
 function isProviderTimestampNewerExpression(providerTimestamp) {
   const providerTimestampType = { $type: "$providerTimestamp" };
   return {
@@ -893,6 +954,46 @@ class GpsSyncWorker {
               lastUpdated: now,
               ...(providerTimestamp ? { providerTimestamp } : {}),
             };
+            updateGpsReadCache(busId, bus, previousLocation, update);
+            if (process.env.NODE_ENV !== "test") {
+              const previousProviderTimestamp =
+                previousLocation?.providerTimestamp == null
+                  ? NaN
+                  : new Date(previousLocation.providerTimestamp).getTime();
+              const previousStateWasStale =
+                previousLocation?.is_online !== true ||
+                !Number.isFinite(previousProviderTimestamp) ||
+                now.getTime() - previousProviderTimestamp >
+                  this.staleThresholdMs ||
+                now.getTime() - previousProviderTimestamp < -5 * 60 * 1000;
+              const elapsedSincePersistedWrite =
+                previousLocation?.lastSuccessfulGpsUpdate == null
+                  ? NaN
+                  : now.getTime() -
+                    new Date(
+                      previousLocation.lastSuccessfulGpsUpdate,
+                    ).getTime();
+              const movedMeters = previousLocation
+                ? distanceMeters(previousLocation, providerLocation)
+                : Infinity;
+              const canThrottle =
+                !previousStateWasStale &&
+                Number.isFinite(movedMeters) &&
+                movedMeters < 15 &&
+                Number.isFinite(elapsedSincePersistedWrite) &&
+                elapsedSincePersistedWrite >= 0 &&
+                elapsedSincePersistedWrite < 60_000;
+              if (canThrottle) {
+                publishUnpersistedLocationUpdate(
+                  bus,
+                  previousLocation,
+                  providerLocation,
+                  now,
+                  this.staleThresholdMs,
+                );
+                continue;
+              }
+            }
             const newerTimestampFilter =
               isProviderTimestampNewerExpression(providerTimestamp);
             metrics.acceptedProviderUpdates++;

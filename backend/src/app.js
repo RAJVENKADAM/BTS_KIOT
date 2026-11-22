@@ -8,6 +8,7 @@ function createApplication({
   const express = require("express");
   const cors = require("cors");
   const helmet = require("helmet");
+  const compression = require("compression");
   const { randomUUID } = require("node:crypto");
   const { performance } = require("node:perf_hooks");
   const { rateLimit, ipKeyGenerator } = require("express-rate-limit");
@@ -36,6 +37,16 @@ function createApplication({
   app.set("trust proxy", trustedProxy);
   app.disable("etag");
   app.use(helmet());
+  app.use(
+    compression({
+      threshold: 1024,
+      filter: (req, res) => {
+        const requestPath = req.originalUrl?.split("?")[0] || req.path;
+        if (/^\/socket\.io(?:\/|$)/.test(requestPath)) return false;
+        return compression.filter(req, res);
+      },
+    }),
+  );
 
   const corsOrigins = [
     ...String(env.CORS_ORIGIN || "")

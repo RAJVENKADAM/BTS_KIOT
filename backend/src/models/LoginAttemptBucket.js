@@ -27,6 +27,11 @@ const loginAttemptBucketSchema = new mongoose.Schema(
   },
 );
 
+loginAttemptBucketSchema.index(
+  { expiresAt: 1 },
+  { expireAfterSeconds: 0, name: "ttl_expires_at" },
+);
+
 module.exports = mongoose.model(
   "LoginAttemptBucket",
   loginAttemptBucketSchema,

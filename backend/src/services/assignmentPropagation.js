@@ -340,6 +340,12 @@ function createAssignmentPropagationWorker({
 
     if (notifications.length) {
       await notificationModel.bulkWrite(notifications, { ordered: false });
+      const {
+        invalidateNotificationUnreadCount,
+      } = require("../utils/readCache");
+      for (const userId of userIds) {
+        invalidateNotificationUnreadCount(userId);
+      }
     }
 
     const nextCursor = job.cursor + batch.length;

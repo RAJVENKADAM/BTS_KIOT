@@ -47,6 +47,14 @@ assignmentPropagationOutboxSchema.index({
   createdAt: 1,
 });
 assignmentPropagationOutboxSchema.index({ replay_of: 1, status: 1 });
+assignmentPropagationOutboxSchema.index(
+  { completed_at: 1 },
+  {
+    expireAfterSeconds: 2592000,
+    name: "completed_propagation_completed_at_ttl",
+    partialFilterExpression: { status: "completed" },
+  },
+);
 
 module.exports = mongoose.model(
   "AssignmentPropagationOutbox",

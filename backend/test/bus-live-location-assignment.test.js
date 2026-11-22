@@ -70,7 +70,8 @@ async function withModelMocks(mocks, run) {
     gpsWorkerOwnershipFindById: GpsWorkerOwnership.findById,
   };
 
-  AppSetting.findOne = mocks.appSettingFindOne;
+  AppSetting.findOne = (...args) =>
+    valueQuery(mocks.appSettingFindOne(...args));
   Bus.findOne = (...args) => valueQuery(mocks.busFindOne(...args));
   Bus.find = mocks.busFind || (() => emptyQuery());
   Bus.findById = mocks.busFindById || (async () => null);

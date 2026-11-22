@@ -26,6 +26,10 @@ const administrativeChangeAuditSchema = new mongoose.Schema(
 );
 
 administrativeChangeAuditSchema.index({ createdAt: -1, action: 1 });
+administrativeChangeAuditSchema.index(
+  { createdAt: 1 },
+  { expireAfterSeconds: 2592000, name: "administrative_audit_created_at_ttl" },
+);
 
 module.exports = mongoose.model(
   "AdministrativeChangeAudit",

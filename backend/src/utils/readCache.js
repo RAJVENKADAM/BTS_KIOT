@@ -43,6 +43,10 @@ const gpsLocationCache = createBoundedCache({
   ttlMs: 3_000,
   maxEntries: 2_000,
 });
+const notificationUnreadCountCache = createBoundedCache({
+  ttlMs: 15_000,
+  maxEntries: 5_000,
+});
 
 function gpsLocationCacheKey(busId, view = "full") {
   return `${String(busId)}:${view}`;
@@ -93,6 +97,14 @@ function invalidateBusReadCache() {
   busReadCache.clear();
 }
 
+function invalidateNotificationUnreadCount(userId) {
+  if (userId == null) {
+    notificationUnreadCountCache.clear();
+    return;
+  }
+  notificationUnreadCountCache.delete(String(userId));
+}
+
 function invalidateBusReadCacheOnMutation(req, res, next) {
   if (!["GET", "HEAD", "OPTIONS"].includes(req.method)) {
     res.once("finish", () => {
@@ -114,5 +126,7 @@ module.exports = {
   gpsLocationCache,
   invalidateBusReadCache,
   invalidateBusReadCacheOnMutation,
+  invalidateNotificationUnreadCount,
   isCacheEnabled,
+  notificationUnreadCountCache,
 };

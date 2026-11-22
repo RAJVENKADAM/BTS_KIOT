@@ -325,7 +325,9 @@ async function getCurrentGlobalPlan() {
     async () => {
       const setting = await AppSetting.findOne({
         key: GLOBAL_ACTIVE_PLAN_KEY,
-      }).lean();
+      })
+        .select("value")
+        .lean();
       const activePlan = normalizePlanName(setting?.value || "PLAN A");
       return DEFAULT_PLAN_NAMES.includes(activePlan) ? activePlan : "PLAN A";
     },
