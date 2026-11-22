@@ -11,6 +11,7 @@ const {
   runIdempotentMutation,
 } = require('../services/mutationIdempotency');
 const { updateUserWithRevision } = require('../services/userRevision');
+const { invalidateUserAuthCache } = require('../middleware/auth');
 const {
   preserveSuperadminAccess: checkSuperadminAccess,
 } = require('../services/superadminAccess');
@@ -256,6 +257,7 @@ async function deleteUsers(req, res, rawIds) {
       },
     });
     if (!result.duplicate) {
+      for (const id of ids) invalidateUserAuthCache(id);
       disconnectUserSockets(ids);
       await Notification.deleteMany({ user_id: { $in: ids } });
     }
@@ -423,6 +425,7 @@ async function updateUsersRole(req, res) {
       },
     });
     if (!result.duplicate && changedUserIds.length) {
+      for (const id of changedUserIds) invalidateUserAuthCache(id);
       disconnectUserSockets(changedUserIds);
     }
     return res.status(200).json({ ...result.response, duplicate: result.duplicate });
@@ -623,11 +626,14 @@ async function updateUser(req, res) {
       },
     });
 
-    if (!updated.duplicate && roleChanged) {
-      try {
-        disconnectUserSockets(id);
-      } catch (error) {
-        logSafeError('Could not immediately revoke the updated user session', error);
+    if (!updated.duplicate) {
+      invalidateUserAuthCache(id);
+      if (roleChanged) {
+        try {
+          disconnectUserSockets(id);
+        } catch (error) {
+          logSafeError('Could not immediately revoke the updated user session', error);
+        }
       }
     }
 

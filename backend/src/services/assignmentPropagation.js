@@ -6,7 +6,12 @@ const AdministrativeChangeAudit = require("../models/AdministrativeChangeAudit")
 const AssignmentPropagationOutbox = require("../models/AssignmentPropagationOutbox");
 const AssignmentPropagationReplay = require("../models/AssignmentPropagationReplay");
 const Notification = require("../models/Notification");
+const { invalidateUserAuthCache } = require("../middleware/auth");
 const {
+  invalidateBusReadCache,
+} = require("../utils/readCache");
+const {
+  invalidateStudentAssignmentCache,
   reconcileStudentSockets,
   resolveStudentAssignments,
 } = require("./studentBusAssignment");
@@ -166,6 +171,12 @@ async function recordAssignmentMutation({
     previousState,
     newState,
   });
+  invalidateBusReadCache();
+  invalidateStudentAssignmentCache();
+  for (const recipient of recipients) {
+    if (!recipient?.user_id) continue;
+    invalidateUserAuthCache(recipient.user_id);
+  }
   return mutationId;
 }
 

@@ -3,12 +3,23 @@ const BusController = require('../controllers/bus.controller');
 const PlanMappingController = require('../controllers/planMapping.controller');
 const AssignmentPropagationController = require('../controllers/assignmentPropagation.controller');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth');
+const { busReadCache, cacheResponse } = require('../utils/readCache');
 const {
   parseBusRoutesWorkbookUpload,
   uploadBusRoutesWorkbook,
 } = require("../middleware/spreadsheetImport");
 
 const router = express.Router();
+const cacheBusRead = cacheResponse(
+  busReadCache,
+  (req) => `${req.user?.id || "anonymous"}:${req.user?.role || ""}:${req.originalUrl}`,
+);
+const cacheAdminBusRoutes = (req, res, next) => {
+  if (String(req.user?.role || "").toLowerCase() === "student") {
+    return next();
+  }
+  return cacheBusRead(req, res, next);
+};
 
 router.get(
   '/assignment-propagation-jobs',
@@ -28,6 +39,7 @@ router.get(
   '/plan-mappings',
   authenticateToken,
   authorizeRoles('superadmin'),
+  cacheBusRead,
   PlanMappingController.getPlanMappingData,
 );
 
@@ -100,6 +112,7 @@ router.put(
 router.get(
   '/global-plan',
   authenticateToken,
+  cacheBusRead,
   BusController.getGlobalActivePlan,
 );
 
@@ -159,6 +172,7 @@ router.get(
   '/routes/:busNo',
   authenticateToken,
   authorizeRoles('student', 'primary_admin', 'superadmin'),
+  cacheAdminBusRoutes,
   BusController.getBusRoutes
 );
 
@@ -211,6 +225,7 @@ router.get(
   '/get-all-buses',
   authenticateToken,
   authorizeRoles('primary_admin', 'superadmin'),
+  cacheBusRead,
   BusController.getAllBuses
 );
 

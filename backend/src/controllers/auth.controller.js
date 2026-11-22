@@ -4,7 +4,10 @@ const { runGpsConfigurationMutation } = require('../services/gpsConfigurationBar
 const { performance } = require('node:perf_hooks');
 const User = require('../models/User');
 const Bus = require('../models/Bus');
-const { extractBearerToken } = require('../middleware/auth');
+const {
+  extractBearerToken,
+  invalidateUserAuthCache,
+} = require('../middleware/auth');
 const { disconnectUserSockets } = require('../socket');
 const {
   runLimitedAuthOperation,
@@ -217,7 +220,7 @@ const login = async (req, res) => {
         role: user.role
       },
       process.env.JWT_SECRET,
-      { expiresIn: '24h' }
+      { expiresIn: process.env.JWT_EXPIRES_IN || '60d' }
     );
     timings.jwtSigningMs = elapsedMs(jwtStartedAt);
 
@@ -318,6 +321,7 @@ const getProfile = async (req, res) => {
 const logout = async (req, res) => {
   // In a stateless JWT system, logout is handled client-side
   // by removing the token from storage
+  invalidateUserAuthCache(req.user?.id);
   res.status(200).json({
     message: 'Logout successful'
   });
@@ -345,6 +349,7 @@ const deleteUserAccount = async (req, res) => {
       });
     }
 
+    invalidateUserAuthCache(userId);
     disconnectUserSockets(userId);
     res.status(200).json({
       message: 'Account deleted successfully. You will be logged out.'

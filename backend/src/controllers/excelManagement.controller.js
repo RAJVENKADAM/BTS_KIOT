@@ -14,6 +14,7 @@ const {
 const { buildUserRevisionFilter } = require('../services/userRevision');
 const { preserveSuperadminAccess } = require('../services/superadminAccess');
 const { disconnectUserSockets } = require('../socket');
+const { invalidateUserAuthCache } = require('../middleware/auth');
 
 // Get all Excel uploads for current user
 async function getAllExcelUploads(req, res) {
@@ -240,6 +241,7 @@ async function deleteExcelUpload(req, res) {
     });
 
     if (!mutation.duplicate && affectedUserIds.length) {
+      for (const userId of affectedUserIds) invalidateUserAuthCache(userId);
       try {
         disconnectUserSockets(affectedUserIds);
       } catch (error) {

@@ -345,6 +345,17 @@ function registerTrackSocketHandlers({
       });
       disconnected = true;
       pendingPreviewRooms.clear();
+      locationRequests = 0;
+      for (const room of [...socket.rooms]) {
+        if (room === socket.id) continue;
+        try {
+          Promise.resolve(socket.leave(room)).catch((error) =>
+            logSafeError("Socket room cleanup failed", error),
+          );
+        } catch (error) {
+          logSafeError("Socket room cleanup failed", error);
+        }
+      }
     });
   });
 }

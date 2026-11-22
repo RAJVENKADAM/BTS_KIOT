@@ -67,7 +67,7 @@ test("local integration is restricted to loopback and dedicated test database na
 
 test("MongoDB pool wait is bounded and pool settings are validated", () => {
   assert.deepEqual(getMongoConnectionOptions({}), {
-    maxPoolSize: 100,
+    maxPoolSize: 20,
     waitQueueTimeoutMS: 10_000,
   });
   assert.deepEqual(

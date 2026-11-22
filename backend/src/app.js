@@ -84,6 +84,7 @@ function createApplication({
     ? incrementSharedRateLimit
     : null;
   const getRateLimitKey = (req) => {
+    if (req.user?.id) return `user:${String(req.user.id)}`;
     const authorization = req.headers.authorization || "";
     const token = authorization.match(/^Bearer\s+(.+)$/i)?.[1];
     if (token && env.JWT_SECRET) {
@@ -189,6 +190,14 @@ function createApplication({
     });
   });
 
+  app.use(
+    "/api/bus",
+    require("./utils/readCache").invalidateBusReadCacheOnMutation,
+  );
+  app.use(
+    "/api/stops",
+    require("./utils/readCache").invalidateBusReadCacheOnMutation,
+  );
   app.use("/api/auth", require("./routes/auth.routes"));
   app.use("/api/notifications", require("./routes/notification.routes"));
   app.use("/api/organize", require("./routes/organize.routes"));

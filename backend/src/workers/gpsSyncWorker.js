@@ -8,6 +8,11 @@ const {
   captureSingleInstanceGpsConfigurationVersion,
   runSingleInstanceGpsPersistence,
 } = require("../services/gpsConfigurationBarrier");
+const {
+  gpsLocationCache,
+  gpsLocationCacheKey,
+  isCacheEnabled,
+} = require("../utils/readCache");
 
 const GPS_SYNC_INTERVAL_MS = 35_000;
 const DEFAULT_STALE_THRESHOLD_MS = 3 * 60 * 1000;
@@ -314,6 +319,49 @@ class GpsSyncWorker {
     const persistBatches = async () => {
       const recordCommitted = (operation) => {
         committed.push(operation);
+        if (
+          isCacheEnabled() &&
+          operation.model === this.BusLiveLocation &&
+          operation.filter?.bus_id != null
+        ) {
+          const increment = operation.update?.$inc?.locationVersion;
+          for (const view of ["full", "snapshot", "student"]) {
+            const cacheKey = gpsLocationCacheKey(
+              operation.filter.bus_id,
+              view,
+            );
+            const cachedEntry = gpsLocationCache.get(cacheKey);
+            const cachedLocation =
+              cachedEntry && typeof cachedEntry.then !== "function"
+                ? cachedEntry
+                : operation.previousLocation || {};
+            let locationVersion = cachedLocation.locationVersion;
+            if (increment != null && locationVersion != null) {
+              try {
+                locationVersion =
+                  BigInt(String(locationVersion)) + BigInt(String(increment));
+              } catch {
+                locationVersion = null;
+              }
+            } else if (increment != null && operation.options?.upsert) {
+              locationVersion = BigInt(String(increment));
+            }
+            gpsLocationCache.set(
+              cacheKey,
+              {
+                ...cachedLocation,
+                ...(operation.update?.$set || {}),
+                bus_id: operation.filter.bus_id,
+                ...(locationVersion != null ? { locationVersion } : {}),
+                updatedAt:
+                  operation.update?.$set?.lastUpdated ||
+                  operation.update?.$set?.lastSuccessfulGpsUpdate ||
+                  cachedLocation.updatedAt,
+              },
+              3_000,
+            );
+          }
+        }
         if (operation.providerAccepted) {
           this.lastSuccessfulGpsUpdate =
             operation.providerLastSuccessfulUpdate.toISOString();
@@ -918,6 +966,7 @@ class GpsSyncWorker {
                   providerLastSuccessfulUpdate: now,
                 }
               : {}),
+            previousLocation,
           });
         } catch (error) {
           if (error.gpsLeaseError) throw error;

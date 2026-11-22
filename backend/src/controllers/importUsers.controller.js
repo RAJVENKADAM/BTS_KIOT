@@ -10,6 +10,10 @@ const assignmentPropagation = require('../services/assignmentPropagation');
 const userRevision = require('../services/userRevision');
 const importLedger = require('../services/importLedger');
 const { disconnectUserSockets } = require('../socket');
+const {
+  clearUserAuthCache,
+  invalidateUserAuthCache,
+} = require('../middleware/auth');
 
 const IMPORT_PASSWORD_HASH_ROUNDS = 10;
 const IMPORT_BATCH_SIZE = 100;
@@ -337,6 +341,7 @@ async function persistBatch(rows, state) {
     for (const index of indexes) {
       const item = operationRows[index];
       if (!item) continue;
+      invalidateUserAuthCache(item.existing?._id || item.newUserId);
       if (!item.existing) {
         await assignmentPropagation.recordAssignmentMutation({
           session,
@@ -1067,6 +1072,9 @@ async function importUsers(req, res) {
 
   const hasCommittedRows =
     summary.insertedRows + summary.updatedRows + summary.unchangedRows > 0;
+  if (summary.insertedRows + summary.updatedRows > 0) {
+    clearUserAuthCache();
+  }
   const response = {
     success: hasCommittedRows || finalized?.status === 'processing',
     status: finalized?.status || 'processing',

@@ -189,7 +189,7 @@ test('successful login returns the established token and user shape', async () =
   assert.equal(response.body.user.role, 'student');
   const payload = jwt.verify(response.body.token, process.env.JWT_SECRET);
   assert.equal(payload.id, `id-${email}`);
-  assert.equal(payload.exp - payload.iat, 24 * 60 * 60);
+  assert.equal(payload.exp - payload.iat, 60 * 24 * 60 * 60);
 });
 
 test('login timing diagnostics include stages without credentials or personal data', async () => {

@@ -26,6 +26,7 @@ function createRuntimeFixture({
   configureSocketCluster,
 } = {}) {
   const operations = [];
+  let socketOptions;
   const server = {
     listening: false,
     once() {},
@@ -64,8 +65,9 @@ function createRuntimeFixture({
         operations.push("construct-http-server");
         return server;
       },
-      createSocketServer: () => {
+      createSocketServer: (_server, options) => {
         operations.push("construct-socket");
+        socketOptions = options;
         return io;
       },
       createSocketAuthentication: () => () => {},
@@ -109,7 +111,7 @@ function createRuntimeFixture({
       },
     },
   });
-  return { operations, runtime, server };
+  return { operations, runtime, server, getSocketOptions: () => socketOptions };
 }
 
 test("runtime explicitly constructs and starts services in dependency order", async () => {
@@ -132,6 +134,8 @@ test("runtime explicitly constructs and starts services in dependency order", as
       "start-workers",
     ]);
     assert.equal(fixture.server.listening, true);
+    assert.equal(fixture.getSocketOptions().perMessageDeflate, false);
+    assert.equal(fixture.getSocketOptions().maxHttpBufferSize, 1e5);
     await fixture.runtime.shutdown("TEST");
   });
 });

@@ -7,6 +7,14 @@ const GpsWorkerOwnership = require("../models/GpsWorkerOwnership");
 const PlanMapping = require("../models/PlanMapping");
 const User = require("../models/User");
 const {
+  busReadCache,
+  createBoundedCache,
+  getOrLoad,
+  gpsLocationCache,
+  gpsLocationCacheKey,
+  isCacheEnabled,
+} = require("../utils/readCache");
+const {
   getRoutesForBus,
   loadBusReadContext,
 } = require("../utils/busReadContext");
@@ -17,6 +25,11 @@ const DEFAULT_PLAN_NAMES = new Set(["PLAN A", "PLAN B", "PLAN C", "PLAN D"]);
 const GPS_OFFLINE_THRESHOLD_MS =
   Number(process.env.GPS_OFFLINE_THRESHOLD_MS) || 3 * 60 * 1000;
 const MAX_REPLACEMENT_DEPTH = 20;
+const ASSIGNMENT_CACHE_TTL_MS = 60_000;
+const assignmentCoreCache = createBoundedCache({
+  ttlMs: ASSIGNMENT_CACHE_TTL_MS,
+  maxEntries: 2_000,
+});
 
 function normalizePlanName(value) {
   const plan = String(value || "PLAN A").trim().toUpperCase();
@@ -66,19 +79,26 @@ async function findBusByAssignment(busNumber) {
 }
 
 async function loadAssignmentConfig() {
-  const [setting, ownership] = await Promise.all([
-    AppSetting.findOne({ key: GLOBAL_ACTIVE_PLAN_KEY }).lean(),
-    GpsWorkerOwnership.findById("gps-worker")
-      .select("configVersion")
-      .lean(),
-  ]);
-  return {
-    activePlan: normalizePlanName(setting?.value),
-    assignmentVersion:
-      ownership?.configVersion == null
-        ? "0"
-        : String(ownership.configVersion),
-  };
+  return getOrLoad(
+    busReadCache,
+    "shared:assignment-config",
+    async () => {
+      const [setting, ownership] = await Promise.all([
+        AppSetting.findOne({ key: GLOBAL_ACTIVE_PLAN_KEY }).lean(),
+        GpsWorkerOwnership.findById("gps-worker")
+          .select("configVersion")
+          .lean(),
+      ]);
+      return {
+        activePlan: normalizePlanName(setting?.value),
+        assignmentVersion:
+          ownership?.configVersion == null
+            ? "0"
+            : String(ownership.configVersion),
+      };
+    },
+    ASSIGNMENT_CACHE_TTL_MS,
+  );
 }
 
 async function resolveBusAssignment(sourceBus, activePlan) {
@@ -238,17 +258,54 @@ async function resolveStudentAssignmentForUser(
     };
   }
 
-  const cacheKey = normalizeBusNumber(user.bus_no);
+  const cacheKey = [
+    normalizeBusNumber(user.bus_no),
+    activePlan,
+    assignmentVersion,
+    includeStops ? "stops" : "no-stops",
+  ].join(":");
   let core = coreCache?.get(cacheKey);
   if (!core) {
-    core = resolveBusAssignmentCore(user.bus_no, {
-      activePlan,
-      assignmentVersion,
-      includeStops,
-    });
+    core = isCacheEnabled()
+      ? getOrLoad(
+          assignmentCoreCache,
+          cacheKey,
+          () =>
+            resolveBusAssignmentCore(user.bus_no, {
+              activePlan,
+              assignmentVersion,
+              includeStops,
+            }),
+          ASSIGNMENT_CACHE_TTL_MS,
+        )
+      : resolveBusAssignmentCore(user.bus_no, {
+          activePlan,
+          assignmentVersion,
+          includeStops,
+        });
     coreCache?.set(cacheKey, core);
   }
-  const assignment = await core;
+  const resolvedCore = await core;
+  const location = resolvedCore.effectiveBus
+    ? await getOrLoad(
+        gpsLocationCache,
+        gpsLocationCacheKey(resolvedCore.effectiveBus._id, "student"),
+        () =>
+          BusLiveLocation.findOne({ bus_id: resolvedCore.effectiveBus._id })
+            .select(
+              "latitude longitude speed is_online source providerTimestamp lastSuccessfulGpsUpdate locationVersion updatedAt",
+            )
+            .lean(),
+        3_000,
+      )
+    : null;
+  const assignment = {
+    ...resolvedCore,
+    location,
+    locationStatus: resolvedCore.effectiveBus?.status === "active"
+      ? getLocationStatus(location)
+      : "unavailable",
+  };
   return {
     ...assignment,
     assignmentVersion,
@@ -310,22 +367,18 @@ async function resolveBusAssignmentCore(
     };
   }
 
-  const [location, context] = await Promise.all([
-    BusLiveLocation.findOne({ bus_id: effectiveBus._id })
-      .select(
-        "latitude longitude speed is_online source providerTimestamp lastSuccessfulGpsUpdate locationVersion updatedAt",
-      )
-      .lean(),
-    includeStops
+  const context = includeStops
       ? loadBusReadContext([
           sourceBus,
           mapping.routeBus,
           mapping.locationBus,
           effectiveBus,
         ])
-      : Promise.resolve(null),
-  ]);
-  const routes = context ? getRoutesForBus(context, mapping.routeBus) : [];
+      : null;
+  const loadedContext = await context;
+  const routes = loadedContext
+    ? getRoutesForBus(loadedContext, mapping.routeBus)
+    : [];
   const stops = routes
     .filter(
       (route) =>
@@ -346,11 +399,6 @@ async function resolveBusAssignmentCore(
     routeBus: mapping.routeBus,
     locationBus: mapping.locationBus,
     effectiveBus,
-    location,
-    locationStatus:
-      effectiveBus.status === "active"
-        ? getLocationStatus(location)
-        : "unavailable",
     stops,
     hasActiveRoute: stops.length > 0,
   };
@@ -388,6 +436,11 @@ async function resolveStudentAssignments(userIds, options = {}) {
       ]),
   );
   return new Map(assignments);
+}
+
+function invalidateStudentAssignmentCache() {
+  assignmentCoreCache.clear();
+  busReadCache.delete("shared:assignment-config");
 }
 
 async function reconcileStudentSockets(userIds) {
@@ -447,6 +500,7 @@ module.exports = {
   GPS_OFFLINE_THRESHOLD_MS,
   getLocationStatus,
   getPublicAssignmentSnapshot,
+  invalidateStudentAssignmentCache,
   reconcileStudentSockets,
   resolveStudentAssignment,
   resolveStudentAssignments,

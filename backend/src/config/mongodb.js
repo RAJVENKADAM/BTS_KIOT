@@ -25,7 +25,7 @@ function buildMongoURI(env = process.env) {
 function getMongoConnectionOptions(env = process.env) {
   const rawPoolSize = env.MONGODB_MAX_POOL_SIZE;
   const maxPoolSize = rawPoolSize === undefined || rawPoolSize === ""
-    ? 100
+    ? 20
     : Number(rawPoolSize);
   if (!Number.isSafeInteger(maxPoolSize) || maxPoolSize < 1 || maxPoolSize > 500) {
     throw new Error("MONGODB_MAX_POOL_SIZE must be an integer between 1 and 500.");

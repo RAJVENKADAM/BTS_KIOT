@@ -33,6 +33,12 @@ const {
 const { logSafeError } = require("../utils/safeErrorLog");
 const { recordAssignmentMutation } = require("../services/assignmentPropagation");
 const {
+  busReadCache,
+  getOrLoad,
+  gpsLocationCache,
+  gpsLocationCacheKey,
+} = require("../utils/readCache");
+const {
   checkIdempotentReplay,
   getMutationHeaders,
   runIdempotentMutation,
@@ -313,11 +319,30 @@ function getInactivePlanMessage(plan) {
 }
 
 async function getCurrentGlobalPlan() {
-  const setting = await AppSetting.findOne({
-    key: GLOBAL_ACTIVE_PLAN_KEY,
-  }).lean();
-  const activePlan = normalizePlanName(setting?.value || "PLAN A");
-  return DEFAULT_PLAN_NAMES.includes(activePlan) ? activePlan : "PLAN A";
+  return getOrLoad(
+    busReadCache,
+    "shared:global-active-plan",
+    async () => {
+      const setting = await AppSetting.findOne({
+        key: GLOBAL_ACTIVE_PLAN_KEY,
+      }).lean();
+      const activePlan = normalizePlanName(setting?.value || "PLAN A");
+      return DEFAULT_PLAN_NAMES.includes(activePlan) ? activePlan : "PLAN A";
+    },
+    60_000,
+  );
+}
+
+function getCachedGpsLocation(busId, view, fields) {
+  return getOrLoad(
+    gpsLocationCache,
+    gpsLocationCacheKey(busId, view),
+    () =>
+      BusLiveLocation.findOne({ bus_id: busId })
+        .select(fields)
+        .lean(),
+    3_000,
+  );
 }
 
 // ================= SHARED HELPERS =================
@@ -3242,11 +3267,11 @@ async function getLiveLocation(req, res) {
         }
       : buildAlterationDetails(bus, effectiveBus) ||
         buildReplacementDetails(bus, incomingChanges);
-    const location = await BusLiveLocation.findOne({ bus_id: effectiveBus._id })
-      .select(
-        "bus_id latitude longitude speed is_online lastSuccessfulGpsUpdate providerTimestamp locationVersion updatedAt source",
-      )
-      .lean();
+    const location = await getCachedGpsLocation(
+      effectiveBus._id,
+      "full",
+      "bus_id latitude longitude speed is_online lastSuccessfulGpsUpdate providerTimestamp locationVersion updatedAt source",
+    );
     const routes = getContextRoutesForBus(context, mappedBus);
     const routeSelectionLabel = await getRouteSelectionLabel(
       bus,
@@ -3410,11 +3435,11 @@ async function getGpsLocationSnapshot(req, res, busNo, normalizedBusNo) {
     locationBus = replacement;
   }
 
-  const location = await BusLiveLocation.findOne({ bus_id: locationBus._id })
-    .select(
-      "latitude longitude speed is_online lastSuccessfulGpsUpdate providerTimestamp locationVersion source",
-    )
-    .lean();
+  const location = await getCachedGpsLocation(
+    locationBus._id,
+    "snapshot",
+    "latitude longitude speed is_online lastSuccessfulGpsUpdate providerTimestamp locationVersion source",
+  );
   const threshold =
     Number(process.env.GPS_OFFLINE_THRESHOLD_MS) || 3 * 60 * 1000;
   const lastSuccessfulGpsUpdate = location?.lastSuccessfulGpsUpdate ?? null;
@@ -3539,11 +3564,11 @@ async function trackByPreview(req, res) {
         }
       : buildAlterationDetails(bus, effectiveBus) ||
         buildReplacementDetails(bus, incomingChanges);
-    const location = await BusLiveLocation.findOne({ bus_id: effectiveBus._id })
-      .select(
-        "bus_id latitude longitude speed is_online lastSuccessfulGpsUpdate providerTimestamp locationVersion updatedAt source",
-      )
-      .lean();
+    const location = await getCachedGpsLocation(
+      effectiveBus._id,
+      "full",
+      "bus_id latitude longitude speed is_online lastSuccessfulGpsUpdate providerTimestamp locationVersion updatedAt source",
+    );
     const routes = getContextRoutesForBus(context, mappedBus);
     const routeSelectionLabel = await getRouteSelectionLabel(
       bus,

@@ -90,6 +90,8 @@ function createRuntime({ env = process.env, port, host, dependencies = {} } = {}
     startupStage = "Socket.IO server construction";
     io = createSocketServer(server, {
       path: "/socket.io",
+      perMessageDeflate: false,
+      maxHttpBufferSize: 1e5,
       cors: {
         origin: [...new Set(corsOrigin)],
         methods: ["GET", "POST", "PUT", "DELETE"],
